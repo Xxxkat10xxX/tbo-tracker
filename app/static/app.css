@@ -178,3 +178,5 @@ details summary { cursor: pointer; color: var(--accent); }
   .g2, .g3 { grid-template-columns: 1fr; }
   .main { padding: 16px; }
 }
+.timeline li.k-entry::before { background: #8b5cf6; }
+select[multiple] { padding: 4px; }

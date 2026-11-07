@@ -1,4 +1,4 @@
-/* СОКОЛ · ТО по наработке — одностраничный интерфейс без сборки (vanilla JS). */
+/* tbo-tracker · ТО по наработке — одностраничный интерфейс без сборки (vanilla JS). */
 "use strict";
 
 // ------------------------------------------------------------------ утилиты
@@ -240,7 +240,9 @@ const routes = [
   [/^#\/aircraft$/, "aircraft", pageAircraftList],
   [/^#\/aircraft\/(\d+)$/, "aircraft", pageAircraft],
   [/^#\/components(?:\?.*)?$/, "components", pageComponents],
-  [/^#\/components\/(\d+)$/, "components", pageComponent],
+  [/^#\/components\/(\d+)(?:\?.*)?$/, "components", pageComponent],
+  [/^#\/generator$/, "generator", pageGenerator],
+  [/^#\/types$/, "types", pageTypes],
   [/^#\/imports$/, "imports", pageImports],
   [/^#\/maintenance$/, "maintenance", pageMaintenance],
   [/^#\/rules$/, "rules", pageRules],
@@ -322,7 +324,7 @@ async function pageAircraftList() {
 async function openAircraftCreate() {
   const m = await meta();
   modal("Новый борт", `
-    <div class="row2"><div class="field"><label>Серийный номер</label><input name="serial" placeholder="SK-M4-004"></div>
+    <div class="row2"><div class="field"><label>Серийный номер</label><input name="serial" placeholder="TBT-M4-004"></div>
     <div class="field"><label>Бортовое имя</label><input name="name" placeholder="Борт 04"></div></div>
     <div class="row2"><div class="field"><label>Тип</label><select name="type_id">${m.aircraft_types.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select></div>
     <div class="field"><label>Дата ввода в эксплуатацию</label><input type="datetime-local" name="in_service_at" value="${toLocalInput(new Date())}"></div></div>
@@ -388,7 +390,11 @@ async function pageAircraft(id) {
         <td class="nowrap">${fmtDT(i.installed_at)}</td><td class="nowrap">${i.removed_at ? fmtDT(i.removed_at) : '<span class="badge blue">установлен</span>'}</td>
         <td class="num">${hrs(i.hours)} · ${num(i.cycles, 0)} ц.</td><td class="small">${esc(i.install_reason || "")}${i.remove_reason ? `<br><span class="muted">снят: ${esc(i.remove_reason)}</span>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
     },
-    fl: () => { $("#tab").innerHTML = flightsTable(a.flight_log); },
+    fl: () => {
+      $("#tab").innerHTML = flightsTable(a.flight_log, { toolbar: '<button class="primary sm" id="add-fl">+ Записать полёт вручную</button><span class="small muted">Показаны последние 200 полётов</span>' });
+      $("#add-fl").onclick = () => openManualFlightModal({ aircraftId: a.id, onDone: reload });
+      bindFlightDeletes($("#tab"), null, reload);
+    },
   };
   $$("#tabs button").forEach((b) => b.addEventListener("click", () => {
     $$("#tabs button").forEach((x) => x.classList.toggle("active", x === b));
@@ -400,7 +406,7 @@ async function pageAircraft(id) {
 function slotHTML(s) {
   if (!s.component) {
     return `<div class="slot empty"><div class="pos"><span>${esc(s.label)}</span><span>${esc(s.position)}</span></div>
-      <div class="ser muted">Не установлен</div><div class="small" style="color:var(--bad)">Позиция пуста — борт некомплектен</div>
+      <div class="ser muted">Не установлен</div>${s.required === false ? '<div class="small muted">Необязательная позиция</div>' : '<div class="small" style="color:var(--bad)">Позиция пуста — борт некомплектен</div>'}
       <div class="actions"><button class="sm primary" data-act="install" data-pos="${esc(s.position)}">+ Установить</button></div></div>`;
   }
   const c = s.component;
@@ -438,11 +444,224 @@ function recordsTable(recs) {
     <td class="small">${esc(r.performed_by || "")}<div class="muted">${esc(r.result || "")}</div></td></tr>`).join("")}</tbody></table></div>`;
 }
 
-function flightsTable(fl) {
-  if (!fl.length) return '<div class="empty-state">Полётов нет</div>';
-  return `<div class="table-wrap"><table><thead><tr><th>Взлёт</th><th>Посадка</th><th>Борт</th><th class="num">Длительность</th><th class="num">Циклы</th><th>Задание</th><th>ID в журнале</th><th>Импорт</th></tr></thead><tbody>
-  ${fl.map((f) => `<tr><td class="nowrap">${fmtDT(f.started_at)}</td><td class="nowrap">${fmtDT(f.ended_at)}</td><td><a href="#/aircraft/${f.aircraft_id}">${esc(f.aircraft_name)}</a></td>
-    <td class="num">${num(f.duration_h * 60, 0)} мин</td><td class="num">${f.cycles}</td><td class="small">${esc(f.mission || "")}</td><td class="mono">${esc(f.external_id)}</td><td class="small">№${f.import_id ?? "—"}</td></tr>`).join("")}</tbody></table></div>`;
+function flightsTable(fl, opts = {}) {
+  const head = opts.toolbar ? `<div class="toolbar">${opts.toolbar}</div>` : "";
+  if (!fl.length) return head + '<div class="empty-state">Полётов нет</div>';
+  const src = (f) => f.source === "entry" ? '<span class="badge warn">вне борта</span>'
+    : f.manual ? '<span class="badge blue">ручной ввод</span>' : `<span class="small">журнал №${f.import_id ?? "—"}</span>`;
+  const del = (f) => f.source === "entry" ? `<button class="sm danger" data-del-entry="${f.id}" title="Удалить запись">✕</button>`
+    : f.manual ? `<button class="sm danger" data-del-flight="${f.id}" title="Удалить ручной полёт">✕</button>` : "";
+  return `${head}<div class="table-wrap"><table><thead><tr><th>Взлёт / начало</th><th>Посадка</th><th>Борт</th><th class="num">Длительность</th><th class="num">Циклы</th><th>Задание / примечание</th><th>ID в журнале</th><th>Источник</th><th></th></tr></thead><tbody>
+  ${fl.map((f) => `<tr><td class="nowrap">${fmtDT(f.started_at)}</td><td class="nowrap">${fmtDT(f.ended_at)}</td>
+    <td>${f.aircraft_id ? `<a href="#/aircraft/${f.aircraft_id}">${esc(f.aircraft_name)}</a>` : `<span class="muted">${esc(f.aircraft_name)}</span>`}</td>
+    <td class="num">${f.duration_h < 1 ? num(f.duration_h * 60, 0) + " мин" : num(f.duration_h, 2) + " ч"}</td><td class="num">${f.cycles}</td>
+    <td class="small">${esc(f.mission || "")}</td><td class="mono">${esc(f.external_id)}</td><td>${src(f)}</td><td>${del(f)}</td></tr>`).join("")}</tbody></table></div>`;
+}
+
+function bindFlightDeletes(root, componentId, after) {
+  $$("[data-del-flight]", root).forEach((b) => b.addEventListener("click", () => modal("Удаление ручного полёта",
+    "<p>Удалить полёт, записанный вручную? Наработка будет списана с борта и всех узлов, которым он был начислен.</p>", {
+      okText: "Удалить", onOk: async () => { const r = await api("DELETE", `/api/flights/${b.dataset.delFlight}`); toast(r.message); refreshNavCount(); after(); },
+    })));
+  $$("[data-del-entry]", root).forEach((b) => b.addEventListener("click", () => modal("Удаление записи",
+    "<p>Удалить запись внебортовой наработки узла?</p>", {
+      okText: "Удалить", onOk: async () => { const r = await api("DELETE", `/api/components/${componentId}/usage/${b.dataset.delEntry}`); toast(r.message); refreshNavCount(); after(); },
+    })));
+}
+
+async function openManualFlightModal({ aircraftId, component, onDone }) {
+  const fleet = await aircraftList(true);
+  const end = new Date(); end.setMinutes(0, 0, 0);
+  const start = new Date(end.getTime() - 30 * 60000);
+  const preset = aircraftId || (component && component.location ? component.location.aircraft_id : null);
+  const body = `
+    <div class="notice small">Полёт начисляется борту и <b>всем узлам, установленным на борт в момент взлёта</b> — так же, как при импорте журнала.
+      Действует та же защита от дублей и пересечений по времени.${component ? `<br>Внесение из карточки узла <b>${esc(component.serial)}</b>: система проверит, что узел стоял на выбранном борту в момент взлёта. Для стенда используйте «Наработка вне борта».` : ""}</div>
+    <div class="field"><label>Борт</label><select name="aircraft_id">${fleet.filter((a) => a.status !== "retired").map((a) => `<option value="${a.id}" ${a.id === preset ? "selected" : ""}>${esc(a.name)} · ${esc(a.serial)}</option>`).join("")}</select></div>
+    <div class="row2"><div class="field"><label>Взлёт</label><input type="datetime-local" name="start" value="${toLocalInput(start)}"></div>
+    <div class="field"><label>Посадка</label><input type="datetime-local" name="end" value="${toLocalInput(end)}"></div></div>
+    <div class="row3"><div class="field"><label>Циклы</label><input type="number" min="0" name="cycles" value="1"></div>
+    <div class="field"><label>ID полёта (необязательно)</label><input name="flight_id" placeholder="авто"></div>
+    <div class="field"><label>Пилот</label><input name="pilot"></div></div>
+    <div class="field"><label>Задание</label><input name="mission" placeholder="Напр.: облёт после ТО"></div>`;
+  modal("Записать полёт вручную", body, {
+    okText: "Записать полёт",
+    onOk: async (root) => {
+      const r = await POST("/api/flights", { aircraft_id: +val(root, "aircraft_id"), start: fromLocalInput(val(root, "start")), end: fromLocalInput(val(root, "end")),
+        cycles: parseInt(val(root, "cycles") || "1", 10), flight_id: orNull(val(root, "flight_id")), pilot: orNull(val(root, "pilot")),
+        mission: orNull(val(root, "mission")), component_id: component ? component.id : null });
+      toast(r.message);
+      ((r.summary && r.summary.alerts) || []).forEach((a) => toast(`Напоминание: ${a.entity.serial} — ${a.rule.name}: ${DUE[a.status][1]}`));
+      refreshNavCount();
+      onDone && onDone();
+    },
+  });
+}
+
+function openUsageEntryModal({ component, onDone }) {
+  const body = `
+    <div class="notice small">Наработка <b>вне борта</b> начисляется только узлу ${esc(component.serial)} (не борту и не другим узлам):
+      стендовые прогоны, испытания, перенос наработки из бумажного формуляра. Учитывается во всех регламентах узла.</div>
+    <div class="row2"><div class="field"><label>Вид</label><select name="kind"><option value="bench">Стендовый прогон</option><option value="test">Испытания / проверка</option>
+      <option value="correction">Корректировка по формуляру</option></select><div class="hint">Стенд и испытания нельзя записать на период, когда узел стоял на борту.</div></div>
+    <div class="field"><label>Дата и время</label><input type="datetime-local" name="started_at" value="${toLocalInput(new Date())}"></div></div>
+    <div class="row2"><div class="field"><label>Часы</label><input type="number" min="0" step="0.1" name="hours" value="1"></div>
+    <div class="field"><label>Циклы</label><input type="number" min="0" name="cycles" value="0"></div></div>
+    <div class="row2"><div class="field"><label>Примечание</label><input name="note" placeholder="Напр.: прогон после замены разъёма"></div>
+    <div class="field"><label>Исполнитель</label><input name="created_by"></div></div>`;
+  modal("Наработка узла вне борта", body, {
+    okText: "Записать",
+    onOk: async (root) => {
+      const r = await POST(`/api/components/${component.id}/usage`, { kind: val(root, "kind"), started_at: fromLocalInput(val(root, "started_at")),
+        hours: parseFloat(val(root, "hours") || "0"), cycles: parseInt(val(root, "cycles") || "0", 10), note: orNull(val(root, "note")), created_by: orNull(val(root, "created_by")) });
+      toast(r.message);
+      refreshNavCount();
+      onDone && onDone();
+    },
+  });
+}
+
+// ------------------------------------------------------------------ Генератор журналов
+async function pageGenerator() {
+  const fleet = await aircraftList(true);
+  const today = new Date();
+  const from = new Date(today.getTime() - 2 * 86400000);
+  const d = (x) => toLocalInput(x).slice(0, 10);
+  view().innerHTML = `<div class="page-head"><div><h1>Генератор журналов эксплуатации</h1>
+    <div class="sub">Создаёт реалистичные журналы в формате tbo-flightlog/1.0 (JSON или CSV) для проверки импорта и расчёта наработки.
+    Тот же модуль доступен из командной строки: <span class="mono">python -m app.loggen --help</span></div></div></div>
+    <div class="grid g2">
+      <div class="card"><h2>Параметры</h2>
+        <div class="field"><label>Борта (Ctrl/⌘ — несколько)</label><select name="aircraft" multiple size="${Math.min(6, fleet.length)}">
+          ${fleet.filter((a) => a.status !== "retired").map((a, i) => `<option value="${esc(a.serial)}" ${i === 0 ? "selected" : ""}>${esc(a.name)} · ${esc(a.serial)} (${esc(a.status_label)})</option>`).join("")}</select></div>
+        <div class="row3"><div class="field"><label>С даты</label><input type="date" name="from" value="${d(from)}"></div>
+          <div class="field"><label>По дату (включ.)</label><input type="date" name="to" value="${d(today)}"></div>
+          <div class="field"><label>Формат</label><select name="format"><option value="json">JSON</option><option value="csv">CSV</option></select></div></div>
+        <div class="row3"><div class="field"><label>Вероятность лётного дня</label><input type="number" name="prob" min="0" max="1" step="0.05" value="0.8"></div>
+          <div class="field"><label>Полётов в день: от</label><input type="number" name="fmin" min="0" max="20" value="1"></div>
+          <div class="field"><label>до</label><input type="number" name="fmax" min="0" max="20" value="4"></div></div>
+        <div class="row3"><div class="field"><label>Длительность, мин: от</label><input type="number" name="dmin" min="1" max="600" value="15"></div>
+          <div class="field"><label>до</label><input type="number" name="dmax" min="1" max="600" value="45"></div>
+          <div class="field"><label>Первый взлёт, час UTC</label><input type="number" name="hour" min="0" max="23" value="6"></div></div>
+        <div class="row3"><div class="field"><label>Вероятность 2 циклов</label><input type="number" name="tg" min="0" max="1" step="0.05" value="0.05"></div>
+          <div class="field"><label>Добавить дублей учтённых полётов</label><input type="number" name="dups" min="0" max="500" value="0"></div>
+          <div class="field"><label>Seed (повторяемость)</label><input type="number" name="seed" placeholder="случайно"></div></div>
+        <label><input type="checkbox" name="ids" style="width:auto" checked> Указывать flight_id</label>
+        <label><input type="checkbox" name="overlap" style="width:auto" checked> Не пересекаться с уже учтёнными полётами</label>
+        <label><input type="checkbox" name="errors" style="width:auto"> Добавить ошибочные строки (неизвестный борт, посадка раньше взлёта, будущее, битая дата)</label>
+        <div class="actions" style="margin-top:14px"><button id="gen">Сгенерировать</button><button id="dl" disabled>⇩ Скачать файл</button>
+          <button id="check" disabled>Проверить импорт (без записи)</button><button class="primary" id="imp" disabled>⇪ Импортировать</button></div>
+        <div class="hint">Полёты в будущем и до ввода борта в эксплуатацию не генерируются.</div></div>
+      <div class="card"><h2>Результат</h2><div id="gres" class="empty-state">Задайте параметры и нажмите «Сгенерировать»</div></div>
+    </div>
+    <div class="card" id="gimp" hidden></div>`;
+  let last = null;
+  const root = view();
+  const params = () => {
+    const g = (n) => $(`[name="${n}"]`, root);
+    const sel = Array.from(g("aircraft").selectedOptions).map((o) => o.value);
+    return { aircraft_serials: sel, date_from: g("from").value + "T00:00:00Z", date_to: g("to").value + "T00:00:00Z", format: g("format").value,
+      fly_probability: +g("prob").value, flights_min: +g("fmin").value, flights_max: +g("fmax").value, duration_min: +g("dmin").value,
+      duration_max: +g("dmax").value, first_takeoff_hour: +g("hour").value, touch_and_go_probability: +g("tg").value,
+      duplicates: +g("dups").value || 0, seed: g("seed").value ? +g("seed").value : null, with_ids: g("ids").checked,
+      avoid_overlap: g("overlap").checked, errors: g("errors").checked };
+  };
+  const showGen = (r) => {
+    last = r;
+    $("#dl").disabled = $("#check").disabled = $("#imp").disabled = false;
+    $("#gres").className = "";
+    $("#gres").innerHTML = `<div class="notice ok">Файл <b class="mono">${esc(r.filename)}</b>: строк ${r.stats.flights}, из них новых полётов ${r.stats.new_flights}
+      (${hrs(r.stats.hours_new)}), дублей ${r.stats.duplicates}, ошибочных ${r.stats.errors}.
+      ${r.notes.length ? `<ul>${r.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>` : ""}</div>
+      <details><summary>Содержимое файла</summary><pre class="mono" style="max-height:360px;overflow:auto;background:#f7f9fc;padding:10px;border-radius:8px">${esc(r.content.slice(0, 20000))}</pre></details>`;
+  };
+  $("#gen").onclick = async () => { try { showGen(await POST("/api/log-generator", params())); } catch (e) { toast(e.message, true); } };
+  $("#dl").onclick = () => {
+    const blob = new Blob([last.content], { type: last.format === "json" ? "application/json" : "text/csv" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = last.filename; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  };
+  const doImport = async (dry) => {
+    const fd = new FormData();
+    fd.append("file", new Blob([last.content], { type: "text/plain" }), last.filename);
+    fd.append("dry_run", dry ? "true" : "false");
+    fd.append("imported_by", "генератор журналов");
+    try {
+      const r = await api("POST", "/api/imports", fd, true);
+      const el = $("#gimp"); el.hidden = false; el.innerHTML = `<h2>${dry ? "Проверка импорта" : "Результат импорта"}</h2>${importResultHTML(r)}`;
+      el.scrollIntoView({ behavior: "smooth" });
+      if (!dry) refreshNavCount();
+    } catch (e) { toast(e.message, true); }
+  };
+  $("#check").onclick = () => doImport(true);
+  $("#imp").onclick = () => doImport(false);
+}
+
+// ------------------------------------------------------------------ Типы бортов и узлов
+async function pageTypes() {
+  META = null;
+  const m = await meta();
+  view().innerHTML = `<div class="page-head"><div><h1>Типы бортов и узлов</h1><div class="sub">Справочники: добавьте свои типы узлов (GNSS, АКБ, моторы, подвесы…) и посадочные места для них в типах БПЛА.
+    Затем — «Узлы и склад» → «+ Добавить узел» и регламенты в разделе «Регламенты».</div></div></div>
+    <div class="card"><div class="card-head"><h2>Типы узлов</h2><button class="primary sm" id="add-ct">+ Тип узла</button></div>
+      <table><thead><tr><th>Код</th><th>Название</th><th>Описание</th><th>Используется в позициях</th><th></th></tr></thead><tbody>
+      ${m.component_types.map((t) => {
+        const used = m.aircraft_types.map((a) => [a.code, a.slots.filter((s) => s.component_type === t.code).map((s) => s.position)])
+          .filter(([, ps]) => ps.length).map(([code, ps]) => `${code}: ${ps.join(", ")}`);
+        return `<tr><td class="mono">${esc(t.code)}</td><td><b>${esc(t.name)}</b></td><td class="small">${esc(t.description || "")}</td>
+          <td class="small">${used.length ? esc(used.join(", ")) : '<span style="color:var(--warn)">нет позиций — узлы этого типа некуда установить</span>'}</td>
+          <td class="nowrap"><button class="sm" data-ct-edit="${t.id}">Изменить</button> <button class="sm danger" data-ct-del="${t.id}">✕</button></td></tr>`;
+      }).join("")}</tbody></table></div>
+    <div class="card"><div class="card-head"><h2>Типы БПЛА и посадочные места</h2><button class="primary sm" id="add-at">+ Тип БПЛА</button></div>
+      ${m.aircraft_types.map((a) => `<div class="card flat"><div class="card-head"><h3 style="margin:0">${esc(a.name)} <span class="mono muted small">${esc(a.code)}</span></h3>
+        <div class="actions"><button class="sm" data-at-edit="${a.id}">Изменить позиции</button><button class="sm danger" data-at-del="${a.id}">✕</button></div></div>
+        <div class="chips">${a.slots.map((s) => `<span class="badge ${s.required === false ? "" : "blue"}">${esc(s.position)} · ${esc(s.label)}${s.required === false ? " · необязат." : ""}</span>`).join("")}</div></div>`).join("")}</div>`;
+  const ctForm = (t = {}) => `<div class="row2"><div class="field"><label>Код (латиница, без пробелов)</label><input name="code" value="${esc(t.code || "")}" ${t.id ? "disabled" : ""} placeholder="gnss"></div>
+    <div class="field"><label>Название</label><input name="name" value="${esc(t.name || "")}" placeholder="GNSS-приёмник"></div></div>
+    <div class="field"><label>Описание</label><input name="description" value="${esc(t.description || "")}"></div>`;
+  const openCt = (t) => modal(t ? "Изменение типа узла" : "Новый тип узла", ctForm(t || {}), {
+    onOk: async (root) => {
+      const body = { code: t ? t.code : val(root, "code"), name: val(root, "name"), description: orNull(val(root, "description")) };
+      const r = await api(t ? "PUT" : "POST", t ? `/api/component-types/${t.id}` : "/api/component-types", body);
+      toast(r.message); pageTypes();
+    },
+  });
+  const slotRow = (s = {}) => `<tr><td><input name="position" value="${esc(s.position || "")}" placeholder="GNSS"></td><td><input name="label" value="${esc(s.label || "")}" placeholder="GNSS-приёмник"></td>
+    <td><select name="ctype">${m.component_types.map((c) => `<option value="${esc(c.code)}" ${c.code === s.component_type ? "selected" : ""}>${esc(c.name)}</option>`).join("")}</select></td>
+    <td style="text-align:center"><input type="checkbox" name="required" style="width:auto" ${s.required === false ? "" : "checked"}></td>
+    <td><button class="sm danger" data-rm>✕</button></td></tr>`;
+  const openAt = (a) => {
+    const bg = modal(a ? `Тип БПЛА: ${a.name}` : "Новый тип БПЛА", `
+      <div class="row3"><div class="field"><label>Код</label><input name="code" value="${esc(a ? a.code : "")}" ${a ? "disabled" : ""} placeholder="TBT-H6"></div>
+      <div class="field"><label>Название</label><input name="name" value="${esc(a ? a.name : "")}" placeholder="TBT-H6 (гексакоптер)"></div>
+      <div class="field"><label>Категория</label><select name="category">${["multirotor", "vtol", "fixed-wing", "helicopter", "ground"].map((c) => `<option ${a && a.category === c ? "selected" : ""}>${c}</option>`).join("")}</select></div></div>
+      <div class="field"><label>Производитель</label><input name="manufacturer" value="${esc(a ? a.manufacturer || "" : "")}"></div>
+      <h3>Посадочные места</h3><table><thead><tr><th>Позиция</th><th>Название</th><th>Тип узла</th><th title="Без узла в обязательной позиции борт не допускается к полётам">Обязат.</th><th></th></tr></thead><tbody id="slots">${(a ? a.slots : [{}]).map(slotRow).join("")}</tbody></table>
+      <button class="sm" id="add-slot" style="margin-top:8px">+ Позиция</button>
+      <div class="hint">Нельзя удалить позицию или сменить её тип, пока в ней на каком-либо борту стоит узел.</div>`, {
+      wide: true,
+      onOk: async (root) => {
+        const slots = $$("#slots tr", root).map((tr) => ({ position: $('[name="position"]', tr).value.trim(), label: $('[name="label"]', tr).value.trim(), component_type: $('[name="ctype"]', tr).value, required: $('[name="required"]', tr).checked }))
+          .filter((s) => s.position);
+        const body = { code: a ? a.code : val(root, "code"), name: val(root, "name"), category: val(root, "category"), manufacturer: orNull(val(root, "manufacturer")), slots };
+        const r = await api(a ? "PUT" : "POST", a ? `/api/aircraft-types/${a.id}` : "/api/aircraft-types", body);
+        toast(r.message); pageTypes();
+      },
+    });
+    const bindRm = () => $$("[data-rm]", bg).forEach((b) => { b.onclick = () => b.closest("tr").remove(); });
+    $("#add-slot", bg).onclick = () => { $("#slots", bg).insertAdjacentHTML("beforeend", slotRow()); bindRm(); };
+    bindRm();
+  };
+  $("#add-ct").onclick = () => openCt(null);
+  $("#add-at").onclick = () => openAt(null);
+  $$("[data-ct-edit]").forEach((b) => b.addEventListener("click", () => openCt(m.component_types.find((t) => t.id === +b.dataset.ctEdit))));
+  $$("[data-at-edit]").forEach((b) => b.addEventListener("click", () => openAt(m.aircraft_types.find((t) => t.id === +b.dataset.atEdit))));
+  const del = (url) => modal("Удаление", "<p>Удалить тип? Это возможно, только если он нигде не используется.</p>", {
+    okText: "Удалить", onOk: async () => { const r = await api("DELETE", url); toast(r.message); pageTypes(); },
+  });
+  $$("[data-ct-del]").forEach((b) => b.addEventListener("click", () => del(`/api/component-types/${b.dataset.ctDel}`)));
+  $$("[data-at-del]").forEach((b) => b.addEventListener("click", () => del(`/api/aircraft-types/${b.dataset.atDel}`)));
 }
 
 // ------------------------------------------------------------------ Узлы
@@ -486,7 +705,7 @@ async function openComponentCreate() {
     <div class="field"><label>Тип</label><select name="type_id">${m.component_types.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select></div></div>
     <div class="row3"><div class="field"><label>Модель</label><input name="model"></div><div class="field"><label>Децимальный номер</label><input name="part_number"></div>
     <div class="field"><label>Версия ПО</label><input name="firmware"></div></div>
-    <div class="row2"><div class="field"><label>Производитель</label><input name="manufacturer" value="ООО «СПУТНИК-РЕД» (КБ «СОКОЛ»)"></div>
+    <div class="row2"><div class="field"><label>Производитель</label><input name="manufacturer" value="tbo-tracker (демо)"></div>
     <div class="field"><label>Дата постановки на учёт</label><input type="datetime-local" name="in_service_at" value="${toLocalInput(new Date())}"></div></div>
     <div class="row2"><div class="field"><label>Наработка до постановки на учёт, ч</label><input type="number" min="0" step="0.1" name="initial_hours" value="0">
       <div class="hint">Стендовые испытания, эксплуатация в другом парке (по формуляру)</div></div>
@@ -533,12 +752,22 @@ async function pageComponent(id) {
         <tr><td colspan="2"><b>Итого сквозная наработка</b></td><td class="num"><b>${hrs(c.hours)}</b></td></tr></tbody></table>` : '<div class="empty-state">Узел ещё не устанавливался</div>'}</div>
       <div class="card"><h2>Хронология жизни узла</h2><ul class="timeline">${c.timeline.map((e) => `<li class="k-${e.kind}"><div class="t">${fmtDT(e.at)}</div><div>${esc(e.title)}</div>${e.details ? `<div class="small muted">${esc(e.details)}</div>` : ""}</li>`).join("")}</ul></div>
     </div>
-    <div class="card"><div class="tabs" id="tabs"><button class="active" data-t="rec">История обслуживания (${c.maintenance_records.length})</button><button data-t="fl">Начисленные полёты (${c.flight_log.length}${c.flight_log.length >= 200 ? "+" : ""})</button></div><div id="tab"></div></div>`;
+    <div class="card"><div class="tabs" id="tabs"><button class="active" data-t="rec">История обслуживания (${c.maintenance_records.length})</button><button data-t="fl">Начисленные полёты и наработка (${c.flight_log.length})</button></div><div id="tab"></div></div>`;
   $("#due").innerHTML = dueTable(c.due, { noEntity: true, empty: "Для типа узла не задано регламентов" });
   bindDueActions($("#due"), c.due, reload);
-  const tabs = { rec: () => { $("#tab").innerHTML = recordsTable(c.maintenance_records); }, fl: () => { $("#tab").innerHTML = flightsTable(c.flight_log); } };
-  $$("#tabs button").forEach((b) => b.addEventListener("click", () => { $$("#tabs button").forEach((x) => x.classList.toggle("active", x === b)); tabs[b.dataset.t](); }));
-  tabs.rec();
+  const back = () => { const h = `#/components/${c.id}?tab=fl`; if (location.hash === h) reload(); else location.hash = h; };
+  const tabs = {
+    rec: () => { $("#tab").innerHTML = recordsTable(c.maintenance_records); },
+    fl: () => {
+      $("#tab").innerHTML = flightsTable(c.flight_log, { toolbar: '<button class="primary sm" id="add-fl">+ Записать полёт</button><button class="sm" id="add-entry">+ Наработка вне борта (стенд, формуляр)</button>' });
+      $("#add-fl").onclick = () => openManualFlightModal({ component: c, onDone: back });
+      $("#add-entry").onclick = () => openUsageEntryModal({ component: c, onDone: back });
+      bindFlightDeletes($("#tab"), c.id, back);
+    },
+  };
+  const pick = (k) => { $$("#tabs button").forEach((x) => x.classList.toggle("active", x.dataset.t === k)); tabs[k](); };
+  $$("#tabs button").forEach((b) => b.addEventListener("click", () => pick(b.dataset.t)));
+  pick(new URLSearchParams(location.hash.split("?")[1] || "").get("tab") === "fl" ? "fl" : "rec");
   $$("#acts [data-a]").forEach((b) => b.addEventListener("click", async () => {
     const a = b.dataset.a;
     if (a === "transfer") openInstallModal({ component: c, mode: "transfer", onDone: reload });
@@ -591,7 +820,7 @@ async function pageImports() {
     <div class="grid g2">
       <div class="card"><h2>Загрузить файл</h2>
         <div class="drop" id="drop"><div style="font-size:26px">⇪</div><div><b>Перетащите файл журнала</b> или нажмите для выбора</div>
-          <div class="small muted">JSON «sokol-flightlog/1.0» или CSV · до 20 МБ</div><input type="file" id="file" accept=".json,.csv,.txt" hidden></div>
+          <div class="small muted">JSON «tbo-flightlog/1.0» или CSV · до 20 МБ</div><input type="file" id="file" accept=".json,.csv,.txt" hidden></div>
         <div id="fname" class="small" style="margin:8px 0"></div>
         <div class="actions"><button id="check" disabled>Проверить без записи</button><button class="primary" id="go" disabled>Импортировать</button></div>
         <div class="hint">Защита от двойного начисления: повторная загрузка того же файла (SHA-256) и полёты, уже учтённые из других выгрузок (по ID и пересечению по времени), не начисляются.</div></div>
@@ -798,25 +1027,25 @@ async function pageScenarios() {
     <button id="reset2">↺ Сбросить демо-данные</button></div>
     <div class="notice small">Рекомендуемый порядок: 1 → 2 → 3 → 4 → 5. Сценарии меняют данные; для повторного прогона нажмите «Сбросить демо-данные».</div>
     ${scenarioCard(1, "Расчёт наработки по журналу эксплуатации", `
-      <li>Откройте ${link("SK-M4-001")} и запомните налёт борта и наработку узлов в блоке «Конфигурация борта».</li>
-      <li>Раздел <a href="#/imports">Импорт журналов</a> → демо-журнал «Журнал смены «Борт 01»» (<span class="mono">01_SK-M4-001_smena.json</span>) → «Импорт».</li>
+      <li>Откройте ${link("TBT-M4-001")} и запомните налёт борта и наработку узлов в блоке «Конфигурация борта».</li>
+      <li>Раздел <a href="#/imports">Импорт журналов</a> → демо-журнал «Журнал смены «Борт 01»» (<span class="mono">01_TBT-M4-001_smena.json</span>) → «Импорт».</li>
       <li>Ожидается: +3,52 ч и +8 циклов у борта и у каждого из 7 установленных узлов; в отчёте — сработавшие напоминания.</li>`)}
     ${scenarioCard(2, "Замена и перестановка узла между бортами", `
       <li>Откройте узел ${link("FC7-0102")} (полётный контроллер на «Борт 02», сквозная наработка ~134 ч, до ТО ~4 ч).</li>
-      <li>«Переставить на другой борт» → ${link("SK-M4-003")}, позиция FC (пустует — свой ПК в ремонте). <b>Дата операции: ${fmtD(d2.toISOString())}</b> (позавчера) — полёты журнала выполнены вчера, после перестановки.</li>
-      <li>На карточке «Борт 03» смените статус на «В эксплуатации» и импортируйте демо-журнал <span class="mono">02_SK-M4-003_posle_perestanovki.csv</span>.</li>
+      <li>«Переставить на другой борт» → ${link("TBT-M4-003")}, позиция FC (пустует — свой ПК в ремонте). <b>Дата операции: ${fmtD(d2.toISOString())}</b> (позавчера) — полёты журнала выполнены вчера, после перестановки.</li>
+      <li>На карточке «Борт 03» смените статус на «В эксплуатации» и импортируйте демо-журнал <span class="mono">02_TBT-M4-003_posle_perestanovki.csv</span>.</li>
       <li>Ожидается: наработка узла = прежняя + 4,85 ч; в «Бортах в истории узла» — оба борта; межсервисный интервал не обнулился → ТО ПК «Требуется».</li>`)}
     ${scenarioCard(3, "Повторный импорт одного журнала", `
-      <li>Повторно импортируйте <span class="mono">01_SK-M4-001_smena.json</span> или его копию <span class="mono">03_SK-M4-001_smena_POVTOR.json</span> → «Повтор — не начислено», счётчики не меняются.</li>
-      <li>Импортируйте <span class="mono">04_SK-M4-001_bortovoi_registrator.csv</span> — другая выгрузка тех же 8 полётов (без ID) + 2 новых: начисляются только 2 новых.</li>
+      <li>Повторно импортируйте <span class="mono">01_TBT-M4-001_smena.json</span> или его копию <span class="mono">03_TBT-M4-001_smena_POVTOR.json</span> → «Повтор — не начислено», счётчики не меняются.</li>
+      <li>Импортируйте <span class="mono">04_TBT-M4-001_bortovoi_registrator.csv</span> — другая выгрузка тех же 8 полётов (без ID) + 2 новых: начисляются только 2 новых.</li>
       <li>Ошибочный импорт можно отменить кнопкой «Отменить» в журнале импортов.</li>`)}
     ${scenarioCard(4, "Срабатывание напоминаний по часам, циклам и календарю", `
       <li><b>Часы:</b> ${link("IMU3-0206")} — калибровка ИНС каждые 50 ч: до сценария 1 «Приближается», после — «Требуется».</li>
       <li><b>Циклы:</b> ${link("ESC40-0301")} — диагностика ESC каждые 200 циклов: 195 → 203 после сценария 1.</li>
-      <li><b>Календарь:</b> ${link("SK-VT2-011")} — годовое ТО (180 дн.) через ~9 дней; ${link("BVK2-0405")} — ТО вычислителя (120 дн.) просрочено.</li>
+      <li><b>Календарь:</b> ${link("TBT-VT2-011")} — годовое ТО (180 дн.) через ~9 дней; ${link("BVK2-0405")} — ТО вычислителя (120 дн.) просрочено.</li>
       <li><b>Назначенный ресурс:</b> ${link("ESC40-0318")} — 372 из 400 ч. Всё видно в разделе <a href="#/maintenance">ТО и напоминания</a>.</li>`)}
     ${scenarioCard(5, "Проведение обслуживания по напоминанию", `
-      <li>В <a href="#/maintenance">ТО и напоминания</a> найдите «ТО бортового вычислителя» для ${link("BVK2-0405")} (${link("SK-VT2-012")}) → «Выполнить».</li>
+      <li>В <a href="#/maintenance">ТО и напоминания</a> найдите «ТО бортового вычислителя» для ${link("BVK2-0405")} (${link("TBT-VT2-012")}) → «Выполнить».</li>
       <li>Ожидается: напоминание уходит в «В норме», интервал отсчитывается от даты работы, сквозная наработка узла не изменилась, «Борт 12» снова допущен к полётам.</li>
       <li>Аналогично можно выполнить калибровку ${link("IMU3-0206")} после сценария 1.</li>`)}`;
   $("#reset2").onclick = resetDemo;
@@ -859,9 +1088,9 @@ async function snapshotAircraft(id) {
 const mergeSnap = (b, a) => b.map((r) => ({ label: r.label, before: r.v, after: (a.find((x) => x.key === r.key) || r).v }));
 
 async function runS1() {
-  const ac = await bySerial("SK-M4-001", "aircraft");
+  const ac = await bySerial("TBT-M4-001", "aircraft");
   const before = await snapshotAircraft(ac.id);
-  const r = await POST("/api/demo-logs/01_SK-M4-001_smena.json/import");
+  const r = await POST("/api/demo-logs/01_TBT-M4-001_smena.json/import");
   const after = await snapshotAircraft(ac.id);
   return `${importResultHTML(r).split("<h3>")[0]}${diffTable(mergeSnap(before, after))}
     ${r.summary && r.summary.alerts && r.summary.alerts.length ? `<h3 style="margin-top:12px">Сработавшие напоминания</h3>${r.summary.alerts.map((a) => `<div>${esc(a.entity.serial)} — ${esc(a.rule.name)}: ${a.previous_status ? dueBadge(a.previous_status) + " → " : ""}${dueBadge(a.status)}</div>`).join("")}` : ""}
@@ -870,7 +1099,7 @@ async function runS1() {
 
 async function runS2() {
   const fc = await GET(`/api/components/${(await bySerial("FC7-0102")).id}`);
-  const a3 = await bySerial("SK-M4-003", "aircraft");
+  const a3 = await bySerial("TBT-M4-003", "aircraft");
   const before = { hours: fc.hours, cycles: fc.cycles };
   const fcDueBefore = fc.due.find((i) => i.rule.code === "FC-CHK");
   let out = "";
@@ -882,7 +1111,7 @@ async function runS2() {
   }
   await api("PATCH", `/api/aircraft/${a3.id}`, { status: "active" });
   const mid = await GET(`/api/components/${fc.id}`);
-  const imp = await POST("/api/demo-logs/02_SK-M4-003_posle_perestanovki.csv/import");
+  const imp = await POST("/api/demo-logs/02_TBT-M4-003_posle_perestanovki.csv/import");
   const after = await GET(`/api/components/${fc.id}`);
   const fcDueAfter = after.due.find((i) => i.rule.code === "FC-CHK");
   return `${out}${importResultHTML(imp).split("<h3>")[0]}
@@ -895,8 +1124,8 @@ async function runS2() {
 }
 
 async function runS3() {
-  const ac = await bySerial("SK-M4-001", "aircraft");
-  const steps = [["01_SK-M4-001_smena.json", "Тот же файл ещё раз"], ["03_SK-M4-001_smena_POVTOR.json", "Копия под другим именем"], ["04_SK-M4-001_bortovoi_registrator.csv", "Другая выгрузка тех же полётов + 2 новых"]];
+  const ac = await bySerial("TBT-M4-001", "aircraft");
+  const steps = [["01_TBT-M4-001_smena.json", "Тот же файл ещё раз"], ["03_TBT-M4-001_smena_POVTOR.json", "Копия под другим именем"], ["04_TBT-M4-001_bortovoi_registrator.csv", "Другая выгрузка тех же полётов + 2 новых"]];
   let html = "<table><thead><tr><th>Загрузка</th><th>Результат</th><th class='num'>Новых / дубл.</th><th class='num'>Налёт борта до → после</th></tr></thead><tbody>";
   for (const [file, title] of steps) {
     const b = (await GET(`/api/aircraft/${ac.id}`)).hours;
@@ -910,7 +1139,7 @@ async function runS3() {
 
 async function runS4() {
   const items = await GET("/api/maintenance/due?status=");
-  const watch = [["IMU3-0206", "IMU-CAL", "часы"], ["ESC40-0301", "ESC-DIAG", "циклы"], ["SK-VT2-011", "AC-ANNUAL", "календарь"], ["BVK2-0405", "BVK-SVC", "календарь"], ["ESC40-0318", "ESC-LIFE", "назначенный ресурс"], ["FC7-0102", "FC-CHK", "часы (после перестановки)"]];
+  const watch = [["IMU3-0206", "IMU-CAL", "часы"], ["ESC40-0301", "ESC-DIAG", "циклы"], ["TBT-VT2-011", "AC-ANNUAL", "календарь"], ["BVK2-0405", "BVK-SVC", "календарь"], ["ESC40-0318", "ESC-LIFE", "назначенный ресурс"], ["FC7-0102", "FC-CHK", "часы (после перестановки)"]];
   const rows = watch.map(([s, code, kind]) => [items.find((i) => i.entity.serial === s && i.rule.code === code), kind]).filter(([i]) => i);
   return `<table><thead><tr><th>Объект</th><th>Регламент</th><th>Тип порога</th><th>Статус</th><th>Счётчик</th></tr></thead><tbody>
     ${rows.map(([i, kind]) => `<tr><td>${entityLink(i.entity)}</td><td>${esc(i.rule.name)}</td><td>${kind}</td><td>${dueBadge(i.status)}</td><td>${metricHTML(i.driver)}</td></tr>`).join("")}</tbody></table>

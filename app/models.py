@@ -229,3 +229,25 @@ class Setting(Base):
     __tablename__ = "settings"
     key: Mapped[str] = mapped_column(String(100), primary_key=True)
     value: Mapped[dict] = mapped_column(JSON)
+
+
+class ComponentUsageEntry(Base):
+    """Наработка узла вне борта: стендовые прогоны, испытания, ручная корректировка по формуляру.
+
+    Начисляется только самому узлу (борт и другие узлы её не получают).
+    """
+
+    __tablename__ = "component_usage_entries"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    component_id: Mapped[int] = mapped_column(ForeignKey("components.id"), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    hours: Mapped[float] = mapped_column(Float)
+    cycles: Mapped[int] = mapped_column(Integer, default=0)
+    kind: Mapped[str] = mapped_column(String(30), default="bench")  # bench | test | correction
+    note: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    component: Mapped[Component] = relationship(lazy="joined")
+
+    __table_args__ = (CheckConstraint("hours >= 0 AND cycles >= 0", name="ck_usage_entry_nonneg"),)

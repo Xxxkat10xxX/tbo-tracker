@@ -19,6 +19,7 @@ from ..models import (
     AircraftType,
     Component,
     ComponentType,
+    ComponentUsageEntry,
     Flight,
     Installation,
     LogImport,
@@ -29,15 +30,20 @@ from ..models import (
 from ..schemas import (
     AircraftIn,
     AircraftPatch,
+    AircraftTypeIn,
     ComponentIn,
     ComponentPatch,
+    ComponentTypeIn,
     EconomicsIn,
+    GeneratorIn,
     InstallIn,
     MaintenanceIn,
+    ManualFlightIn,
     RemoveIn,
     RuleIn,
+    UsageEntryIn,
 )
-from ..services import inventory, logs
+from ..services import inventory, logs, manual
 from ..services.analytics import analytics
 from ..services.maintenance import STATUS_ORDER, Evaluator, due_items, record_dict, record_maintenance, records_query
 from ..services.usage import (
@@ -113,13 +119,17 @@ def _worst_by_component(items: list[dict]) -> dict[int, dict]:
     return out
 
 
-def aircraft_brief(a: Aircraft, tot: Usage, summ: dict, filled: int) -> dict:
-    slots = len(a.type.slots or [])
+def aircraft_brief(a: Aircraft, tot: Usage, summ: dict, positions: set[str]) -> dict:
+    """positions — занятые позиции борта. Комплектность считается по обязательным позициям."""
+    req = [sl["position"] for sl in a.type.slots or [] if sl.get("required", True)]
+    slots = len(req)
+    filled = sum(1 for p in req if p in positions)
     return {
         "id": a.id, "serial": a.serial, "name": a.name, "type": {"id": a.type.id, "name": a.type.name, "code": a.type.code},
         "status": a.status, "status_label": AIRCRAFT_STATUSES[a.status], "operator": a.operator, "base": a.base,
         "in_service_at": iso(a.in_service_at), "hours": round(tot.hours, 2), "cycles": tot.cycles, "flights": tot.flights,
         "slots_total": slots, "slots_filled": filled,
+        "slots_all": len(a.type.slots or []), "slots_all_filled": len(positions),
         "maintenance": summ, "airworthy": summ["overdue"] == 0 and filled == slots and a.status == "active",
     }
 
@@ -147,9 +157,9 @@ def dashboard(s: Session = Depends(get_session)):
     aircraft = list(s.scalars(select(Aircraft).where(Aircraft.status != "retired").order_by(Aircraft.serial)))
     tots = aircraft_totals(s, aircraft)
     cur = current_installations(s)
-    filled = defaultdict(int)
+    filled = defaultdict(set)
     for inst in cur.values():
-        filled[inst.aircraft_id] += 1
+        filled[inst.aircraft_id].add(inst.position)
     comps = list(s.scalars(select(Component)))
     imports = list(s.scalars(select(LogImport).order_by(LogImport.id.desc()).limit(6)))
     by_status = defaultdict(int)
@@ -172,9 +182,9 @@ def list_aircraft(s: Session = Depends(get_session)):
     items = due_items(s)
     summ = _summary_by_aircraft(items)
     tots = aircraft_totals(s, aircraft)
-    filled = defaultdict(int)
+    filled = defaultdict(set)
     for inst in current_installations(s).values():
-        filled[inst.aircraft_id] += 1
+        filled[inst.aircraft_id].add(inst.position)
     return [aircraft_brief(a, tots[a.id], summ[a.id], filled[a.id]) for a in aircraft]
 
 
@@ -216,7 +226,7 @@ def get_aircraft(aid: int, s: Session = Depends(get_session)):
     for slot in a.type.slots or []:
         inst = current.get(slot["position"])
         row = {"position": slot["position"], "label": slot["label"], "component_type": slot["component_type"],
-               "component": None}
+               "required": slot.get("required", True), "component": None}
         if inst:
             c = inst.component
             row["component"] = component_brief(c, ctot[c.id], inst, worst.get(c.id))
@@ -234,17 +244,22 @@ def get_aircraft(aid: int, s: Session = Depends(get_session)):
                         "hours": round(u.hours, 2), "cycles": u.cycles, "flights": u.flights})
     flights = s.scalars(select(Flight).where(Flight.aircraft_id == aid).order_by(Flight.started_at.desc()).limit(200))
     records = s.scalars(records_query(aircraft_id=aid, include_components=True))
+    mids = _manual_ids(s)
     return {
-        **aircraft_brief(a, tot, summ, len(current)),
+        **aircraft_brief(a, tot, summ, set(current)),
         "initial_hours": a.initial_hours, "initial_cycles": a.initial_cycles, "notes": a.notes,
         "configuration": config, "due": items, "installations": history,
-        "flight_log": [_flight_dict(f) for f in flights],
+        "flight_log": [_flight_dict(f, mids) for f in flights],
         "maintenance_records": [record_dict(r) for r in records],
     }
 
 
-def _flight_dict(f: Flight) -> dict:
-    return {"id": f.id, "aircraft_id": f.aircraft_id, "aircraft_name": f.aircraft.name, "external_id": f.external_id,
+def _manual_ids(s: Session) -> set[int]:
+    return set(s.scalars(select(LogImport.id).where(LogImport.format == "manual")))
+
+
+def _flight_dict(f: Flight, manual_ids: set[int] | None = None) -> dict:
+    return {"manual": bool(manual_ids and f.import_id in manual_ids), "source": "flight","id": f.id, "aircraft_id": f.aircraft_id, "aircraft_name": f.aircraft.name, "external_id": f.external_id,
             "started_at": iso(f.started_at), "ended_at": iso(f.ended_at), "duration_h": round(f.duration_h, 3),
             "cycles": f.cycles, "mission": f.mission, "pilot": f.pilot, "import_id": f.import_id}
 
@@ -333,8 +348,20 @@ def get_component(cid: int, s: Session = Depends(get_session)):
     if installs:
         conds = [((Flight.aircraft_id == i.aircraft_id) & (Flight.started_at >= i.installed_at) &
                   ((Flight.started_at < i.removed_at) if i.removed_at else true())) for i in installs]
-        fl = [_flight_dict(f) for f in s.scalars(select(Flight).where(or_(*conds))
-                                                .order_by(Flight.started_at.desc()).limit(200))]
+        mids = _manual_ids(s)
+        fl = [_flight_dict(f, mids) for f in s.scalars(select(Flight).where(or_(*conds))
+                                                      .order_by(Flight.started_at.desc()).limit(300))]
+    entries = [manual.entry_dict(e) for e in s.scalars(select(ComponentUsageEntry).where(
+        ComponentUsageEntry.component_id == cid).order_by(ComponentUsageEntry.started_at.desc()))]
+    for e in entries:
+        fl.append({"source": "entry", "id": e["id"], "started_at": e["started_at"], "ended_at": None,
+                   "duration_h": e["hours"], "cycles": e["cycles"], "mission": e["kind_label"] + (f": {e['note']}" if e["note"] else ""),
+                   "aircraft_id": None, "aircraft_name": "вне борта", "external_id": "—", "import_id": None, "manual": True})
+        timeline.append({"at": e["started_at"], "kind": "entry",
+                         "title": f"{e['kind_label']}: +{e['hours']} ч, +{e['cycles']} цикл. (вне борта)",
+                         "details": " · ".join(x for x in (e["note"], e["created_by"]) if x)})
+    fl.sort(key=lambda f: f["started_at"], reverse=True)
+    timeline.sort(key=lambda e: e["at"], reverse=True)
     worst = _worst_by_component(items).get(c.id)
     return {
         **component_brief(c, tot, cur, worst),
@@ -342,7 +369,7 @@ def get_component(cid: int, s: Session = Depends(get_session)):
         "on_board_hours": round(stint.get(cur.id, Usage()).hours, 2) if cur else None,
         "boards_count": len({i.aircraft_id for i in installs}),
         "stints": list(reversed(stints)), "due": items, "maintenance_records": records,
-        "timeline": timeline, "flight_log": fl,
+        "timeline": timeline, "flight_log": fl, "usage_entries": entries,
     }
 
 
@@ -373,6 +400,42 @@ def transfer_component(cid: int, data: InstallIn, s: Session = Depends(get_sessi
 
 
 # ---------------------------------------------------------------- полёты и импорт
+@router.post("/components/{cid}/usage", status_code=201)
+def add_usage(cid: int, data: UsageEntryIn, s: Session = Depends(get_session)):
+    c = _get(s, Component, cid, "Узел")
+    e = manual.add_usage_entry(s, c, _dt(data.started_at), data.hours, data.cycles, data.kind, data.note, data.created_by)
+    _commit(s)
+    return {"entry": manual.entry_dict(e),
+            "message": f"Записано вне борта: +{e.hours} ч, +{e.cycles} цикл. Начислено только узлу {c.serial}"}
+
+
+@router.delete("/components/{cid}/usage/{eid}")
+def delete_usage(cid: int, eid: int, s: Session = Depends(get_session)):
+    e = _get(s, ComponentUsageEntry, eid, "Запись")
+    if e.component_id != cid:
+        raise NotFound("Запись не найдена")
+    s.delete(e)
+    _commit(s)
+    return {"message": "Запись внебортовой наработки удалена"}
+
+
+@router.post("/flights", status_code=201)
+def add_flight(data: ManualFlightIn, s: Session = Depends(get_session)):
+    a = _get(s, Aircraft, data.aircraft_id, "Борт")
+    comp = _get(s, Component, data.component_id, "Узел") if data.component_id else None
+    res = manual.add_manual_flight(s, a, parse_dt(data.start), parse_dt(data.end), data.cycles, data.mission,
+                                   data.pilot, data.flight_id, comp, data.performed_by)
+    _commit(s)
+    return res
+
+
+@router.delete("/flights/{fid}")
+def delete_flight(fid: int, s: Session = Depends(get_session)):
+    res = manual.delete_flight(s, _get(s, Flight, fid, "Полёт"))
+    _commit(s)
+    return res
+
+
 @router.get("/flights")
 def list_flights(aircraft_id: int | None = None, import_id: int | None = None, limit: int = Query(200, le=2000),
                  s: Session = Depends(get_session)):
@@ -381,7 +444,8 @@ def list_flights(aircraft_id: int | None = None, import_id: int | None = None, l
         q = q.where(Flight.aircraft_id == aircraft_id)
     if import_id:
         q = q.where(Flight.import_id == import_id)
-    return [_flight_dict(f) for f in s.scalars(q)]
+    mids = _manual_ids(s)
+    return [_flight_dict(f, mids) for f in s.scalars(q)]
 
 
 @router.get("/imports")
@@ -534,6 +598,115 @@ def create_record(data: MaintenanceIn, s: Session = Depends(get_session)):
         after = [i for i in after if i["entity"]["kind"] == "aircraft"]
     return {"record": record_dict(rec), "due_after": after,
             "message": "Работа зарегистрирована" + (f": {rec.rule.name} — интервал отсчитывается заново" if rec.rule else "")}
+
+
+# ---------------------------------------------------------------- справочники типов (свои узлы и борта)
+@router.post("/component-types", status_code=201)
+def create_component_type(data: ComponentTypeIn, s: Session = Depends(get_session)):
+    if s.scalar(select(ComponentType).where(ComponentType.code == data.code)):
+        raise DomainError("Тип узла с таким кодом уже есть", 409)
+    t = ComponentType(**data.model_dump())
+    s.add(t)
+    _commit(s)
+    return {"id": t.id, "message": f"Тип узла «{t.name}» создан. Добавьте позиции для него в типы БПЛА"}
+
+
+@router.put("/component-types/{tid}")
+def update_component_type(tid: int, data: ComponentTypeIn, s: Session = Depends(get_session)):
+    t = _get(s, ComponentType, tid, "Тип узла")
+    if data.code != t.code:
+        raise DomainError("Код типа менять нельзя (на него ссылаются позиции бортов)")
+    t.name, t.description = data.name, data.description
+    _commit(s)
+    return {"message": "Тип узла обновлён"}
+
+
+@router.delete("/component-types/{tid}")
+def delete_component_type(tid: int, s: Session = Depends(get_session)):
+    t = _get(s, ComponentType, tid, "Тип узла")
+    if s.scalar(select(Component.id).where(Component.type_id == tid).limit(1)):
+        raise DomainError("Есть узлы этого типа — удаление невозможно")
+    if s.scalar(select(MaintenanceRule.id).where(MaintenanceRule.component_type_id == tid).limit(1)):
+        raise DomainError("На тип ссылаются регламенты — сначала удалите их")
+    for at in s.scalars(select(AircraftType)):
+        if any(sl["component_type"] == t.code for sl in at.slots or []):
+            raise DomainError(f"Тип используется в позициях типа БПЛА «{at.name}»")
+    s.delete(t)
+    _commit(s)
+    return {"message": "Тип узла удалён"}
+
+
+def _validate_slots(s: Session, slots) -> list[dict]:
+    codes = set(s.scalars(select(ComponentType.code)))
+    seen = set()
+    out = []
+    for sl in slots:
+        if sl.position in seen:
+            raise DomainError(f"Позиция «{sl.position}» указана дважды")
+        if sl.component_type not in codes:
+            raise DomainError(f"Неизвестный тип узла «{sl.component_type}»")
+        seen.add(sl.position)
+        out.append(sl.model_dump())
+    return out
+
+
+@router.post("/aircraft-types", status_code=201)
+def create_aircraft_type(data: AircraftTypeIn, s: Session = Depends(get_session)):
+    if s.scalar(select(AircraftType).where(AircraftType.code == data.code)):
+        raise DomainError("Тип БПЛА с таким кодом уже есть", 409)
+    t = AircraftType(code=data.code, name=data.name, category=data.category, manufacturer=data.manufacturer,
+                     slots=_validate_slots(s, data.slots))
+    s.add(t)
+    _commit(s)
+    return {"id": t.id, "message": f"Тип БПЛА «{t.name}» создан"}
+
+
+@router.put("/aircraft-types/{tid}")
+def update_aircraft_type(tid: int, data: AircraftTypeIn, s: Session = Depends(get_session)):
+    t = _get(s, AircraftType, tid, "Тип БПЛА")
+    if data.code != t.code:
+        raise DomainError("Код типа менять нельзя")
+    slots = _validate_slots(s, data.slots)
+    new = {sl["position"]: sl for sl in slots}
+    ac_ids = list(s.scalars(select(Aircraft.id).where(Aircraft.type_id == tid)))
+    if ac_ids:
+        for inst in s.scalars(select(Installation).where(Installation.aircraft_id.in_(ac_ids),
+                                                         Installation.removed_at.is_(None))):
+            sl = new.get(inst.position)
+            if sl is None:
+                raise DomainError(f"Позиция {inst.position} занята узлом {inst.component.serial} на {inst.aircraft.name} — сначала снимите узел")
+            if sl["component_type"] != inst.component.type.code:
+                raise DomainError(f"В позиции {inst.position} стоит узел другого типа ({inst.component.serial})")
+    t.name, t.category, t.manufacturer, t.slots = data.name, data.category, data.manufacturer, slots
+    _commit(s)
+    return {"message": "Тип БПЛА обновлён"}
+
+
+@router.delete("/aircraft-types/{tid}")
+def delete_aircraft_type(tid: int, s: Session = Depends(get_session)):
+    t = _get(s, AircraftType, tid, "Тип БПЛА")
+    if s.scalar(select(Aircraft.id).where(Aircraft.type_id == tid).limit(1)):
+        raise DomainError("Есть борта этого типа — удаление невозможно")
+    if s.scalar(select(MaintenanceRule.id).where(MaintenanceRule.aircraft_type_id == tid).limit(1)):
+        raise DomainError("На тип ссылаются регламенты")
+    s.delete(t)
+    _commit(s)
+    return {"message": "Тип БПЛА удалён"}
+
+
+# ---------------------------------------------------------------- генератор журналов
+@router.post("/log-generator")
+def log_generator(data: GeneratorIn, s: Session = Depends(get_session)):
+    from ..loggen import GenParams, generate
+
+    p = GenParams(data.aircraft_serials, parse_dt(data.date_from), parse_dt(data.date_to), data.format,
+                  data.fly_probability, data.flights_min, data.flights_max, data.duration_min, data.duration_max,
+                  data.first_takeoff_hour, data.touch_and_go_probability, data.with_ids, data.avoid_overlap,
+                  data.duplicates, data.errors, data.seed)
+    res = generate(s, p)
+    if data.import_now:
+        res["import"] = _run_import(s, res["content"].encode(), res["filename"], "генератор журналов", data.dry_run)
+    return res
 
 
 # ---------------------------------------------------------------- аналитика

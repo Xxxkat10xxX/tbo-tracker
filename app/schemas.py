@@ -100,3 +100,66 @@ class EconomicsIn(BaseModel):
     manual_minutes_per_flight: float = Field(ge=0)
     manual_minutes_per_operation: float = Field(ge=0)
     engineer_rate: float = Field(ge=0)
+
+
+class ManualFlightIn(BaseModel):
+    aircraft_id: int
+    start: datetime
+    end: datetime
+    cycles: int = Field(1, ge=0, le=1000)
+    mission: str | None = None
+    pilot: str | None = None
+    flight_id: str | None = Field(None, max_length=200)
+    component_id: int | None = None   # если полёт вносится из карточки узла — проверим, что узел стоял на борту
+    performed_by: str | None = None
+
+
+class UsageEntryIn(BaseModel):
+    started_at: datetime | None = None
+    hours: float = Field(0, ge=0)
+    cycles: int = Field(0, ge=0)
+    kind: Literal["bench", "test", "correction"] = "bench"
+    note: str | None = None
+    created_by: str | None = None
+
+
+class ComponentTypeIn(BaseModel):
+    code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_\-]+$")
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = None
+
+
+class SlotIn(BaseModel):
+    position: str = Field(min_length=1, max_length=50)
+    label: str = Field(min_length=1, max_length=200)
+    component_type: str
+    required: bool = True   # обязательная позиция: без узла борт «некомплектен» и не допущен
+
+
+class AircraftTypeIn(BaseModel):
+    code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_\-]+$")
+    name: str = Field(min_length=1, max_length=200)
+    category: str = "multirotor"
+    manufacturer: str | None = None
+    slots: list[SlotIn] = Field(default_factory=list)
+
+
+class GeneratorIn(BaseModel):
+    aircraft_serials: list[str] = Field(min_length=1)
+    date_from: datetime
+    date_to: datetime
+    format: Literal["json", "csv"] = "json"
+    fly_probability: float = Field(0.8, ge=0, le=1)
+    flights_min: int = Field(1, ge=0, le=20)
+    flights_max: int = Field(4, ge=0, le=20)
+    duration_min: int = Field(15, ge=1, le=600)
+    duration_max: int = Field(45, ge=1, le=600)
+    first_takeoff_hour: int = Field(6, ge=0, le=23)
+    touch_and_go_probability: float = Field(0.05, ge=0, le=1)
+    with_ids: bool = True
+    avoid_overlap: bool = True
+    duplicates: int = Field(0, ge=0, le=500)
+    errors: bool = False
+    seed: int | None = None
+    import_now: bool = False
+    dry_run: bool = False

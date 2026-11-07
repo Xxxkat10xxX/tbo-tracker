@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from ..models import Aircraft, Component, Flight, Installation
+from ..models import Aircraft, Component, ComponentUsageEntry, Flight, Installation
 
 
 @dataclass
@@ -59,7 +59,29 @@ def component_usage(
     if aircraft_id is not None:
         q = q.where(Installation.aircraft_id == aircraft_id)
     q = _time_filters(q, since, before)
-    return {cid: Usage(h, c, n) for cid, h, c, n in s.execute(q)}
+    out = {cid: Usage(h, c, n) for cid, h, c, n in s.execute(q)}
+    if aircraft_id is None:
+        # внебортовая наработка (стенд, испытания, корректировки) — только самому узлу
+        for cid, (h, c) in entry_usage(s, component_ids, since, before).items():
+            u = out.setdefault(cid, Usage())
+            u.hours += h
+            u.cycles += c
+    return out
+
+
+def entry_usage(s: Session, component_ids=None, since=None, before=None) -> dict[int, tuple[float, int]]:
+    q = select(
+        ComponentUsageEntry.component_id,
+        func.coalesce(func.sum(ComponentUsageEntry.hours), 0.0),
+        func.coalesce(func.sum(ComponentUsageEntry.cycles), 0),
+    ).group_by(ComponentUsageEntry.component_id)
+    if component_ids is not None:
+        q = q.where(ComponentUsageEntry.component_id.in_(component_ids))
+    if since is not None:
+        q = q.where(ComponentUsageEntry.started_at >= since)
+    if before is not None:
+        q = q.where(ComponentUsageEntry.started_at < before)
+    return {cid: (h, c) for cid, h, c in s.execute(q)}
 
 
 def installation_usage(s: Session, installation_ids: list[int]) -> dict[int, Usage]:

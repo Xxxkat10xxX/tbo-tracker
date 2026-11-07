@@ -1,7 +1,7 @@
 """Импорт журналов эксплуатации и автоматическое начисление наработки.
 
 Поддерживаемые форматы (см. docs/LOG_FORMAT.md):
-  * JSON  «sokol-flightlog/1.0» — журнал одного или нескольких бортов;
+  * JSON  «tbo-flightlog/1.0» — журнал одного или нескольких бортов;
   * CSV   — одна строка = один полёт (удобно для выгрузки из НСУ/Excel).
 
 Защита от двойного начисления — на двух уровнях:
@@ -28,7 +28,7 @@ from ..timeutil import iso, parse_dt, utcnow
 from .maintenance import Evaluator, due_items
 from .usage import installed_at
 
-FORMAT_ID = "sokol-flightlog/1.0"
+FORMAT_ID = "tbo-flightlog/1.0"
 
 
 class ParsedFlight(dict):
@@ -68,7 +68,7 @@ def _parse_json(text: str):
         default_serial = None
     elif isinstance(data, dict):
         fmt = data.get("format")
-        if fmt and not str(fmt).startswith("sokol-flightlog/"):
+        if fmt and not str(fmt).startswith("tbo-flightlog/"):
             raise DomainError(f"Неизвестный формат журнала: {fmt}")
         meta = {k: data.get(k) for k in ("log_id", "source", "generated_at", "operator") if data.get(k)}
         default_serial = data.get("aircraft_serial")
@@ -244,7 +244,7 @@ def import_log(s: Session, content: bytes, filename: str, imported_by: str | Non
         insts = installed_at(s, ac.id, f.started_at)
         filled = {i.position for i in insts}
         for slot in ac.type.slots or []:
-            if slot["position"] not in filled:
+            if slot.get("required", True) and slot["position"] not in filled:
                 incomplete[ac.id].add(slot["label"])
         for inst in insts:
             c = per_component.setdefault(inst.component_id, {
