@@ -77,6 +77,10 @@ class Aircraft(Base):
     in_service_at: Mapped[datetime] = mapped_column(DateTime)
     initial_hours: Mapped[float] = mapped_column(Float, default=0.0)
     initial_cycles: Mapped[int] = mapped_column(Integer, default=0)
+    # Индивидуальный ресурс экземпляра (максимальный износ по паспорту/формуляру). Пусто — не задан.
+    resource_hours: Mapped[float | None] = mapped_column(Float)
+    resource_cycles: Mapped[int | None] = mapped_column(Integer)
+    resource_days: Mapped[int | None] = mapped_column(Integer)
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
@@ -98,6 +102,10 @@ class Component(Base):
     # Наработка до постановки на учёт (стендовые испытания, другой парк)
     initial_hours: Mapped[float] = mapped_column(Float, default=0.0)
     initial_cycles: Mapped[int] = mapped_column(Integer, default=0)
+    # Индивидуальный ресурс экземпляра (максимальный износ по паспорту/формуляру). Пусто — не задан.
+    resource_hours: Mapped[float | None] = mapped_column(Float)
+    resource_cycles: Mapped[int | None] = mapped_column(Integer)
+    resource_days: Mapped[int | None] = mapped_column(Integer)
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

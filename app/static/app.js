@@ -118,6 +118,7 @@ function modal(title, bodyHTML, { okText = "Сохранить", wide = false, o
   document.body.appendChild(bg);
   const close = () => bg.remove();
   $$("[data-x]", bg).forEach((b) => b.addEventListener("click", close));
+  $$("[data-close]", bg).forEach((b) => b.addEventListener("click", close));
   bg.addEventListener("mousedown", (e) => { if (e.target === bg) close(); });
   if (onOk) {
     const ok = $("[data-ok]", bg);
@@ -234,6 +235,52 @@ async function openMaintenanceModal({ target, entity, rules, ruleId, onDone }) {
   });
 }
 
+// ------------------------------------------------------------------ ресурс и свои типы
+const RES_HINT = "Максимальный износ конкретного экземпляра (по паспорту, формуляру, решению эксплуатанта). Считается от начала эксплуатации, работами не обнуляется; срабатывает первый достигнутый порог. Пустое поле — порог не задан.";
+function resourceFields(r = {}) {
+  return `<div class="row3"><div class="field"><label>Ресурс, ч</label><input type="number" min="0" step="0.1" name="resource_hours" value="${r.hours ?? ""}" placeholder="не задан"></div>
+    <div class="field"><label>Ресурс, циклы</label><input type="number" min="0" name="resource_cycles" value="${r.cycles ?? ""}" placeholder="не задан"></div>
+    <div class="field"><label>Ресурс, дни</label><input type="number" min="0" name="resource_days" value="${r.days ?? ""}" placeholder="не задан"></div></div>
+    <div class="hint" style="margin-top:-6px">${RES_HINT}</div>`;
+}
+function readResource(root) {
+  const n = (k, int) => { const v = val(root, k); if (v === "" || v === null) return null; const x = int ? parseInt(v, 10) : parseFloat(v); if (!(x > 0)) throw new Error("Ресурс должен быть больше нуля (или оставьте поле пустым)"); return x; };
+  return { resource_hours: n("resource_hours"), resource_cycles: n("resource_cycles", 1), resource_days: n("resource_days", 1) };
+}
+function resourceText(r) {
+  const parts = [r && r.hours && `${num(r.hours, 1)} ч`, r && r.cycles && `${num(r.cycles, 0)} цикл.`, r && r.days && `${num(r.days, 0)} дн.`].filter(Boolean);
+  return parts.length ? parts.join(" / ") : null;
+}
+function openResourceModal({ kind, entity, onDone }) {
+  const name = kind === "aircraft" ? `борта ${entity.name}` : `узла ${entity.serial}`;
+  modal(`Индивидуальный ресурс ${name}`, `${resourceFields(entity.resource)}
+    <div class="notice small" style="margin-top:12px">Ресурс появится в «ТО и напоминания» как «Индивидуальный ресурс (паспорт / формуляр)»: «Приближается» за 10 % до порога, «Требуется» — по достижении. Типовые регламенты продолжают действовать.</div>`, {
+    okText: "Сохранить",
+    onOk: async (root) => {
+      await api("PATCH", `/api/${kind === "aircraft" ? "aircraft" : "components"}/${entity.id}`, readResource(root));
+      toast("Ресурс сохранён"); refreshNavCount(); onDone && onDone();
+    },
+  });
+}
+// «+ Новый тип узла…» прямо из выпадающего списка
+async function quickComponentType(select, onCreated) {
+  modal("Новый тип узла", `<div class="row2"><div class="field"><label>Код (латиница, без пробелов)</label><input name="code" placeholder="gnss"></div>
+    <div class="field"><label>Название</label><input name="name" placeholder="GNSS-приёмник"></div></div>
+    <div class="field"><label>Описание</label><input name="description"></div>
+    <div class="hint">Чтобы узлы нового типа можно было устанавливать на борт, добавьте для него позицию в разделе «Типы бортов и узлов».</div>`, {
+    okText: "Создать тип",
+    onOk: async (root) => {
+      const r = await POST("/api/component-types", { code: val(root, "code"), name: val(root, "name"), description: orNull(val(root, "description")) });
+      toast(r.message); META = null; const m = await meta();
+      onCreated(m, r.id);
+    },
+  });
+  select.value = select.dataset.prev || select.options[0].value;
+}
+function typeOptions(list, cur, extra) {
+  return list.map((t) => `<option value="${t.id}" ${t.id === cur ? "selected" : ""}>${esc(t.name)}</option>`).join("") + extra;
+}
+
 // ------------------------------------------------------------------ навигация
 const routes = [
   [/^#?\/?$/, "dash", pageDashboard],
@@ -326,16 +373,18 @@ async function openAircraftCreate() {
   modal("Новый борт", `
     <div class="row2"><div class="field"><label>Серийный номер</label><input name="serial" placeholder="TBT-M4-004"></div>
     <div class="field"><label>Бортовое имя</label><input name="name" placeholder="Борт 04"></div></div>
-    <div class="row2"><div class="field"><label>Тип</label><select name="type_id">${m.aircraft_types.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select></div>
+    <div class="row2"><div class="field"><label>Тип</label><select name="type_id">${m.aircraft_types.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select>
+      <div class="hint">Нужен свой тип с позициями узлов? <a href="#/types" data-close>Типы бортов и узлов →</a></div></div>
     <div class="field"><label>Дата ввода в эксплуатацию</label><input type="datetime-local" name="in_service_at" value="${toLocalInput(new Date())}"></div></div>
     <div class="row2"><div class="field"><label>Эксплуатант</label><input name="operator"></div><div class="field"><label>Место базирования</label><input name="base"></div></div>
     <div class="row2"><div class="field"><label>Начальный налёт, ч</label><input type="number" step="0.1" min="0" name="initial_hours" value="0"></div>
-    <div class="field"><label>Начальные циклы</label><input type="number" min="0" name="initial_cycles" value="0"></div></div>`, {
+    <div class="field"><label>Начальные циклы</label><input type="number" min="0" name="initial_cycles" value="0"></div></div>
+    ${resourceFields()}`, {
     okText: "Создать",
     onOk: async (root) => {
       const r = await POST("/api/aircraft", { serial: val(root, "serial"), name: val(root, "name"), type_id: +val(root, "type_id"),
         in_service_at: fromLocalInput(val(root, "in_service_at")), operator: orNull(val(root, "operator")), base: orNull(val(root, "base")),
-        initial_hours: +val(root, "initial_hours") || 0, initial_cycles: +val(root, "initial_cycles") || 0 });
+        initial_hours: +val(root, "initial_hours") || 0, initial_cycles: +val(root, "initial_cycles") || 0, ...readResource(root) });
       toast("Борт создан");
       location.hash = `#/aircraft/${r.id}`;
     },
@@ -350,14 +399,15 @@ async function pageAircraft(id) {
     <div class="page-head"><div><h1>${esc(a.name)} <span class="muted mono" style="font-size:15px">${esc(a.serial)}</span></h1>
       <div class="sub">${esc(a.type.name)} · ${esc(a.operator || "")} · ${esc(a.base || "")} · в эксплуатации с ${fmtD(a.in_service_at)}</div></div>
       <div class="actions"><select id="st" style="width:auto">${Object.entries(m.aircraft_statuses).map(([k, v]) => `<option value="${k}" ${k === a.status ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>
-      <button id="mnt">⚑ Зарегистрировать работу</button></div></div>
+      <button id="res">⚙ Ресурс</button><button id="mnt">⚑ Зарегистрировать работу</button></div></div>
     <div class="card"><div class="stat-line">
       <div class="s"><div class="v">${hrs(a.hours)}</div><div class="l">суммарный налёт</div></div>
       <div class="s"><div class="v">${num(a.cycles, 0)}</div><div class="l">циклов (взлёт-посадка)</div></div>
       <div class="s"><div class="v">${num(a.flights, 0)}</div><div class="l">полётов в журналах</div></div>
       <div class="s"><div class="v">${a.slots_filled}/${a.slots_total}</div><div class="l">позиций укомплектовано</div></div>
       <div class="s"><div class="v" style="font-size:15px;padding-top:4px">${readiness(a)}</div><div class="l">допуск к полётам</div></div>
-    </div>${a.notes ? `<div class="notice small" style="margin:12px 0 0">${esc(a.notes)}</div>` : ""}</div>
+    </div><div class="small muted" style="margin-top:10px">Индивидуальный ресурс борта: <b>${resourceText(a.resource) || "не задан"}</b></div>
+    ${a.notes ? `<div class="notice small" style="margin:12px 0 0">${esc(a.notes)}</div>` : ""}</div>
     <div class="card"><div class="card-head"><h2>Конфигурация борта — установленные экземпляры узлов</h2><a href="#/components?status=stock">Резерв на складе →</a></div>
       <div class="slots">${a.configuration.map(slotHTML).join("")}</div></div>
     <div class="card"><div class="tabs" id="tabs">
@@ -369,6 +419,7 @@ async function pageAircraft(id) {
     try { await api("PATCH", `/api/aircraft/${id}`, { status: e.target.value }); toast("Статус борта обновлён"); reload(); } catch (err) { toast(err.message, true); }
   };
   $("#mnt").onclick = () => openMaintenanceModal({ target: "aircraft", entity: { ...a, kind: "aircraft" }, rules: own.map((i) => i.rule), onDone: reload });
+  $("#res").onclick = () => openResourceModal({ kind: "aircraft", entity: a, onDone: reload });
   $$(".slot [data-act]").forEach((b) => b.addEventListener("click", async () => {
     const slot = a.configuration.find((s) => s.position === b.dataset.pos);
     if (b.dataset.act === "install") {
@@ -670,7 +721,7 @@ async function pageComponents() {
   const m = await meta();
   let status = params.get("status") || "", typeId = "", q = "";
   view().innerHTML = `<div class="page-head"><div><h1>Узлы и склад</h1><div class="sub">Паспорта заменяемых компонентов: сквозная наработка, местонахождение, состояние ТО</div></div>
-    <button class="primary" id="add">+ Добавить узел</button></div>
+    <div class="actions"><a class="btn" href="#/types">⊞ Свои типы узлов</a><button class="primary" id="add">+ Добавить узел</button></div></div>
     <div class="card"><div class="toolbar"><div class="chips" id="chips">
       ${[["", "Все"], ["installed", "Установлены"], ["stock", "Резерв / склад"], ["maintenance", "На обслуживании"], ["retired", "Списаны"]]
         .map(([k, v]) => `<button data-s="${k}" class="${k === status ? "active" : ""}">${v}</button>`).join("")}</div>
@@ -700,25 +751,33 @@ async function pageComponents() {
 
 async function openComponentCreate() {
   const m = await meta();
-  modal("Новый узел (постановка на учёт)", `
+  const bg = modal("Новый узел (постановка на учёт)", `
     <div class="row2"><div class="field"><label>Серийный номер</label><input name="serial" placeholder="FC7-0108"></div>
-    <div class="field"><label>Тип</label><select name="type_id">${m.component_types.map((t) => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select></div></div>
+    <div class="field"><label>Тип</label><select name="type_id">${typeOptions(m.component_types, null, '<option value="__new">+ Новый тип узла…</option>')}</select></div></div>
     <div class="row3"><div class="field"><label>Модель</label><input name="model"></div><div class="field"><label>Децимальный номер</label><input name="part_number"></div>
     <div class="field"><label>Версия ПО</label><input name="firmware"></div></div>
     <div class="row2"><div class="field"><label>Производитель</label><input name="manufacturer" value="tbo-tracker (демо)"></div>
     <div class="field"><label>Дата постановки на учёт</label><input type="datetime-local" name="in_service_at" value="${toLocalInput(new Date())}"></div></div>
     <div class="row2"><div class="field"><label>Наработка до постановки на учёт, ч</label><input type="number" min="0" step="0.1" name="initial_hours" value="0">
       <div class="hint">Стендовые испытания, эксплуатация в другом парке (по формуляру)</div></div>
-    <div class="field"><label>Циклы до постановки на учёт</label><input type="number" min="0" name="initial_cycles" value="0"></div></div>`, {
+    <div class="field"><label>Циклы до постановки на учёт</label><input type="number" min="0" name="initial_cycles" value="0"></div></div>
+    ${resourceFields()}`, {
     okText: "Поставить на учёт",
     onOk: async (root) => {
       const r = await POST("/api/components", { serial: val(root, "serial"), type_id: +val(root, "type_id"), model: orNull(val(root, "model")),
         part_number: orNull(val(root, "part_number")), firmware: orNull(val(root, "firmware")), manufacturer: orNull(val(root, "manufacturer")),
-        in_service_at: fromLocalInput(val(root, "in_service_at")), initial_hours: +val(root, "initial_hours") || 0, initial_cycles: +val(root, "initial_cycles") || 0 });
+        in_service_at: fromLocalInput(val(root, "in_service_at")), initial_hours: +val(root, "initial_hours") || 0, initial_cycles: +val(root, "initial_cycles") || 0,
+        ...readResource(root) });
       toast("Узел поставлен на учёт (резерв)");
       location.hash = `#/components/${r.id}`;
     },
   });
+  const ts = $('[name="type_id"]', bg);
+  ts.dataset.prev = ts.value;
+  ts.onchange = () => {
+    if (ts.value !== "__new") { ts.dataset.prev = ts.value; return; }
+    quickComponentType(ts, (mm, id) => { ts.innerHTML = typeOptions(mm.component_types, id, '<option value="__new">+ Новый тип узла…</option>'); ts.dataset.prev = id; });
+  };
 }
 
 async function pageComponent(id) {
@@ -732,7 +791,7 @@ async function pageComponent(id) {
         ${c.status === "installed" ? '<button data-a="transfer" class="primary">⇄ Переставить на другой борт</button><button data-a="remove">Снять с борта</button>' : ""}
         ${c.status === "stock" ? '<button data-a="install" class="primary">+ Установить на борт</button>' : ""}
         ${c.status === "stock" || c.status === "maintenance" ? `<button data-a="status">${c.status === "stock" ? "Отправить на обслуживание" : "Вернуть в резерв"}</button>` : ""}
-        <button data-a="mnt">⚑ Зарегистрировать работу</button></div></div>
+        <button data-a="res">⚙ Ресурс</button><button data-a="mnt">⚑ Зарегистрировать работу</button></div></div>
     <div class="card"><div class="stat-line">
       <div class="s"><div class="v">${hrs(c.hours)}</div><div class="l">сквозная наработка (с начала эксплуатации)</div></div>
       <div class="s"><div class="v">${num(c.cycles, 0)}</div><div class="l">циклов</div></div>
@@ -740,7 +799,7 @@ async function pageComponent(id) {
       <div class="s"><div class="v">${c.location ? hrs(c.on_board_hours) : "—"}</div><div class="l">${c.location ? "на текущем борту (" + esc(c.location.aircraft_name) + ")" : "не установлен"}</div></div>
       <div class="s"><div class="v">${c.boards_count}</div><div class="l">бортов в истории</div></div>
     </div>
-    <div class="small muted" style="margin-top:10px">Поставлен на учёт ${fmtD(c.in_service_at)}${c.initial_hours || c.initial_cycles ? ` с начальной наработкой ${hrs(c.initial_hours)} / ${c.initial_cycles} ц.` : ""}
+    <div class="small muted" style="margin-top:10px">Индивидуальный ресурс: <b>${resourceText(c.resource) || "не задан"}</b> · Поставлен на учёт ${fmtD(c.in_service_at)}${c.initial_hours || c.initial_cycles ? ` с начальной наработкой ${hrs(c.initial_hours)} / ${c.initial_cycles} ц.` : ""}
       ${c.location ? ` · сейчас: <a href="#/aircraft/${c.location.aircraft_id}">${esc(c.location.aircraft_name)}</a>, позиция ${esc(c.location.position)} с ${fmtDT(c.location.installed_at)}` : ""}${c.notes ? " · " + esc(c.notes) : ""}</div></div>
     <div class="card"><div class="card-head"><h2>Регламенты ТО узла</h2></div><div id="due"></div></div>
     <div class="grid g2">
@@ -774,6 +833,7 @@ async function pageComponent(id) {
     if (a === "install") openInstallModal({ component: c, mode: "install", onDone: reload });
     if (a === "remove") openRemoveModal({ component: c, onDone: reload });
     if (a === "mnt") openMaintenanceModal({ target: "component", entity: { ...c, kind: "component" }, rules, onDone: reload });
+    if (a === "res") openResourceModal({ kind: "component", entity: c, onDone: reload });
     if (a === "status") {
       try { await api("PATCH", `/api/components/${c.id}`, { status: c.status === "stock" ? "maintenance" : "stock" }); toast("Статус узла обновлён"); reload(); } catch (e) { toast(e.message, true); }
     }
@@ -912,7 +972,7 @@ async function pageRules() {
     <div class="hint">Пустой порог не используется. Если порог предупреждения не задан — 10 % интервала.</div>
     <label style="margin-top:10px"><input type="checkbox" name="active" style="width:auto" ${r.active === false ? "" : "checked"}> Активен</label>`;
   function open(r) {
-    const bg = modal(r ? "Изменение регламента" : "Новый регламент", form(r), {
+    const bg = modal(r ? "Изменение регламента" : "Новый регламент", form(r || {}), {
       okText: "Сохранить",
       onOk: async (root) => {
         const n = (k, int) => { const v = val(root, k); return v === "" ? null : (int ? parseInt(v, 10) : parseFloat(v)); };
@@ -931,7 +991,14 @@ async function pageRules() {
       const isAc = tSel.value === "aircraft";
       const list = isAc ? m.aircraft_types : m.component_types;
       const cur = r ? (isAc ? r.aircraft_type_id : r.component_type_id) : null;
-      typeSel.innerHTML = `<option value="">${isAc ? "Все типы БПЛА" : "Все типы узлов"}</option>` + list.map((t) => `<option value="${t.id}" ${t.id === cur ? "selected" : ""}>${esc(t.name)}</option>`).join("");
+      typeSel.innerHTML = `<option value="">${isAc ? "Все типы БПЛА" : "Все типы узлов"}</option>` +
+        typeOptions(list, cur, isAc ? '<option value="__types">+ Новый тип БПЛА… (раздел «Типы»)</option>' : '<option value="__new">+ Новый тип узла…</option>');
+      typeSel.dataset.prev = typeSel.value;
+    };
+    typeSel.onchange = () => {
+      if (typeSel.value === "__types") { $$(".modal-bg").forEach((x) => x.remove()); location.hash = "#/types"; return; }
+      if (typeSel.value === "__new") { quickComponentType(typeSel, (mm, id) => { m.component_types = mm.component_types; fill(); typeSel.value = id; typeSel.dataset.prev = id; }); return; }
+      typeSel.dataset.prev = typeSel.value;
     };
     tSel.onchange = fill;
     fill();

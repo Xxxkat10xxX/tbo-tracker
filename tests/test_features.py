@@ -160,3 +160,55 @@ def test_no_vendor_mentions_in_ui_and_data(client):
     for t in texts:
         for bad in ("СОКОЛ", "SOKOL", "sokol", "СПУТНИК", "ООО"):
             assert bad not in t
+
+
+def test_individual_resource_component(client):
+    c = by_serial(client, "FC7-0106")                     # ≈107 ч
+    r = client.patch(f"/api/components/{c['id']}", json={"resource_hours": 115})
+    assert r.status_code == 200
+    item = due(client, "FC7-0106", "RESOURCE")
+    assert item["rule"]["kind"] == "life" and item["status"] == "due_soon"
+    assert client.patch(f"/api/components/{c['id']}", json={"resource_hours": 100}).status_code == 200
+    assert due(client, "FC7-0106", "RESOURCE")["status"] == "overdue"
+    assert by_serial(client, "FC7-0106")["resource"]["hours"] == 100
+    # ресурс работой не «закрывается»; аналитика с ним не падает
+    assert client.post("/api/maintenance/records", json={"target": "component", "entity_id": c["id"], "rule_id": 0}).status_code in (400, 404)
+    assert client.get("/api/analytics").status_code == 200
+    # сброс
+    client.patch(f"/api/components/{c['id']}", json={"resource_hours": None})
+    try:
+        due(client, "FC7-0106", "RESOURCE"); assert False
+    except KeyError:
+        pass
+    assert client.patch(f"/api/components/{c['id']}", json={"resource_cycles": 0}).status_code == 422
+
+
+def test_individual_resource_aircraft_and_create(client):
+    a = by_serial(client, "TBT-VT2-012")
+    client.patch(f"/api/aircraft/{a['id']}", json={"resource_days": 100})          # в эксплуатации 150 дней
+    assert due(client, "TBT-VT2-012", "RESOURCE")["status"] == "overdue"
+    ct = client.get("/api/meta").json()["component_types"][0]
+    r = client.post("/api/components", json={"serial": "NEW-1", "type_id": ct["id"], "initial_hours": 45, "resource_hours": 50})
+    assert r.status_code == 201
+    assert due(client, "NEW-1", "RESOURCE")["status"] == "due_soon"
+
+
+def test_custom_type_rule_targets_new_type(client):
+    t = client.post("/api/component-types", json={"code": "batt", "name": "Аккумулятор"}).json()
+    client.post("/api/components", json={"serial": "BAT-1", "type_id": t["id"], "initial_cycles": 290})
+    r = client.post("/api/rules", json={"code": "BAT-LIFE", "name": "Ресурс АКБ", "target": "component", "kind": "life",
+                                        "component_type_id": t["id"], "interval_cycles": 300})
+    assert r.status_code == 201
+    assert due(client, "BAT-1", "BAT-LIFE")["status"] == "due_soon"
+
+
+def test_migration_adds_resource_columns(tmp_path):
+    from sqlalchemy import create_engine, inspect, text
+    from app.db import migrate
+    eng = create_engine(f"sqlite:///{tmp_path}/old.db")
+    with eng.begin() as c:
+        c.execute(text("CREATE TABLE aircraft (id INTEGER PRIMARY KEY)"))
+        c.execute(text("CREATE TABLE components (id INTEGER PRIMARY KEY)"))
+    migrate(eng)
+    cols = {x["name"] for x in inspect(eng).get_columns("components")}
+    assert {"resource_hours", "resource_cycles", "resource_days"} <= cols

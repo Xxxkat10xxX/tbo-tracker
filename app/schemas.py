@@ -16,6 +16,9 @@ class AircraftIn(BaseModel):
     initial_hours: float = Field(0, ge=0)
     initial_cycles: int = Field(0, ge=0)
     notes: str | None = None
+    resource_hours: float | None = Field(None, gt=0)
+    resource_cycles: int | None = Field(None, gt=0)
+    resource_days: int | None = Field(None, gt=0)
 
 
 class AircraftPatch(BaseModel):
@@ -24,6 +27,9 @@ class AircraftPatch(BaseModel):
     operator: str | None = None
     base: str | None = None
     notes: str | None = None
+    resource_hours: float | None = Field(None, gt=0)
+    resource_cycles: int | None = Field(None, gt=0)
+    resource_days: int | None = Field(None, gt=0)
 
 
 class ComponentIn(BaseModel):
@@ -39,6 +45,9 @@ class ComponentIn(BaseModel):
     initial_hours: float = Field(0, ge=0)
     initial_cycles: int = Field(0, ge=0)
     notes: str | None = None
+    resource_hours: float | None = Field(None, gt=0)
+    resource_cycles: int | None = Field(None, gt=0)
+    resource_days: int | None = Field(None, gt=0)
 
 
 class ComponentPatch(BaseModel):
@@ -46,6 +55,9 @@ class ComponentPatch(BaseModel):
     firmware: str | None = None
     notes: str | None = None
     status: Literal["stock", "maintenance", "retired"] | None = None
+    resource_hours: float | None = Field(None, gt=0)
+    resource_cycles: int | None = Field(None, gt=0)
+    resource_days: int | None = Field(None, gt=0)
 
 
 class InstallIn(BaseModel):

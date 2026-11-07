@@ -18,7 +18,7 @@ from ..models import (
     Setting,
 )
 from ..timeutil import iso, parse_dt, utcnow
-from .maintenance import STATUS_ORDER, Evaluator, due_items
+from .maintenance import STATUS_ORDER, Evaluator, due_items, resource_rule
 from .usage import component_totals, component_usage, current_installations, installation_usage
 
 DEFAULT_ECONOMICS = {
@@ -83,7 +83,7 @@ def analytics(s: Session, now: datetime | None = None) -> dict:
         inst = current.get(it["entity"]["id"])
         if inst is None:
             continue
-        rule = rules[it["rule"]["id"]]
+        rule = rules.get(it["rule"]["id"]) or resource_rule(comps[it["entity"]["id"]])
         base = parse_dt(it["base_at"])
         naive_base = max(base, inst.installed_at) if rule.kind == "periodic" else inst.installed_at
         u = component_usage(s, [inst.component_id], since=naive_base, aircraft_id=inst.aircraft_id).get(inst.component_id)

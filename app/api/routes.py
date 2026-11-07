@@ -119,6 +119,10 @@ def _worst_by_component(items: list[dict]) -> dict[int, dict]:
     return out
 
 
+def _res(e) -> dict:
+    return {"hours": e.resource_hours, "cycles": e.resource_cycles, "days": e.resource_days}
+
+
 def aircraft_brief(a: Aircraft, tot: Usage, summ: dict, positions: set[str]) -> dict:
     """positions — занятые позиции борта. Комплектность считается по обязательным позициям."""
     req = [sl["position"] for sl in a.type.slots or [] if sl.get("required", True)]
@@ -128,7 +132,7 @@ def aircraft_brief(a: Aircraft, tot: Usage, summ: dict, positions: set[str]) -> 
         "id": a.id, "serial": a.serial, "name": a.name, "type": {"id": a.type.id, "name": a.type.name, "code": a.type.code},
         "status": a.status, "status_label": AIRCRAFT_STATUSES[a.status], "operator": a.operator, "base": a.base,
         "in_service_at": iso(a.in_service_at), "hours": round(tot.hours, 2), "cycles": tot.cycles, "flights": tot.flights,
-        "slots_total": slots, "slots_filled": filled,
+        "slots_total": slots, "slots_filled": filled, "resource": _res(a),
         "slots_all": len(a.type.slots or []), "slots_all_filled": len(positions),
         "maintenance": summ, "airworthy": summ["overdue"] == 0 and filled == slots and a.status == "active",
     }
@@ -140,7 +144,7 @@ def component_brief(c: Component, tot: Usage, inst: Installation | None, worst: 
         "model": c.model, "part_number": c.part_number, "manufacturer": c.manufacturer, "firmware": c.firmware,
         "status": c.status, "status_label": COMPONENT_STATUSES[c.status],
         "hours": round(tot.hours, 2), "cycles": tot.cycles, "flights": tot.flights,
-        "initial_hours": c.initial_hours, "initial_cycles": c.initial_cycles,
+        "initial_hours": c.initial_hours, "initial_cycles": c.initial_cycles, "resource": _res(c),
         "location": None if inst is None else {"aircraft_id": inst.aircraft_id, "aircraft_name": inst.aircraft.name,
                                                 "aircraft_serial": inst.aircraft.serial, "position": inst.position,
                                                 "installed_at": iso(inst.installed_at)},

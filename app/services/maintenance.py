@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -155,6 +156,19 @@ class Evaluator:
         }
 
 
+RESOURCE_CODE = "RESOURCE"
+
+
+def resource_rule(entity):
+    """Индивидуальный ресурс экземпляра как регламент вида «назначенный ресурс» (id = 0)."""
+    h, c, d = entity.resource_hours, entity.resource_cycles, entity.resource_days
+    if not (h or c or d):
+        return None
+    return SimpleNamespace(id=0, code=RESOURCE_CODE, name="Индивидуальный ресурс (паспорт / формуляр)", kind="life",
+                           target=None, interval_hours=h, interval_cycles=c, interval_days=d,
+                           warn_hours=None, warn_cycles=None, warn_days=None, active=True)
+
+
 def due_items(s: Session, now: datetime | None = None, aircraft_id: int | None = None,
               component_id: int | None = None, statuses: set[str] | None = None,
               evaluator: Evaluator | None = None) -> list[dict]:
@@ -178,7 +192,8 @@ def due_items(s: Session, now: datetime | None = None, aircraft_id: int | None =
 
     items = []
     for kind, ent in targets:
-        for rule in applicable_rules(rules, kind, ent):
+        own = resource_rule(ent)
+        for rule in applicable_rules(rules, kind, ent) + ([own] if own else []):
             item = ev.evaluate(rule, kind, ent)
             if statuses is None or item["status"] in statuses:
                 items.append(item)

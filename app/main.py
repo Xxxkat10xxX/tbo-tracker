@@ -8,7 +8,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .api.routes import router
 from .config import AUTO_SEED
-from .db import Base, engine
+from .db import Base, engine, migrate
 from .errors import DomainError
 
 STATIC = Path(__file__).parent / "static"
@@ -17,6 +17,7 @@ STATIC = Path(__file__).parent / "static"
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     Base.metadata.create_all(engine)
+    migrate()
     if AUTO_SEED:
         from .seed import seed_if_empty
         seed_if_empty()
