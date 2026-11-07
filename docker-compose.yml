@@ -1,0 +1,9 @@
+services:
+  tbo:
+    build: .
+    ports:
+      - "8000:8000"
+    volumes:
+      - tbo-data:/srv/data
+volumes:
+  tbo-data:

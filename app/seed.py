@@ -1,0 +1,515 @@
+"""Демонстрационные данные.
+
+Все даты строятся относительно момента заполнения (T0), поэтому календарные
+напоминания и сценарии работают в любой день запуска. Генерация детерминирована
+(фиксированный seed ГПСЧ). История полётов загружается через тот же сервис импорта,
+что и пользовательские журналы — то есть демо-данные проверяют реальный конвейер.
+
+Подготовленные состояния для сценариев проверки (см. docs/SCENARIOS.md):
+  * IMU3-0206 на «Борт 01»: после калибровки 46,6 ч из 50 → «скоро»; журнал №1 (+3,5 ч) → «просрочено»;
+  * ESC40-0301 на «Борт 01»: после диагностики 195 циклов из 200 → журнал №1 (+8 циклов) → «просрочено»;
+  * FC7-0102 на «Борт 02»: 95,5 ч из 100 после ТО; переставляется на «Борт 03» (у него снят ПК),
+    журнал №2 (+4,85 ч) → «просрочено» — наработка сохранилась при перестановке;
+  * «Борт 11»: годовое ТО через ~9 дней (календарный порог);
+  * BVK2-0405 на «Борт 12»: ТО вычислителя просрочено по календарю (сценарий выполнения работы);
+  * ESC40-0318 на «Борт 12»: близок к назначенному ресурсу 400 ч.
+"""
+from __future__ import annotations
+
+import json
+import random
+from datetime import datetime, timedelta
+
+from sqlalchemy import select
+
+from .config import DEMO_LOGS_DIR
+from .db import Base, SessionLocal, engine
+from .models import (
+    Aircraft,
+    AircraftType,
+    Component,
+    ComponentType,
+    Flight,
+    Installation,
+    LogImport,
+    MaintenanceRecord,
+    MaintenanceRule,
+    Setting,
+)
+from .services import logs
+from .services.usage import component_totals, aircraft_totals
+from .timeutil import iso, utcnow
+
+MANUFACTURER = "ООО «СПУТНИК-РЕД» (КБ «СОКОЛ»)"
+ENGINEERS = ["Смирнов Д. А.", "Кузнецова Е. В.", "Орлов П. С."]
+PILOTS = ["Иванов А.", "Петрова М.", "Сидоров К.", "Белов Р."]
+MISSIONS = ["Аэрофотосъёмка", "Мониторинг ЛЭП", "Обследование трубопровода", "Картографирование",
+            "Мониторинг посевов", "Учебно-тренировочный полёт", "Инспекция кровли"]
+
+M4_SLOTS = [
+    {"position": "FC", "label": "Полётный контроллер", "component_type": "flight_controller"},
+    {"position": "IMU", "label": "Инерциальный модуль", "component_type": "imu"},
+    *[{"position": f"ESC{i}", "label": f"Регулятор оборотов №{i}", "component_type": "esc"} for i in range(1, 5)],
+    {"position": "CPU", "label": "Бортовой вычислитель", "component_type": "computer"},
+]
+VT_SLOTS = [
+    {"position": "FC", "label": "Полётный контроллер", "component_type": "flight_controller"},
+    {"position": "IMU", "label": "Инерциальный модуль", "component_type": "imu"},
+    *[{"position": f"ESC{i}", "label": f"Регулятор подъёмного мотора №{i}", "component_type": "esc"} for i in range(1, 5)],
+    {"position": "ESC5", "label": "Регулятор маршевого мотора", "component_type": "esc"},
+    {"position": "CPU", "label": "Бортовой вычислитель", "component_type": "computer"},
+]
+
+COMPONENT_TYPES = [
+    ("flight_controller", "Полётный контроллер", "СР-FC7", "СР.FC7.01", "FC7"),
+    ("imu", "Инерциальный модуль", "СР-IMU3", "СР.IMU3.02", "IMU3"),
+    ("esc", "Регулятор оборотов (ESC)", "СР-ESC40", "СР.ESC40.03", "ESC40"),
+    ("computer", "Бортовой вычислитель", "СР-БВК2", "СР.BVK2.04", "BVK2"),
+]
+
+RULES = [
+    # code, name, target, ac_type, comp_type, kind, ih, ic, idays, wh, wc, wd, description
+    ("AC-INSP", "Периодический осмотр борта (планер, ВМГ, крепёж, разъёмы)", "aircraft", None, None, "periodic",
+     25, None, 60, 3, None, 7, "Визуальный осмотр, проверка люфтов, затяжки крепежа, состояния воздушных винтов и разъёмов."),
+    ("AC-ANNUAL", "Годовое комплексное ТО борта", "aircraft", None, None, "periodic",
+     None, None, 180, None, None, 14, "Полная проверка борта, тест каналов управления и связи, контрольный полёт."),
+    ("VT-WING", "Осмотр узлов крыла и механизма перехода (VTOL)", "aircraft", "SOKOL-VT2", None, "periodic",
+     None, 150, None, None, 15, None, "Проверка узлов крепления консолей и мотогондол после каждых 150 взлётов-посадок."),
+    ("FC-CHK", "ТО полётного контроллера: разъёмы, журналы, обновление ПО", "component", None, "flight_controller",
+     "periodic", 100, None, 180, 10, None, 14, "Проверка разъёмов и демпферов, анализ журналов ошибок, обновление прошивки."),
+    ("FC-LIFE", "Назначенный ресурс полётного контроллера", "component", None, "flight_controller", "life",
+     2000, None, None, 100, None, None, "По достижении ресурса — замена и списание/капитальный ремонт у производителя."),
+    ("IMU-CAL", "Калибровка инерциального модуля", "component", None, "imu", "periodic",
+     50, None, 90, 5, None, 10, "Калибровка гироскопов и акселерометров на поворотном стенде, проверка дрейфа."),
+    ("ESC-DIAG", "Диагностика регулятора оборотов (нагрев, токи, пайка)", "component", None, "esc", "periodic",
+     None, 200, 120, None, 20, 10, "Тепловизионный контроль, проверка пульсаций тока, осмотр паек силовых цепей."),
+    ("ESC-LIFE", "Назначенный ресурс регулятора оборотов", "component", None, "esc", "life",
+     400, None, None, 40, None, None, "Ресурс силовых ключей и конденсаторов. По достижении — замена."),
+    ("BVK-SVC", "ТО бортового вычислителя: накопитель, охлаждение, ПО", "component", None, "computer", "periodic",
+     150, None, 120, 15, None, 10, "Проверка SMART накопителя, чистка системы охлаждения, обновление ПО."),
+]
+
+# serial, name, type, in_service_days_ago, fly_prob, flights_per_day (min,max), duration_min (min,max), base
+AIRCRAFT = [
+    ("SK-M4-001", "Борт 01", "SOKOL-M4", 210, 0.85, (2, 5), (18, 35), "Площадка «Север»"),
+    ("SK-M4-002", "Борт 02", "SOKOL-M4", 190, 0.60, (1, 4), (18, 36), "Площадка «Север»"),
+    ("SK-M4-003", "Борт 03", "SOKOL-M4", 170, 0.55, (1, 3), (20, 38), "Площадка «Юг»"),
+    ("SK-VT2-011", "Борт 11", "SOKOL-VT2", 200, 0.50, (1, 3), (35, 80), "Аэродром «Луговое»"),
+    ("SK-VT2-012", "Борт 12", "SOKOL-VT2", 150, 0.55, (1, 2), (40, 85), "Аэродром «Луговое»"),
+]
+HISTORY_END_DAYS = 4  # история полётов заканчивается за 4 дня до T0
+
+
+class Seeder:
+    def __init__(self, s, now: datetime | None = None):
+        self.s = s
+        self.now = now or utcnow()
+        self.day0 = self.now.replace(hour=0, minute=0, second=0, microsecond=0)
+        self.rng = random.Random(20261107)
+        self.ct: dict[str, ComponentType] = {}
+        self.at: dict[str, AircraftType] = {}
+        self.ac: dict[str, Aircraft] = {}
+        self.comp: dict[str, Component] = {}
+        self.rules: dict[str, MaintenanceRule] = {}
+
+    def day(self, n: float, h: int = 0, m: int = 0) -> datetime:
+        return self.day0 + timedelta(days=n, hours=h, minutes=m)
+
+    # ------------------------------------------------------------ справочники и парк
+    def create_reference(self):
+        s = self.s
+        for code, name, *_ in COMPONENT_TYPES:
+            self.ct[code] = ComponentType(code=code, name=name, description=f"{name} производства {MANUFACTURER}")
+            s.add(self.ct[code])
+        self.at["SOKOL-M4"] = AircraftType(code="SOKOL-M4", name="СОКОЛ-М4 (квадрокоптер)", category="multirotor",
+                                           manufacturer=MANUFACTURER, slots=M4_SLOTS)
+        self.at["SOKOL-VT2"] = AircraftType(code="SOKOL-VT2", name="СОКОЛ-ВТ2 (VTOL)", category="vtol",
+                                            manufacturer=MANUFACTURER, slots=VT_SLOTS)
+        s.add_all(self.at.values())
+        s.flush()
+        for (code, name, target, at_code, ct_code, kind, ih, ic, idays, wh, wc, wd, desc) in RULES:
+            r = MaintenanceRule(code=code, name=name, target=target, kind=kind, description=desc,
+                                aircraft_type_id=self.at[at_code].id if at_code else None,
+                                component_type_id=self.ct[ct_code].id if ct_code else None,
+                                interval_hours=ih, interval_cycles=ic, interval_days=idays,
+                                warn_hours=wh, warn_cycles=wc, warn_days=wd)
+            self.rules[code] = r
+            s.add(r)
+        s.flush()
+
+    def new_component(self, type_code: str, serial: str, in_service: datetime, initial_h=0.0, initial_c=0, status="stock"):
+        _, _, model, pn, _ = next(t for t in COMPONENT_TYPES if t[0] == type_code)
+        c = Component(serial=serial, type_id=self.ct[type_code].id, model=model, part_number=pn,
+                      manufacturer=MANUFACTURER, firmware=self.rng.choice(["2.4.1", "2.4.3", "2.5.0"]),
+                      status=status, manufactured_at=in_service - timedelta(days=self.rng.randint(20, 60)),
+                      in_service_at=in_service, initial_hours=initial_h, initial_cycles=initial_c)
+        self.s.add(c)
+        self.s.flush()
+        self.comp[serial] = c
+        return c
+
+    def install(self, c: Component, a: Aircraft, pos: str, at: datetime, reason: str):
+        self.s.add(Installation(component_id=c.id, aircraft_id=a.id, position=pos, installed_at=at,
+                                install_reason=reason, installed_by=self.rng.choice(ENGINEERS)))
+        c.status = "installed"
+
+    def remove(self, serial: str, at: datetime, status: str, reason: str):
+        c = self.comp[serial]
+        inst = self.s.scalar(select(Installation).where(Installation.component_id == c.id,
+                                                        Installation.removed_at.is_(None)))
+        inst.removed_at = at
+        inst.remove_reason = reason
+        inst.removed_by = self.rng.choice(ENGINEERS)
+        c.status = status
+        return inst
+
+    def create_fleet(self):
+        counters = {"FC7": 101, "IMU3": 201, "ESC40": 301, "BVK2": 401}
+        prefix = {code: p for code, _, _, _, p in COMPONENT_TYPES}
+
+        def next_serial(type_code):
+            p = prefix[type_code]
+            n = counters[p]
+            counters[p] += 1
+            return f"{p}-{n:04d}"
+
+        for serial, name, tcode, days_ago, *_rest, base in AIRCRAFT:
+            a = Aircraft(serial=serial, name=name, type_id=self.at[tcode].id, status="active",
+                         operator="ООО «Аэросервис-Демо»", base=base, in_service_at=self.day(-days_ago, 9))
+            self.s.add(a)
+            self.s.flush()
+            self.ac[serial] = a
+        # Узлы: каждой позиции — свой экземпляр; порядок задаёт серийные номера
+        for type_code in ("flight_controller", "imu", "esc", "computer"):
+            for serial, *_ in AIRCRAFT:
+                a = self.ac[serial]
+                for slot in a.type.slots:
+                    if slot["component_type"] == type_code:
+                        c = self.new_component(type_code, next_serial(type_code), a.in_service_at)
+                        self.install(c, a, slot["position"], a.in_service_at, "Первичная комплектация борта")
+            spares = {"flight_controller": 2, "imu": 1, "esc": 3, "computer": 1}[type_code]
+            for _ in range(spares):
+                self.new_component(type_code, next_serial(type_code), self.day(-120, 10))
+        self.s.flush()
+
+    def history_events(self):
+        """Прошлые замены и перестановки — для наглядной истории жизни узлов."""
+        a1, a2, a4, a5 = (self.ac[k] for k in ("SK-M4-001", "SK-M4-002", "SK-VT2-011", "SK-VT2-012"))
+        s = self.s
+        # E1: ПК борта 01 → ремонт → установлен на борт 12
+        self.remove("FC7-0101", self.day(-90, 10), "maintenance", "Сбой по цепи питания в полёте, отправлен в ремонт")
+        s.flush()
+        self.install(self.comp["FC7-0106"], a1, "FC", self.day(-90, 11), "Замена неисправного ПК из резерва")
+        s.add(MaintenanceRecord(target="component", component_id=self.comp["FC7-0101"].id, work_type="repair",
+                                performed_at=self.day(-80, 15), performed_by=ENGINEERS[0],
+                                description="Замена DC/DC-преобразователя, прогон на стенде 4 ч",
+                                result="Исправен, годен к установке", status_after="stock"))
+        self.comp["FC7-0101"].status = "stock"
+        self.remove("FC7-0105", self.day(-70, 9), "stock", "Ротация: ПК с ревизией платы B направлен в резерв")
+        s.flush()
+        self.install(self.comp["FC7-0101"], a5, "FC", self.day(-70, 10), "Установлен после ремонта")
+        # E2: ИНС борта 01 — дрейф, замена резервным
+        self.remove("IMU3-0201", self.day(-60, 12), "maintenance", "Повышенный дрейф гироскопа по оси Z")
+        s.flush()
+        self.install(self.comp["IMU3-0206"], a1, "IMU", self.day(-60, 13), "Замена из резерва")
+        s.add(MaintenanceRecord(target="component", component_id=self.comp["IMU3-0201"].id, work_type="repair",
+                                performed_at=self.day(-50, 11), performed_by=ENGINEERS[1],
+                                description="Перекалибровка на поворотном стенде, замена демпферов",
+                                result="Дрейф в норме", status_after="stock"))
+        self.comp["IMU3-0201"].status = "stock"
+        # E3: ESC борта 11 отказал → исправный ESC переставлен с борта 02, на борт 02 — из резерва
+        self.remove("ESC40-0315", self.day(-35, 9), "maintenance", "Перегрев силовых ключей, ожидает диагностики")
+        self.remove("ESC40-0306", self.day(-35, 10), "stock", "Перестановка на борт 11")
+        s.flush()
+        self.install(self.comp["ESC40-0306"], a4, "ESC3", self.day(-35, 10), "Перестановка с борта 02 (срочный вылет)")
+        self.install(self.comp["ESC40-0323"], a2, "ESC2", self.day(-35, 11), "Установка из резерва взамен переставленного")
+        # E4: ПК борта 03 не проходит самотест — борт ожидает ПК
+        self.remove("FC7-0103", self.day(-6, 14), "maintenance", "Не проходит самотестирование при включении")
+        self.ac["SK-M4-003"].status = "maintenance"
+        self.ac["SK-M4-003"].notes = "Ожидает полётный контроллер (FC7-0103 в ремонте)"
+        s.flush()
+
+    # ------------------------------------------------------------ полёты
+    def gen_flights(self, cfg, start: datetime, end_day: datetime) -> list[dict]:
+        serial, _n, _t, _d, prob, per_day, dur, _b = cfg
+        out = []
+        d = start.replace(hour=0, minute=0, second=0) + timedelta(days=1)
+        while d < end_day:
+            if self.rng.random() < prob:
+                t = d + timedelta(hours=self.rng.randint(5, 7), minutes=self.rng.randint(0, 59))
+                for k in range(self.rng.randint(*per_day)):
+                    minutes = self.rng.randint(*dur)
+                    fend = t + timedelta(minutes=minutes)
+                    out.append({"flight_id": f"{serial}-{t:%Y%m%d}-{k + 1:02d}", "start": iso(t), "end": iso(fend),
+                                "cycles": 2 if self.rng.random() < 0.05 else 1,
+                                "mission": self.rng.choice(MISSIONS), "pilot": self.rng.choice(PILOTS)})
+                    t = fend + timedelta(minutes=self.rng.randint(25, 120))
+            d += timedelta(days=1)
+        return out
+
+    def import_history(self):
+        for cfg in AIRCRAFT:
+            serial = cfg[0]
+            a = self.ac[serial]
+            # «Борт 03» последний раз летал до снятия ПК (−6 сут 14:00)
+            end = self.day(-6 if serial == "SK-M4-003" else -HISTORY_END_DAYS)
+            flights = self.gen_flights(cfg, a.in_service_at, end)
+            by_month: dict[str, list] = {}
+            for f in flights:
+                by_month.setdefault(f["start"][:7], []).append(f)
+            for month, fl in sorted(by_month.items()):
+                doc = {"format": logs.FORMAT_ID, "log_id": f"{serial}-{month}", "aircraft_serial": serial,
+                       "source": "НСУ «СОКОЛ-Наземка», выгрузка журнала за месяц", "flights": fl}
+                content = json.dumps(doc, ensure_ascii=False, indent=1).encode()
+                res = logs.import_log(self.s, content, f"{serial}_{month}.json", "архив эксплуатанта",
+                                      compute_alerts=False)
+                imp = self.s.get(LogImport, res["id"])
+                imp.imported_at = min(datetime.fromisoformat(fl[-1]["end"][:-1]) + timedelta(days=1, hours=3), self.now)
+        self.s.flush()
+
+    # ------------------------------------------------------------ история ТО
+    def _flights_of(self, kind: str, ent) -> list[tuple]:
+        if kind == "aircraft":
+            q = select(Flight.started_at, Flight.ended_at, Flight.duration_h, Flight.cycles, Flight.aircraft_id).where(
+                Flight.aircraft_id == ent.id)
+            return [tuple(r) for r in self.s.execute(q.order_by(Flight.started_at))]
+        out = []
+        for inst in self.s.scalars(select(Installation).where(Installation.component_id == ent.id)):
+            q = select(Flight.started_at, Flight.ended_at, Flight.duration_h, Flight.cycles, Flight.aircraft_id).where(
+                Flight.aircraft_id == inst.aircraft_id, Flight.started_at >= inst.installed_at)
+            if inst.removed_at:
+                q = q.where(Flight.started_at < inst.removed_at)
+            out += [tuple(r) for r in self.s.execute(q)]
+        return sorted(out)
+
+    def _location(self, comp: Component, at: datetime):
+        for inst in self.s.scalars(select(Installation).where(Installation.component_id == comp.id)):
+            if inst.installed_at <= at and (inst.removed_at is None or inst.removed_at > at):
+                return inst.aircraft_id
+        return None
+
+    def _add_record(self, kind, ent, rule, at: datetime, description=None):
+        rec = MaintenanceRecord(target=kind, rule_id=rule.id, work_type="scheduled", performed_at=at,
+                                performed_by=self.rng.choice(ENGINEERS),
+                                description=description or rule.description, result="Выполнено, замечаний нет")
+        if kind == "aircraft":
+            rec.aircraft_id = ent.id
+        else:
+            rec.component_id = ent.id
+            rec.on_aircraft_id = self._location(ent, at)
+        self.s.add(rec)
+
+    def simulate(self, kind, ent, rule, until: datetime):
+        """Добросовестный эксплуатант: работы выполняются на 80–95 % интервала."""
+        flights = [f for f in self._flights_of(kind, ent) if f[0] < until]
+        base = ent.in_service_at
+        acc_h = getattr(ent, "initial_hours", 0.0) if kind == "component" else 0.0
+        acc_c = getattr(ent, "initial_cycles", 0) if kind == "component" else 0
+        frac = self.rng.uniform(0.8, 0.95)
+
+        def cal_due():
+            return base + timedelta(days=rule.interval_days * frac) if rule.interval_days else None
+
+        for st, en, dur, cyc, _aid in flights:
+            due = cal_due()
+            while due is not None and due < st and due < until:
+                self._add_record(kind, ent, rule, due.replace(minute=0, second=0))
+                base, acc_h, acc_c, frac = due.replace(minute=0, second=0), 0.0, 0, self.rng.uniform(0.8, 0.95)
+                due = cal_due()
+            acc_h += dur
+            acc_c += cyc
+            if (rule.interval_hours and acc_h >= rule.interval_hours * frac) or \
+               (rule.interval_cycles and acc_c >= rule.interval_cycles * frac):
+                at = en + timedelta(minutes=10)
+                if at < until:
+                    self._add_record(kind, ent, rule, at)
+                    base, acc_h, acc_c, frac = at, 0.0, 0, self.rng.uniform(0.8, 0.95)
+        limit = min(until, self.day(-HISTORY_END_DAYS + 1))
+        due = cal_due()
+        while due is not None and due < limit:
+            self._add_record(kind, ent, rule, due.replace(minute=0, second=0))
+            base, frac = due.replace(minute=0, second=0), self.rng.uniform(0.8, 0.95)
+            due = cal_due()
+
+    def time_for_usage(self, kind, ent, hours=None, cycles=None) -> datetime:
+        """Момент, начиная с которого наработка объекта равна заданной (по журналу полётов)."""
+        acc_h, acc_c = 0.0, 0
+        flights = self._flights_of(kind, ent)
+        for st, en, dur, cyc, _ in reversed(flights):
+            acc_h, acc_c = acc_h + dur, acc_c + cyc
+            if (hours is not None and acc_h >= hours) or (cycles is not None and acc_c >= cycles):
+                return st - timedelta(minutes=5)
+        raise RuntimeError(f"Недостаточно истории для {ent.serial}")
+
+    def maintenance_history(self):
+        tuned: dict[tuple, datetime] = {
+            ("component", "IMU3-0206", "IMU-CAL"): self.time_for_usage("component", self.comp["IMU3-0206"], hours=46.6),
+            ("component", "ESC40-0301", "ESC-DIAG"): self.time_for_usage("component", self.comp["ESC40-0301"], cycles=195),
+            ("component", "FC7-0102", "FC-CHK"): self.time_for_usage("component", self.comp["FC7-0102"], hours=95.5),
+            ("aircraft", "SK-VT2-011", "AC-ANNUAL"): self.day(-171, 10),
+            ("component", "BVK2-0405", "BVK-SVC"): self.day(-126, 11),
+        }
+        far = self.now + timedelta(days=1)
+        targets = [("aircraft", a) for a in self.ac.values()] + [("component", c) for c in self.comp.values()]
+        from .services.maintenance import applicable_rules
+        rules = list(self.rules.values())
+        for kind, ent in targets:
+            for rule in applicable_rules(rules, kind, ent):
+                if rule.kind != "periodic":
+                    continue
+                key = (kind, ent.serial, rule.code)
+                if key in tuned:
+                    self.simulate(kind, ent, rule, until=tuned[key] - timedelta(hours=1))
+                    self._add_record(kind, ent, rule, tuned[key])
+                else:
+                    self.simulate(kind, ent, rule, until=far)
+        self.s.flush()
+        # Перед сценарием перестановки борт 03 не должен «гореть» по своим регламентам
+        # (он на ТО); его осмотр выполнен при снятии ПК.
+        a3 = self.ac["SK-M4-003"]
+        for code in ("AC-INSP",):
+            self._add_record("aircraft", a3, self.rules[code], self.day(-6, 16), "Осмотр при снятии ПК")
+        # Узел-«долгожитель» у ресурса: ESC40-0318 (борт 12) прибыл из другого парка с наработкой
+        c = self.comp["ESC40-0318"]
+        used = component_totals(self.s, [c])[c.id].hours - c.initial_hours
+        c.initial_hours = round(372.0 - used, 1)
+        c.notes = "Получен из резервного парка с наработкой (подтверждена формуляром)"
+        self.s.flush()
+        # Снимки счётчиков в записях ТО
+        recs = list(self.s.scalars(select(MaintenanceRecord)))
+        for r in recs:
+            before = r.performed_at + timedelta(seconds=1)
+            if r.target == "aircraft":
+                t = aircraft_totals(self.s, [r.aircraft], before=before)[r.aircraft_id]
+            else:
+                t = component_totals(self.s, [r.component], before=before)[r.component_id]
+            r.hours_at, r.cycles_at = round(t.hours, 2), t.cycles
+        self.s.flush()
+
+    def run(self):
+        self.create_reference()
+        self.create_fleet()
+        self.history_events()
+        self.import_history()
+        self.maintenance_history()
+        self.s.add(Setting(key="demo_anchor", value={"day0": iso(self.day0), "seeded_at": iso(self.now)}))
+        self.s.commit()
+        write_demo_logs(self.day0)
+
+
+# ------------------------------------------------------------------ демо-журналы для сценариев
+def _flights_at(serial: str, day: datetime, start_h: int, durations: list[int], gap=35, with_ids=True, prefix=""):
+    out, t = [], day + timedelta(hours=start_h)
+    for i, m in enumerate(durations, 1):
+        e = t + timedelta(minutes=m)
+        f = {"start": iso(t), "end": iso(e), "cycles": 1, "mission": MISSIONS[i % len(MISSIONS)], "pilot": PILOTS[i % 4]}
+        if with_ids:
+            f = {"flight_id": f"{serial}-{t:%Y%m%d}-{prefix}{i:02d}", **f}
+        out.append(f)
+        t = e + timedelta(minutes=gap)
+    return out
+
+
+def _csv(rows: list[dict], serial_default=None) -> str:
+    head = "aircraft_serial,flight_id,start_utc,end_utc,cycles,mission,pilot"
+    lines = ["# sokol-flightlog/1.0 CSV", head]
+    for r in rows:
+        lines.append(",".join([r.get("aircraft_serial", serial_default) or "", r.get("flight_id", ""), r["start"],
+                               r["end"], str(r.get("cycles", 1)), r.get("mission", ""), r.get("pilot", "")]))
+    return "\n".join(lines) + "\n"
+
+
+def write_demo_logs(day0: datetime):
+    DEMO_LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    for old in DEMO_LOGS_DIR.glob("*"):
+        old.unlink()
+    d1, d2, d3 = day0 - timedelta(days=1), day0 - timedelta(days=2), day0 - timedelta(days=3)
+    files = []
+
+    # 1. Расчёт наработки: Борт 01, 8 полётов (3,52 ч, 8 циклов)
+    f1 = _flights_at("SK-M4-001", d1, 6, [24, 31, 27, 19, 33, 26, 29, 22])
+    doc1 = {"format": logs.FORMAT_ID, "log_id": f"SK-M4-001-{d1:%Y%m%d}", "aircraft_serial": "SK-M4-001",
+            "source": "НСУ «СОКОЛ-Наземка» v3.2, выгрузка за смену", "flights": f1}
+    c1 = json.dumps(doc1, ensure_ascii=False, indent=2).encode()
+    (DEMO_LOGS_DIR / "01_SK-M4-001_smena.json").write_bytes(c1)
+    files.append({"file": "01_SK-M4-001_smena.json", "scenario": 1, "title": "Журнал смены «Борт 01»",
+                  "description": "8 полётов, 3,52 ч, 8 циклов. Наработка начисляется борту и всем 7 установленным узлам; "
+                                 "IMU3-0206 и ESC40-0301 переходят в «просрочено»."})
+
+    # 2. Перестановка: Борт 03 летает после установки ПК с Борта 02 (6 полётов, 4,85 ч)
+    f2 = _flights_at("SK-M4-003", d1, 7, [45, 52, 48, 41, 50, 55])
+    for f in f2:
+        f["aircraft_serial"] = "SK-M4-003"
+    (DEMO_LOGS_DIR / "02_SK-M4-003_posle_perestanovki.csv").write_text(_csv(f2), "utf-8")
+    files.append({"file": "02_SK-M4-003_posle_perestanovki.csv", "scenario": 2,
+                  "title": "Журнал «Борт 03» после перестановки ПК",
+                  "description": "6 полётов, 4,85 ч. Импортировать ПОСЛЕ перестановки FC7-0102 с «Борт 02» на «Борт 03» "
+                                 f"с датой операции {d2:%d.%m.%Y} (позавчера)."})
+
+    # 3a. Повтор того же файла (побайтовая копия)
+    (DEMO_LOGS_DIR / "03_SK-M4-001_smena_POVTOR.json").write_bytes(c1)
+    files.append({"file": "03_SK-M4-001_smena_POVTOR.json", "scenario": 3, "title": "Повторная загрузка журнала №1",
+                  "description": "Побайтовая копия журнала №1 под другим именем. Ожидается: «Повтор — не начислено»."})
+
+    # 3b. Другая выгрузка тех же полётов (без ID) + 2 новых полёта
+    f3 = _flights_at("SK-M4-001", d1, 6, [24, 31, 27, 19, 33, 26, 29, 22], with_ids=False)
+    f3 += [{"flight_id": f"SK-M4-001-{d1:%Y%m%d}-E{i}", **f}
+           for i, f in enumerate(_flights_at("SK-M4-001", d1, 16, [21, 18], with_ids=False), 1)]
+    for f in f3:
+        f["aircraft_serial"] = "SK-M4-001"
+    (DEMO_LOGS_DIR / "04_SK-M4-001_bortovoi_registrator.csv").write_text(_csv(f3), "utf-8")
+    files.append({"file": "04_SK-M4-001_bortovoi_registrator.csv", "scenario": 3,
+                  "title": "Выгрузка бортового регистратора «Борт 01» (пересекается с №1)",
+                  "description": "Те же 8 полётов без идентификаторов + 2 новых. Ожидается: начислены только 2 новых полёта, "
+                                 "8 распознаны как дубликаты по пересечению времени."})
+
+    # 5. Флот VTOL: многобортовой CSV
+    f5 = [dict(f, aircraft_serial="SK-VT2-011") for f in _flights_at("SK-VT2-011", d2, 6, [62, 71, 55], prefix="F")]
+    f5 += [dict(f, aircraft_serial="SK-VT2-012") for f in _flights_at("SK-VT2-012", d2, 7, [74, 66], prefix="F")]
+    (DEMO_LOGS_DIR / "05_flot_VTOL.csv").write_text(_csv(f5), "utf-8")
+    files.append({"file": "05_flot_VTOL.csv", "scenario": 1, "title": "Сводный журнал звена VTOL (2 борта)",
+                  "description": "Один CSV на несколько бортов: «Борт 11» — 3 полёта, «Борт 12» — 2 полёта."})
+
+    # 6. Журнал с ошибками
+    bad = [
+        {"aircraft_serial": "SK-VT2-011", "flight_id": f"SK-VT2-011-{d3:%Y%m%d}-01",
+         "start": iso(d3 + timedelta(hours=8)), "end": iso(d3 + timedelta(hours=9, minutes=5))},
+        {"aircraft_serial": "SK-X-999", "flight_id": "X-1", "start": iso(d3 + timedelta(hours=8)),
+         "end": iso(d3 + timedelta(hours=9))},
+        {"aircraft_serial": "SK-VT2-011", "flight_id": "BAD-2", "start": iso(d3 + timedelta(hours=12)),
+         "end": iso(d3 + timedelta(hours=11))},
+        {"aircraft_serial": "SK-VT2-012", "flight_id": "BAD-3", "start": iso(day0 + timedelta(days=5)),
+         "end": iso(day0 + timedelta(days=5, hours=1))},
+    ]
+    (DEMO_LOGS_DIR / "06_s_oshibkami.csv").write_text(_csv(bad), "utf-8")
+    files.append({"file": "06_s_oshibkami.csv", "scenario": 0, "title": "Журнал с ошибками (валидация)",
+                  "description": "1 корректный полёт и 3 ошибочных: неизвестный борт, посадка раньше взлёта, дата в будущем."})
+    (DEMO_LOGS_DIR / "index.json").write_text(json.dumps(files, ensure_ascii=False, indent=2), "utf-8")
+
+
+# ------------------------------------------------------------------ точки входа
+def seed(now: datetime | None = None):
+    with SessionLocal() as s:
+        Seeder(s, now).run()
+
+
+def seed_if_empty():
+    with SessionLocal() as s:
+        has = s.scalar(select(Aircraft.id).limit(1))
+        anchor = s.get(Setting, "demo_anchor")
+    if not has:
+        seed()
+    elif anchor and not (DEMO_LOGS_DIR / "index.json").exists():
+        write_demo_logs(datetime.fromisoformat(anchor.value["day0"][:-1]))
+
+
+def reset_and_seed(now: datetime | None = None) -> dict:
+    Base.metadata.drop_all(engine)
+    Base.metadata.create_all(engine)
+    seed(now)
+    return {"message": "Демо-данные пересозданы"}
+
+
+if __name__ == "__main__":
+    reset_and_seed()
+    print("Демо-данные созданы. Журналы для импорта:", DEMO_LOGS_DIR)
