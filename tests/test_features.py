@@ -212,3 +212,28 @@ def test_migration_adds_resource_columns(tmp_path):
     migrate(eng)
     cols = {x["name"] for x in inspect(eng).get_columns("components")}
     assert {"resource_hours", "resource_cycles", "resource_days"} <= cols
+
+
+def test_aircraft_images(client):
+    lib = client.get("/api/drone-images").json()
+    assert len(lib["presets"]) == 5
+    for p in lib["presets"]:
+        assert client.get(p["url"]).status_code == 200
+    a = by_serial(client, "TBT-M4-001")
+    assert a["image"] == "/static/drones/inspection.svg"          # демо-данные с картинками
+    r = client.put(f"/api/aircraft/{a['id']}/image", json={"image": "/static/drones/agro.svg"})
+    assert r.status_code == 200 and by_serial(client, "TBT-M4-001")["image"].endswith("agro.svg")
+    assert client.put(f"/api/aircraft/{a['id']}/image", json={"image": "/etc/passwd"}).status_code == 400
+    assert client.put(f"/api/aircraft/{a['id']}/image", json={"image": "/media/../tbo.db"}).status_code == 400
+    # загрузка своего фото
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 64
+    r = client.post(f"/api/aircraft/{a['id']}/image", files={"file": ("my.png", png, "image/png")})
+    assert r.status_code == 200
+    url = r.json()["image"]
+    assert url.startswith("/media/") and client.get(url).content == png
+    assert any(u["url"] == url for u in client.get("/api/drone-images").json()["uploaded"])
+    # SVG и прочее не принимаем
+    r = client.post(f"/api/aircraft/{a['id']}/image", files={"file": ("x.svg", b"<svg onload=alert(1)/>", "image/svg+xml")})
+    assert r.status_code == 400
+    # убрать картинку
+    assert client.put(f"/api/aircraft/{a['id']}/image", json={"image": None}).json()["image"] is None

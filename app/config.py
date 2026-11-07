@@ -5,6 +5,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("TBO_DATA_DIR", BASE_DIR / "data"))
 DATABASE_URL = os.environ.get("TBO_DATABASE_URL", f"sqlite:///{DATA_DIR / 'tbo.db'}")
 DEMO_LOGS_DIR = DATA_DIR / "demo_logs"
+# Загруженные фото бортов (раздаются по /media)
+UPLOADS_DIR = DATA_DIR / "uploads"
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
 # Автозаполнение демо-данными при первом запуске (пустая БД)
 AUTO_SEED = os.environ.get("TBO_AUTO_SEED", "1") == "1"
 # Допуск на расхождение часов при проверке «полёт в будущем», минуты

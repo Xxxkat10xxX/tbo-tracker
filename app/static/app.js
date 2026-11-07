@@ -235,6 +235,36 @@ async function openMaintenanceModal({ target, entity, rules, ruleId, onDone }) {
   });
 }
 
+// ------------------------------------------------------------------ фото бортов
+const NO_PHOTO = "data:image/svg+xml," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 500"><rect width="800" height="500" fill="#eef1f6"/><g fill="none" stroke="#b9c2d0" stroke-width="10" stroke-linecap="round"><circle cx="300" cy="200" r="52"/><circle cx="500" cy="200" r="52"/><circle cx="300" cy="320" r="52"/><circle cx="500" cy="320" r="52"/><path d="M336 236 L464 284 M464 236 L336 284"/></g><rect x="370" y="230" width="60" height="60" rx="10" fill="#b9c2d0"/></svg>');
+function droneImg(a, mode) {
+  const src = a.image || NO_PHOTO;
+  return `<img class="drone-${mode}" src="${esc(src)}" alt="${esc(a.name)}" loading="lazy">`;
+}
+async function openPhotoPicker(a, onDone) {
+  const lib = await GET("/api/drone-images");
+  const tile = (url, title, sub) => `<button class="ph-tile ${a.image === url ? "sel" : ""}" data-url="${esc(url)}">
+      <img src="${esc(url)}" alt=""><span class="ph-cap"><b>${esc(title)}</b>${sub ? `<span>${esc(sub)}</span>` : ""}</span></button>`;
+  const bg = modal(`Фото борта ${a.name}`, `
+    <h3>Набор иллюстраций по отраслям</h3>
+    <div class="ph-grid">${lib.presets.map((p) => tile(p.url, p.title, p.industry)).join("")}</div>
+    ${lib.uploaded.length ? `<h3 style="margin-top:16px">Загруженные фото</h3><div class="ph-grid">${lib.uploaded.map((u) => tile(u.url, u.title)).join("")}</div>` : ""}
+    <div class="ph-actions"><label class="btn primary" style="margin:0;color:#fff;font-size:14px">⇪ Загрузить своё фото<input type="file" id="ph-file" accept="image/jpeg,image/png,image/webp" hidden></label>
+      <span class="hint">JPEG, PNG или WebP до 8 МБ. Лучше всего — горизонтальный кадр 16:10.</span>
+      ${a.image ? '<button class="sm danger" id="ph-none" style="margin-left:auto">Убрать фото</button>' : ""}</div>`, { wide: true });
+  const done = (msg) => { toast(msg); bg.remove(); AIRCRAFT_CACHE = null; onDone && onDone(); };
+  $$(".ph-tile", bg).forEach((b) => b.addEventListener("click", async () => {
+    try { const r = await api("PUT", `/api/aircraft/${a.id}/image`, { image: b.dataset.url }); done(r.message); } catch (e) { toast(e.message, true); }
+  }));
+  const none = $("#ph-none", bg);
+  if (none) none.onclick = async () => { try { const r = await api("PUT", `/api/aircraft/${a.id}/image`, { image: null }); done(r.message); } catch (e) { toast(e.message, true); } };
+  $("#ph-file", bg).onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    try { const r = await api("POST", `/api/aircraft/${a.id}/image`, fd, true); done(r.message); } catch (err) { toast(err.message, true); }
+  };
+}
+
 // ------------------------------------------------------------------ ресурс и свои типы
 const RES_HINT = "Максимальный износ конкретного экземпляра (по паспорту, формуляру, решению эксплуатанта). Считается от начала эксплуатации, работами не обнуляется; срабатывает первый достигнутый порог. Пустое поле — порог не задан.";
 function resourceFields(r = {}) {
@@ -352,8 +382,8 @@ function readiness(a) {
 }
 
 function fleetTable(list) {
-  return `<div class="table-wrap"><table><thead><tr><th>Борт</th><th>Тип</th><th>Статус</th><th>Готовность (борт + узлы)</th><th class="num">Налёт</th><th class="num">Циклы</th><th class="num">Полёты</th><th>Базирование</th></tr></thead><tbody>
-  ${list.map((a) => `<tr><td><a href="#/aircraft/${a.id}"><b>${esc(a.name)}</b></a><div class="small muted mono">${esc(a.serial)}</div></td>
+  return `<div class="table-wrap"><table class="fleet"><thead><tr><th style="width:84px"></th><th>Борт</th><th>Тип</th><th>Статус</th><th>Готовность (борт + узлы)</th><th class="num">Налёт</th><th class="num">Циклы</th><th class="num">Полёты</th><th>Базирование</th></tr></thead><tbody>
+  ${list.map((a) => `<tr><td><a href="#/aircraft/${a.id}">${droneImg(a, "thumb")}</a></td><td><a href="#/aircraft/${a.id}"><b>${esc(a.name)}</b></a><div class="small muted mono">${esc(a.serial)}</div></td>
     <td>${esc(a.type.name)}</td><td>${acBadge(a)}</td><td>${readiness(a)}</td>
     <td class="num">${hrs(a.hours)}</td><td class="num">${num(a.cycles, 0)}</td><td class="num">${num(a.flights, 0)}</td><td class="small">${esc(a.base || "")}</td></tr>`).join("")}
   </tbody></table></div>`;
@@ -364,7 +394,13 @@ async function pageAircraftList() {
   const list = await aircraftList(true);
   view().innerHTML = `<div class="page-head"><div><h1>Парк БПЛА</h1><div class="sub">Электронные паспорта аппаратов</div></div>
     <button class="primary" id="add">+ Добавить борт</button></div>
-    <div class="card">${fleetTable(list)}</div>`;
+    <div class="fleet-grid">${list.map((a) => `<a class="fleet-card" href="#/aircraft/${a.id}">
+      <div class="fc-img">${droneImg(a, "cover")}<span class="fc-status">${acBadge(a)}</span></div>
+      <div class="fc-body"><div class="fc-title"><b>${esc(a.name)}</b><span class="mono muted small">${esc(a.serial)}</span></div>
+        <div class="small muted">${esc(a.type.name)} · ${esc(a.base || "")}</div>
+        <div class="fc-ready small">${readiness(a)}</div>
+        <div class="fc-nums"><div><b>${hrs(a.hours)}</b><span>налёт</span></div><div><b>${num(a.cycles, 0)}</b><span>циклов</span></div><div><b>${a.slots_filled}/${a.slots_total}</b><span>позиций</span></div></div>
+      </div></a>`).join("")}</div>`;
   $("#add").onclick = openAircraftCreate;
 }
 
@@ -400,14 +436,15 @@ async function pageAircraft(id) {
       <div class="sub">${esc(a.type.name)} · ${esc(a.operator || "")} · ${esc(a.base || "")} · в эксплуатации с ${fmtD(a.in_service_at)}</div></div>
       <div class="actions"><select id="st" style="width:auto">${Object.entries(m.aircraft_statuses).map(([k, v]) => `<option value="${k}" ${k === a.status ? "selected" : ""}>${esc(v)}</option>`).join("")}</select>
       <button id="res">⚙ Ресурс</button><button id="mnt">⚑ Зарегистрировать работу</button></div></div>
-    <div class="card"><div class="stat-line">
+    <div class="card ac-hero"><div class="ac-photo">${droneImg(a, "cover")}<button class="sm ac-photo-btn" id="photo">🖼 Изменить фото</button></div>
+    <div class="ac-hero-body"><div class="stat-line">
       <div class="s"><div class="v">${hrs(a.hours)}</div><div class="l">суммарный налёт</div></div>
       <div class="s"><div class="v">${num(a.cycles, 0)}</div><div class="l">циклов (взлёт-посадка)</div></div>
       <div class="s"><div class="v">${num(a.flights, 0)}</div><div class="l">полётов в журналах</div></div>
       <div class="s"><div class="v">${a.slots_filled}/${a.slots_total}</div><div class="l">позиций укомплектовано</div></div>
       <div class="s"><div class="v" style="font-size:15px;padding-top:4px">${readiness(a)}</div><div class="l">допуск к полётам</div></div>
     </div><div class="small muted" style="margin-top:10px">Индивидуальный ресурс борта: <b>${resourceText(a.resource) || "не задан"}</b></div>
-    ${a.notes ? `<div class="notice small" style="margin:12px 0 0">${esc(a.notes)}</div>` : ""}</div>
+    ${a.notes ? `<div class="notice small" style="margin:12px 0 0">${esc(a.notes)}</div>` : ""}</div></div>
     <div class="card"><div class="card-head"><h2>Конфигурация борта — установленные экземпляры узлов</h2><a href="#/components?status=stock">Резерв на складе →</a></div>
       <div class="slots">${a.configuration.map(slotHTML).join("")}</div></div>
     <div class="card"><div class="tabs" id="tabs">
@@ -420,6 +457,7 @@ async function pageAircraft(id) {
   };
   $("#mnt").onclick = () => openMaintenanceModal({ target: "aircraft", entity: { ...a, kind: "aircraft" }, rules: own.map((i) => i.rule), onDone: reload });
   $("#res").onclick = () => openResourceModal({ kind: "aircraft", entity: a, onDone: reload });
+  $("#photo").onclick = () => openPhotoPicker(a, reload);
   $$(".slot [data-act]").forEach((b) => b.addEventListener("click", async () => {
     const slot = a.configuration.find((s) => s.position === b.dataset.pos);
     if (b.dataset.act === "install") {

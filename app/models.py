@@ -81,6 +81,8 @@ class Aircraft(Base):
     resource_hours: Mapped[float | None] = mapped_column(Float)
     resource_cycles: Mapped[int | None] = mapped_column(Integer)
     resource_days: Mapped[int | None] = mapped_column(Integer)
+    # Картинка борта: иллюстрация из набора (/static/drones/…) или загруженное фото (/media/…)
+    image: Mapped[str | None] = mapped_column(String(300))
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 

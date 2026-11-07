@@ -35,6 +35,7 @@ from ..schemas import (
     ComponentPatch,
     ComponentTypeIn,
     EconomicsIn,
+    ImageIn,
     GeneratorIn,
     InstallIn,
     MaintenanceIn,
@@ -43,7 +44,7 @@ from ..schemas import (
     RuleIn,
     UsageEntryIn,
 )
-from ..services import inventory, logs, manual
+from ..services import images, inventory, logs, manual
 from ..services.analytics import analytics
 from ..services.maintenance import STATUS_ORDER, Evaluator, due_items, record_dict, record_maintenance, records_query
 from ..services.usage import (
@@ -132,7 +133,7 @@ def aircraft_brief(a: Aircraft, tot: Usage, summ: dict, positions: set[str]) -> 
         "id": a.id, "serial": a.serial, "name": a.name, "type": {"id": a.type.id, "name": a.type.name, "code": a.type.code},
         "status": a.status, "status_label": AIRCRAFT_STATUSES[a.status], "operator": a.operator, "base": a.base,
         "in_service_at": iso(a.in_service_at), "hours": round(tot.hours, 2), "cycles": tot.cycles, "flights": tot.flights,
-        "slots_total": slots, "slots_filled": filled, "resource": _res(a),
+        "slots_total": slots, "slots_filled": filled, "resource": _res(a), "image": a.image,
         "slots_all": len(a.type.slots or []), "slots_all_filled": len(positions),
         "maintenance": summ, "airworthy": summ["overdue"] == 0 and filled == slots and a.status == "active",
     }
@@ -210,6 +211,27 @@ def patch_aircraft(aid: int, data: AircraftPatch, s: Session = Depends(get_sessi
         setattr(a, k, v)
     _commit(s)
     return {"ok": True}
+
+
+@router.get("/drone-images")
+def drone_images():
+    return {"presets": images.preset_list(), "uploaded": images.uploaded_list()}
+
+
+@router.put("/aircraft/{aid}/image")
+def set_aircraft_image(aid: int, data: ImageIn, s: Session = Depends(get_session)):
+    a = _get(s, Aircraft, aid, "Борт")
+    a.image = images.validate_url(data.image)
+    _commit(s)
+    return {"image": a.image, "message": "Картинка борта обновлена" if a.image else "Картинка борта убрана"}
+
+
+@router.post("/aircraft/{aid}/image")
+async def upload_aircraft_image(aid: int, file: UploadFile = File(...), s: Session = Depends(get_session)):
+    a = _get(s, Aircraft, aid, "Борт")
+    a.image = images.save_upload(await file.read())
+    _commit(s)
+    return {"image": a.image, "message": "Фото загружено и назначено борту"}
 
 
 @router.get("/aircraft/{aid}")

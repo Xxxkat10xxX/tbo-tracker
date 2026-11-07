@@ -104,6 +104,10 @@ class MaintenanceIn(BaseModel):
     new_status: str | None = None
 
 
+class ImageIn(BaseModel):
+    image: str | None = Field(None, max_length=300)
+
+
 class EconomicsIn(BaseModel):
     failure_probability: float = Field(ge=0, le=1)
     failure_cost: float = Field(ge=0)

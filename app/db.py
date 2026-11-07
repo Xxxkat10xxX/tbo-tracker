@@ -29,6 +29,7 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 RESOURCE_COLUMNS = {"resource_hours": "FLOAT", "resource_cycles": "INTEGER", "resource_days": "INTEGER"}
+EXTRA_COLUMNS = {"aircraft": {"image": "VARCHAR(300)"}}
 
 
 def migrate(eng=None):
@@ -41,7 +42,7 @@ def migrate(eng=None):
             if not insp.has_table(table):
                 continue
             have = {c["name"] for c in insp.get_columns(table)}
-            for col, typ in RESOURCE_COLUMNS.items():
+            for col, typ in {**RESOURCE_COLUMNS, **EXTRA_COLUMNS.get(table, {})}.items():
                 if col not in have:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {typ}"))
 

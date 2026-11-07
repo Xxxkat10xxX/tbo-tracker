@@ -105,7 +105,9 @@ AIRCRAFT = [
     ("TBT-VT2-011", "Борт 11", "TBT-VT2", 200, 0.50, (1, 3), (35, 80), "Аэродром «Луговое»"),
     ("TBT-VT2-012", "Борт 12", "TBT-VT2", 150, 0.55, (1, 2), (40, 85), "Аэродром «Луговое»"),
 ]
-HISTORY_END_DAYS = 4  # история полётов заканчивается за 4 дня до T0
+HISTORY_END_DAYS = 4
+DEMO_IMAGES = {"TBT-M4-001": "inspection", "TBT-M4-002": "delivery", "TBT-M4-003": "rescue",
+               "TBT-VT2-011": "mapping", "TBT-VT2-012": "mapping"}  # история полётов заканчивается за 4 дня до T0
 
 
 class Seeder:
@@ -183,7 +185,8 @@ class Seeder:
 
         for serial, name, tcode, days_ago, *_rest, base in AIRCRAFT:
             a = Aircraft(serial=serial, name=name, type_id=self.at[tcode].id, status="active",
-                         operator="Демо-эксплуатант", base=base, in_service_at=self.day(-days_ago, 9))
+                         operator="Демо-эксплуатант", base=base, in_service_at=self.day(-days_ago, 9),
+                         image=f"/static/drones/{DEMO_IMAGES[serial]}.svg")
             self.s.add(a)
             self.s.flush()
             self.ac[serial] = a

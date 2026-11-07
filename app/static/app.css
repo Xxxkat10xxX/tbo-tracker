@@ -180,3 +180,28 @@ details summary { cursor: pointer; color: var(--accent); }
 }
 .timeline li.k-entry::before { background: #8b5cf6; }
 select[multiple] { padding: 4px; }
+
+/* ---------- фото бортов */
+.drone-thumb{width:72px;height:45px;object-fit:cover;border-radius:7px;display:block;border:1px solid var(--line);background:#eef1f6}
+table.fleet td{vertical-align:middle}
+.fleet-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:18px}
+.fleet-card{background:var(--panel);border-radius:12px;box-shadow:var(--shadow);overflow:hidden;color:var(--ink);display:flex;flex-direction:column;transition:box-shadow .15s,transform .15s}
+.fleet-card:hover{text-decoration:none;box-shadow:0 8px 24px rgba(16,24,40,.12);transform:translateY(-2px)}
+.fc-img{position:relative;aspect-ratio:16/10;background:#eef1f6;border-bottom:1px solid var(--line)}
+.drone-cover{width:100%;height:100%;object-fit:cover;display:block}
+.fc-status{position:absolute;left:10px;top:10px}
+.fc-status .badge{box-shadow:0 1px 3px rgba(16,24,40,.15)}
+.fc-body{padding:13px 15px 15px;display:flex;flex-direction:column;gap:5px}
+.fc-title{display:flex;justify-content:space-between;align-items:baseline;gap:8px;font-size:16px}
+.fc-nums{display:flex;gap:18px;margin-top:6px;padding-top:9px;border-top:1px solid var(--line)}
+.fc-nums div{display:flex;flex-direction:column}.fc-nums b{font-size:15px}.fc-nums span{font-size:12px;color:var(--muted)}
+.ac-hero{display:grid;grid-template-columns:minmax(260px,340px) 1fr;gap:22px;align-items:center}
+.ac-photo{position:relative;aspect-ratio:16/10;border-radius:10px;overflow:hidden;background:#eef1f6;border:1px solid var(--line)}
+.ac-photo-btn{position:absolute;right:10px;bottom:10px;background:rgba(255,255,255,.92)!important;backdrop-filter:blur(4px);box-shadow:0 1px 4px rgba(16,24,40,.18)}
+.ph-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+.ph-tile{padding:0!important;display:flex!important;flex-direction:column;align-items:stretch!important;gap:0!important;overflow:hidden;border-radius:10px!important;text-align:left;white-space:normal!important}
+.ph-tile img{width:100%;aspect-ratio:16/10;object-fit:cover;display:block}
+.ph-tile.sel{border-color:var(--accent)!important;box-shadow:0 0 0 2px var(--accent)}
+.ph-cap{padding:8px 10px;display:flex;flex-direction:column;font-size:13px}.ph-cap span{font-size:12px;color:var(--muted);font-weight:400}
+.ph-actions{display:flex;align-items:center;gap:12px;margin-top:16px;flex-wrap:wrap}
+@media (max-width:980px){.ac-hero{grid-template-columns:1fr}}

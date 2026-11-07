@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.routes import router
-from .config import AUTO_SEED
+from .config import AUTO_SEED, UPLOADS_DIR
 from .db import Base, engine, migrate
 from .errors import DomainError
 
@@ -39,6 +39,8 @@ async def domain_error_handler(_req: Request, exc: DomainError):
 
 app.include_router(router)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/media", StaticFiles(directory=UPLOADS_DIR), name="media")
 
 
 @app.get("/", include_in_schema=False)
