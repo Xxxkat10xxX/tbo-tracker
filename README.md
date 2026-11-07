@@ -27,6 +27,8 @@
 ./run.sh
 ```
 
+На Windows — двойной клик по `run.bat` (нужен Python 3.11+ с галочкой «Add python.exe to PATH»).
+
 или вручную:
 
 ```bash
