@@ -1,7 +1,9 @@
 """Картинки бортов: набор иллюстраций БПЛА по отраслям и загруженные фото."""
 from __future__ import annotations
 
+import json
 import uuid
+from pathlib import Path
 
 from ..config import MAX_IMAGE_BYTES, UPLOADS_DIR
 from ..errors import DomainError
@@ -28,11 +30,54 @@ def preset_list() -> list[dict]:
     return [{**p, "url": f"/static/drones/{p['id']}.svg"} for p in PRESETS]
 
 
-def uploaded_list() -> list[dict]:
+INDEX = "index.json"   # подписи фото пула: {имя файла: подпись}
+
+
+def _index() -> dict:
+    f = UPLOADS_DIR / INDEX
+    try:
+        return json.loads(f.read_text("utf-8")) if f.exists() else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_index(data: dict):
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    (UPLOADS_DIR / INDEX).write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+
+
+def uploaded_list(used: dict[str, list[str]] | None = None) -> list[dict]:
+    """Пул загруженных фото (новые сверху). used — {url: [имена бортов]}."""
     if not UPLOADS_DIR.exists():
         return []
-    files = sorted(UPLOADS_DIR.glob("*"), key=lambda f: f.stat().st_mtime, reverse=True)
-    return [{"url": f"/media/{f.name}", "title": "Загруженное фото"} for f in files if f.suffix in (".png", ".jpg", ".webp")]
+    idx, used = _index(), used or {}
+    files = sorted((f for f in UPLOADS_DIR.iterdir() if f.suffix in (".png", ".jpg", ".webp")),
+                   key=lambda f: f.stat().st_mtime, reverse=True)
+    return [{"url": f"/media/{f.name}", "title": idx.get(f.name) or "Своё фото", "used_by": used.get(f"/media/{f.name}", [])}
+            for f in files]
+
+
+def title_from_filename(name: str | None) -> str:
+    stem = Path(name or "").stem.replace("_", " ").replace("-", " ").strip()
+    return stem[:80] or "Своё фото"
+
+
+def delete_upload(url: str, used_by: list[str]):
+    validate_url(url)
+    if not url.startswith("/media/"):
+        raise DomainError("Иллюстрации из набора удалить нельзя")
+    if used_by:
+        raise DomainError(f"Фото назначено бортам: {', '.join(used_by)} — сначала смените им фото", 409)
+    name = url[7:]
+    (UPLOADS_DIR / name).unlink(missing_ok=True)
+    idx = _index(); idx.pop(name, None); _save_index(idx)
+
+
+def rename_upload(url: str, title: str):
+    validate_url(url)
+    if not url.startswith("/media/"):
+        raise DomainError("Подпись можно менять только у своих фото")
+    idx = _index(); idx[url[7:]] = title.strip()[:80] or "Своё фото"; _save_index(idx)
 
 
 def validate_url(url: str | None) -> str | None:
@@ -45,7 +90,7 @@ def validate_url(url: str | None) -> str | None:
     raise DomainError("Неизвестная картинка: выберите из набора или загрузите фото")
 
 
-def save_upload(content: bytes) -> str:
+def save_upload(content: bytes, title: str | None = None) -> str:
     if len(content) > MAX_IMAGE_BYTES:
         raise DomainError("Фото больше 8 МБ", 413)
     ext = next((e for sig, e in SIGNATURES.items() if content.startswith(sig)), None)
@@ -56,4 +101,5 @@ def save_upload(content: bytes) -> str:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     name = f"{uuid.uuid4().hex}.{ext}"
     (UPLOADS_DIR / name).write_bytes(content)
+    idx = _index(); idx[name] = (title or "Своё фото")[:80]; _save_index(idx)
     return f"/media/{name}"

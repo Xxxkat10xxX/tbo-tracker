@@ -237,3 +237,29 @@ def test_aircraft_images(client):
     assert r.status_code == 400
     # убрать картинку
     assert client.put(f"/api/aircraft/{a['id']}/image", json={"image": None}).json()["image"] is None
+
+
+def test_photo_pool(client):
+    png = b"\x89PNG\r\n\x1a\n" + b"\x01" * 40
+    jpg = b"\xff\xd8\xff\xe0" + b"\x02" * 40
+    r = client.post("/api/drone-images", files=[("files", ("Борт_01_на_поле.png", png, "image/png")),
+                                                 ("files", ("hangar.jpg", jpg, "image/jpeg")),
+                                                 ("files", ("bad.svg", b"<svg/>", "image/svg+xml"))])
+    assert r.status_code == 201
+    j = r.json()
+    assert len(j["added"]) == 2 and len(j["errors"]) == 1
+    pool = client.get("/api/drone-images").json()["uploaded"]
+    titles = {u["url"]: u["title"] for u in pool}
+    assert titles[j["added"][0]] == "Борт 01 на поле"
+    # подпись
+    assert client.patch("/api/drone-images", json={"url": j["added"][1], "title": "Ангар"}).status_code == 200
+    assert {u["url"]: u["title"] for u in client.get("/api/drone-images").json()["uploaded"]}[j["added"][1]] == "Ангар"
+    # назначенное фото удалить нельзя, свободное — можно
+    a = by_serial(client, "TBT-M4-002")
+    client.put(f"/api/aircraft/{a['id']}/image", json={"image": j["added"][0]})
+    used = next(u for u in client.get("/api/drone-images").json()["uploaded"] if u["url"] == j["added"][0])
+    assert used["used_by"] == ["Борт 02"]
+    assert client.delete("/api/drone-images", params={"url": j["added"][0]}).status_code == 409
+    assert client.delete("/api/drone-images", params={"url": j["added"][1]}).status_code == 200
+    assert client.get(j["added"][1]).status_code == 404
+    assert client.delete("/api/drone-images", params={"url": "/static/drones/agro.svg"}).status_code == 400

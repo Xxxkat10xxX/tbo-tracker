@@ -108,6 +108,11 @@ class ImageIn(BaseModel):
     image: str | None = Field(None, max_length=300)
 
 
+class ImageTitleIn(BaseModel):
+    url: str = Field(max_length=300)
+    title: str = Field(min_length=1, max_length=80)
+
+
 class EconomicsIn(BaseModel):
     failure_probability: float = Field(ge=0, le=1)
     failure_cost: float = Field(ge=0)

@@ -241,28 +241,51 @@ function droneImg(a, mode) {
   const src = a.image || NO_PHOTO;
   return `<img class="drone-${mode}" src="${esc(src)}" alt="${esc(a.name)}" loading="lazy">`;
 }
+// a — борт, которому выбираем фото; без борта окно работает как менеджер пула
 async function openPhotoPicker(a, onDone) {
-  const lib = await GET("/api/drone-images");
-  const tile = (url, title, sub) => `<button class="ph-tile ${a.image === url ? "sel" : ""}" data-url="${esc(url)}">
-      <img src="${esc(url)}" alt=""><span class="ph-cap"><b>${esc(title)}</b>${sub ? `<span>${esc(sub)}</span>` : ""}</span></button>`;
-  const bg = modal(`Фото борта ${a.name}`, `
-    <h3>Набор иллюстраций по отраслям</h3>
-    <div class="ph-grid">${lib.presets.map((p) => tile(p.url, p.title, p.industry)).join("")}</div>
-    ${lib.uploaded.length ? `<h3 style="margin-top:16px">Загруженные фото</h3><div class="ph-grid">${lib.uploaded.map((u) => tile(u.url, u.title)).join("")}</div>` : ""}
-    <div class="ph-actions"><label class="btn primary" style="margin:0;color:#fff;font-size:14px">⇪ Загрузить своё фото<input type="file" id="ph-file" accept="image/jpeg,image/png,image/webp" hidden></label>
-      <span class="hint">JPEG, PNG или WebP до 8 МБ. Лучше всего — горизонтальный кадр 16:10.</span>
-      ${a.image ? '<button class="sm danger" id="ph-none" style="margin-left:auto">Убрать фото</button>' : ""}</div>`, { wide: true });
+  const pick = !!a;
+  const bg = modal(pick ? `Фото борта ${a.name}` : "Пул фото бортов", '<div class="loading">Загрузка…</div>', { wide: true });
+  const body = $(".modal-b", bg);
   const done = (msg) => { toast(msg); bg.remove(); AIRCRAFT_CACHE = null; onDone && onDone(); };
-  $$(".ph-tile", bg).forEach((b) => b.addEventListener("click", async () => {
-    try { const r = await api("PUT", `/api/aircraft/${a.id}/image`, { image: b.dataset.url }); done(r.message); } catch (e) { toast(e.message, true); }
-  }));
-  const none = $("#ph-none", bg);
-  if (none) none.onclick = async () => { try { const r = await api("PUT", `/api/aircraft/${a.id}/image`, { image: null }); done(r.message); } catch (e) { toast(e.message, true); } };
-  $("#ph-file", bg).onchange = async (e) => {
-    const f = e.target.files[0]; if (!f) return;
-    const fd = new FormData(); fd.append("file", f);
-    try { const r = await api("POST", `/api/aircraft/${a.id}/image`, fd, true); done(r.message); } catch (err) { toast(err.message, true); }
-  };
+  const usedTxt = (u) => (u.used_by && u.used_by.length ? `на бортах: ${u.used_by.join(", ")}` : "не назначено");
+  const tile = (u, own) => `<div class="ph-tile ${pick && a.image === u.url ? "sel" : ""} ${pick ? "pickable" : ""}" data-url="${esc(u.url)}">
+      <img src="${esc(u.url)}" alt="" loading="lazy">
+      ${own ? `<div class="ph-tools"><button class="sm" data-rename="${esc(u.url)}" title="Подпись">✎</button><button class="sm danger" data-del="${esc(u.url)}" title="Удалить из пула">✕</button></div>` : ""}
+      <span class="ph-cap"><b>${esc(u.title)}</b><span>${esc(own ? usedTxt(u) : u.industry)}</span></span></div>`;
+  async function render() {
+    const lib = await GET("/api/drone-images");
+    body.innerHTML = `
+      <div class="ph-head"><h3>Мой пул фото <span class="muted">(${lib.uploaded.length})</span></h3>
+        <label class="btn primary sm" style="margin:0;color:#fff">＋ Добавить фото в пул<input type="file" id="ph-add" accept="image/jpeg,image/png,image/webp" multiple hidden></label></div>
+      ${lib.uploaded.length ? `<div class="ph-grid">${lib.uploaded.map((u) => tile(u, true)).join("")}</div>`
+        : `<div class="ph-empty">Загрузите свои фото бортов — до 20 файлов за раз (JPEG, PNG, WebP до 8 МБ). Они появятся здесь, и их можно будет назначать любому борту.</div>`}
+      <h3 style="margin-top:18px">Набор иллюстраций по отраслям</h3>
+      <div class="ph-grid">${lib.presets.map((u) => tile(u, false)).join("")}</div>
+      ${pick ? `<div class="ph-actions"><span class="hint">${pick ? "Нажмите на фото, чтобы назначить его борту. Лучше всего — горизонтальный кадр 16:10." : ""}</span>
+        ${a.image ? '<button class="sm danger" id="ph-none" style="margin-left:auto">Убрать фото у борта</button>' : ""}</div>` : ""}`;
+    if (pick) $$(".ph-tile", body).forEach((el) => el.addEventListener("click", async (e) => {
+      if (e.target.closest(".ph-tools")) return;
+      try { const r = await api("PUT", `/api/aircraft/${a.id}/image`, { image: el.dataset.url }); done(r.message); } catch (err) { toast(err.message, true); }
+    }));
+    const none = $("#ph-none", body);
+    if (none) none.onclick = async () => { try { const r = await api("PUT", `/api/aircraft/${a.id}/image`, { image: null }); done(r.message); } catch (e) { toast(e.message, true); } };
+    $("#ph-add", body).onchange = async (e) => {
+      const files = [...e.target.files]; if (!files.length) return;
+      const fd = new FormData(); files.forEach((f) => fd.append("files", f));
+      try { const r = await api("POST", "/api/drone-images", fd, true); toast(r.message, r.errors.length > 0); render(); } catch (err) { toast(err.message, true); }
+    };
+    $$("[data-del]", body).forEach((b) => b.addEventListener("click", async () => {
+      try { const r = await api("DELETE", `/api/drone-images?url=${encodeURIComponent(b.dataset.del)}`); toast(r.message); render(); } catch (err) { toast(err.message, true); }
+    }));
+    $$("[data-rename]", body).forEach((b) => b.addEventListener("click", () => {
+      const cap = b.closest(".ph-tile").querySelector(".ph-cap b");
+      const m = modal("Подпись фото", `<div class="field"><label>Подпись</label><input name="title" value="${esc(cap.textContent)}" maxlength="80"></div>`, {
+        onOk: async (root) => { const r = await api("PATCH", "/api/drone-images", { url: b.dataset.rename, title: val(root, "title") }); toast(r.message); render(); },
+      });
+      $('[name="title"]', m).select();
+    }));
+  }
+  render();
 }
 
 // ------------------------------------------------------------------ ресурс и свои типы
@@ -327,6 +350,7 @@ const routes = [
   [/^#\/scenarios$/, "scenarios", pageScenarios],
 ];
 async function router() {
+  $$(".modal-bg").forEach((m) => m.remove());     // окна не переживают переход на другую страницу
   const hash = location.hash || "#/";
   for (const [re, key, fn] of routes) {
     const m = hash.match(re);
@@ -393,7 +417,7 @@ function fleetTable(list) {
 async function pageAircraftList() {
   const list = await aircraftList(true);
   view().innerHTML = `<div class="page-head"><div><h1>Парк БПЛА</h1><div class="sub">Электронные паспорта аппаратов</div></div>
-    <button class="primary" id="add">+ Добавить борт</button></div>
+    <div class="actions"><button id="pool">🖼 Пул фото</button><button class="primary" id="add">+ Добавить борт</button></div></div>
     <div class="fleet-grid">${list.map((a) => `<a class="fleet-card" href="#/aircraft/${a.id}">
       <div class="fc-img">${droneImg(a, "cover")}<span class="fc-status">${acBadge(a)}</span></div>
       <div class="fc-body"><div class="fc-title"><b>${esc(a.name)}</b><span class="mono muted small">${esc(a.serial)}</span></div>
@@ -402,6 +426,7 @@ async function pageAircraftList() {
         <div class="fc-nums"><div><b>${hrs(a.hours)}</b><span>налёт</span></div><div><b>${num(a.cycles, 0)}</b><span>циклов</span></div><div><b>${a.slots_filled}/${a.slots_total}</b><span>позиций</span></div></div>
       </div></a>`).join("")}</div>`;
   $("#add").onclick = openAircraftCreate;
+  $("#pool").onclick = () => openPhotoPicker(null, reload);
 }
 
 async function openAircraftCreate() {

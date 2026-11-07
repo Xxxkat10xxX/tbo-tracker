@@ -36,6 +36,7 @@ from ..schemas import (
     ComponentTypeIn,
     EconomicsIn,
     ImageIn,
+    ImageTitleIn,
     GeneratorIn,
     InstallIn,
     MaintenanceIn,
@@ -213,9 +214,47 @@ def patch_aircraft(aid: int, data: AircraftPatch, s: Session = Depends(get_sessi
     return {"ok": True}
 
 
+def _image_usage(s: Session) -> dict[str, list[str]]:
+    used = defaultdict(list)
+    for a in s.scalars(select(Aircraft).where(Aircraft.image.is_not(None)).order_by(Aircraft.name)):
+        used[a.image].append(a.name)
+    return used
+
+
 @router.get("/drone-images")
-def drone_images():
-    return {"presets": images.preset_list(), "uploaded": images.uploaded_list()}
+def drone_images(s: Session = Depends(get_session)):
+    used = _image_usage(s)
+    return {"presets": [{**p, "used_by": used.get(p["url"], [])} for p in images.preset_list()],
+            "uploaded": images.uploaded_list(used)}
+
+
+@router.post("/drone-images", status_code=201)
+async def add_to_pool(files: list[UploadFile] = File(...)):
+    """Загрузка своих фото в пул (без назначения борту). Можно несколько файлов сразу."""
+    if len(files) > 20:
+        raise DomainError("За раз — не больше 20 фото")
+    added, errors = [], []
+    for f in files:
+        try:
+            added.append(images.save_upload(await f.read(), images.title_from_filename(f.filename)))
+        except DomainError as e:
+            errors.append(f"{f.filename}: {e.message}")
+    if not added:
+        raise DomainError("; ".join(errors) or "Нет файлов")
+    msg = f"Добавлено в пул: {len(added)}" + (f". Не принято: {'; '.join(errors)}" if errors else "")
+    return {"added": added, "errors": errors, "message": msg}
+
+
+@router.patch("/drone-images")
+def rename_in_pool(data: ImageTitleIn):
+    images.rename_upload(data.url, data.title)
+    return {"message": "Подпись сохранена"}
+
+
+@router.delete("/drone-images")
+def delete_from_pool(url: str, s: Session = Depends(get_session)):
+    images.delete_upload(url, _image_usage(s).get(url, []))
+    return {"message": "Фото удалено из пула"}
 
 
 @router.put("/aircraft/{aid}/image")
@@ -229,7 +268,7 @@ def set_aircraft_image(aid: int, data: ImageIn, s: Session = Depends(get_session
 @router.post("/aircraft/{aid}/image")
 async def upload_aircraft_image(aid: int, file: UploadFile = File(...), s: Session = Depends(get_session)):
     a = _get(s, Aircraft, aid, "Борт")
-    a.image = images.save_upload(await file.read())
+    a.image = images.save_upload(await file.read(), images.title_from_filename(file.filename))
     _commit(s)
     return {"image": a.image, "message": "Фото загружено и назначено борту"}
 
