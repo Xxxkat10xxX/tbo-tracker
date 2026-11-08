@@ -1697,7 +1697,7 @@ async function pageScenarios() {
   const d2 = daysAgo(2, 12);
   view().innerHTML = `<div class="page-head"><div><h1>Сценарии проверки</h1><div class="sub">Обязательные сценарии приёмки на демо-данных. Каждый можно пройти вручную через интерфейс или выполнить автоматически с таблицей «до / после».</div></div>
     <button id="reset2">↺ Сбросить демо-данные</button></div>
-    <div class="notice small">Рекомендуемый порядок: 1 → 2 → 3 → 4 → 5. Сценарии меняют данные; для повторного прогона нажмите «Сбросить демо-данные».</div>
+    <div class="notice small">Рекомендуемый порядок: 1 → 10. Сценарии меняют данные; для повторного прогона нажмите «Сбросить демо-данные».</div>
     ${scenarioCard(1, "Расчёт наработки по журналу эксплуатации", `
       <li>Откройте ${link("TBT-M4-001")} и запомните налёт борта и наработку узлов в блоке «Конфигурация борта».</li>
       <li>Раздел <a href="#/imports">Импорт журналов</a> → демо-журнал «Журнал смены «Борт 01»» (<span class="mono">01_TBT-M4-001_smena.json</span>) → «Импорт».</li>
@@ -1719,9 +1719,29 @@ async function pageScenarios() {
     ${scenarioCard(5, "Проведение обслуживания по напоминанию", `
       <li>В <a href="#/maintenance">ТО и напоминания</a> найдите «ТО бортового вычислителя» для ${link("BVK2-0405")} (${link("TBT-VT2-012")}) → «Выполнить».</li>
       <li>Ожидается: напоминание уходит в «В норме», интервал отсчитывается от даты работы, сквозная наработка узла не изменилась, «Борт 12» снова допущен к полётам.</li>
-      <li>Аналогично можно выполнить калибровку ${link("IMU3-0206")} после сценария 1.</li>`)}`;
+      <li>Аналогично можно выполнить калибровку ${link("IMU3-0206")} после сценария 1.</li>`)}
+    <h2 style="margin:22px 0 10px">Критерии конкурсного задания</h2>
+    ${scenarioCard(6, "Автономный полёт по заданному маршруту (К1, К4)", `
+      <li>Раздел <a href="#/missions">Миссии и автономный полёт</a> → «Облёт ЛЭП, пролёты 1–4» (${link("TBT-M4-001")}). Щелчком по карте добавьте точку, перетащите её, задайте высоту и удержание.</li>
+      <li>«▶ Выполнить автономный полёт»: предполётная проверка допуска → взлёт, полёт по точкам с удержанием, возврат (RTL), посадка — трек на карте и телеметрия.</li>
+      <li>Ожидается: полёт записан в журнал, борту и всем установленным узлам начислены часы и 1 цикл; файл миссии выгружается в .plan / .waypoints (QGroundControl, ArduPilot, PX4).</li>`)}
+    ${scenarioCard(7, "Падение по данным датчиков и запрет вылета (К3, К7)", `
+      <li><a href="#/imports">Импорт журналов</a> → <span class="mono">07_TBT-VT2-011_padenie.json</span>: в полёте записан акселерометр 50 Гц.</li>
+      <li>Ожидается: выявлено падение (невесомость → удар ≈ 7,6 g), счётчик «падений / столкновений» ${link("TBT-VT2-011")} = 1, уведомления «Внеплановый осмотр» (борт) и «Проверка ИНС после удара» (${link("IMU3-0204")}).</li>
+      <li>В <a href="#/missions">Миссиях</a> полёт «Аэрофотосъёмка участка №12» на «Борт 11» отклоняется предполётной проверкой до выполнения осмотра.</li>`)}
+    ${scenarioCard(8, "Журнал установок/снятий/перестановок из Excel и PDF (К5, К6)", `
+      <li><a href="#/imports">Импорт журналов</a> → <span class="mono">08_dvizhenie_uzlov.xlsx</span>: 6 строк — 5 операций применены в хронологическом порядке, строка с несуществующим узлом FC7-9999 отклонена с причиной.</li>
+      <li>Затем <span class="mono">09_dvizhenie_uzlov.pdf</span> — тот же журнал в PDF: все строки распознаны как уже применённые (повтор), ничего не задвоено.</li>
+      <li>Ожидается: ${link("ESC40-0320")} на «Борт 11 · ESC4», в истории узла оба борта; ${link("ESC40-0302")} в ремонте; наработка и остаточный ресурс пересчитаны.</li>`)}
+    ${scenarioCard(9, "Интерактивная перестановка узла между карточками бортов (К10)", `
+      <li><a href="#/board">Перестановка узлов</a> → перетащите регулятор ${link("ESC40-0301")} (Борт 01 · ESC1) на позицию ESC1 «Борт 02» — подсвечиваются только совместимые позиции; занятая позиция — обмен узлами.</li>
+      <li>Подтвердите дату и основание. Ожидается: карточки обоих бортов обновлены, таблица «было → стало» по паспортам: местоположение изменилось, наработка и UID сохранены, остаточный ресурс пересчитан.</li>
+      <li>С прошедшей датой операции полёты после неё переотносятся — наработка узлов меняется соответственно.</li>`)}
+    ${scenarioCard(10, "Автоматические уведомления (К7)", `
+      <li>Раздел <a href="#/notifications">Уведомления</a>: «Достигнут предельный ресурс» (${link("ESC40-0315")} — индивидуальный ресурс 150 ч исчерпан), «Просрочено» (${link("BVK2-0405")}), «Приближается» (${link("ESC40-0318")}, ${link("IMU3-0206")} …).</li>
+      <li>После импорта журнала или автономного полёта новые позиции появляются всплывающим сообщением (и уведомлением браузера, если оно разрешено); счётчик в меню обновляется каждую минуту.</li>`)}`;
   $("#reset2").onclick = resetDemo;
-  const runners = { 1: runS1, 2: runS2, 3: runS3, 4: runS4, 5: runS5 };
+  const runners = { 1: runS1, 2: runS2, 3: runS3, 4: runS4, 5: runS5, 6: runS6, 7: runS7, 8: runS8, 9: runS9, 10: runS10 };
   $$("[data-run]").forEach((b) => b.addEventListener("click", async () => {
     const out = $(`#out${b.dataset.run}`);
     b.disabled = true;
@@ -1834,6 +1854,76 @@ async function runS5() {
     <tr><td>Сквозная наработка узла</td><td>${hrs(c.hours)}</td><td>${hrs(c2.hours)} <span class="small muted">(не изменилась)</span></td></tr>
     ${ac ? `<tr><td>Допуск ${esc(ac.name)}</td><td>${readiness(ac)}</td><td>${readiness(ac2)}</td></tr>` : ""}
     </tbody></table>`;
+}
+
+async function runS6() {
+  const m = (await GET("/api/missions")).find((x) => x.name.startsWith("Облёт ЛЭП"));
+  let aid = m.aircraft_id, refused = "";
+  const fleet = await aircraftList(true);
+  if (!fleet.find((a) => a.id === aid).airworthy) {        // предполётная проверка не пропустит — показать отказ и взять допущенный борт
+    try { await POST(`/api/missions/${m.id}/run`, {}); } catch (e) { refused = `<div class="notice warn"><b>Предполётная проверка:</b> ${esc(e.message)}</div>`; }
+    const ok = fleet.find((a) => a.airworthy);
+    if (!ok) throw new Error("Нет допущенных к полёту бортов — выполните сценарий 5 или сбросьте демо-данные");
+    aid = ok.id; refused += `<div class="small muted" style="margin-bottom:8px">Миссия выполнена на допущенном борту «${esc(ok.name)}».</div>`;
+  }
+  const before = await snapshotAircraft(aid);
+  const r = await POST(`/api/missions/${m.id}/run`, { aircraft_id: aid, wind_ms: 4, wind_from_deg: 250 });
+  const after = await snapshotAircraft(aid);
+  const s = r.summary;
+  return `${refused}<div class="notice ${r.status === "completed" ? "ok" : "bad"}">Миссия «${esc(m.name)}» ${r.status === "completed" ? "выполнена" : "прервана"}: ${fmtDur(s.duration_s)},
+      путь ${num(s.distance_m / 1000, 2)} км, макс. боковое отклонение ${num(s.max_xte_m, 1)} м при ветре ${s.wind.speed_ms} м/с. Фазы: ${[...new Set(r.track.map((p) => PHASE_RU[p[5]]))].join(" → ")}.
+      <a href="#/missions/${m.id}">Открыть миссию с треком →</a></div>${diffTable(mergeSnap(before, after))}`;
+}
+
+async function runS7() {
+  const ac = await bySerial("TBT-VT2-011", "aircraft");
+  const r = await POST("/api/demo-logs/07_TBT-VT2-011_padenie.json/import");
+  const ac2 = await bySerial("TBT-VT2-011", "aircraft");
+  const m = (await GET("/api/missions")).find((x) => x.aircraft_id === ac.id);
+  let pre = "";
+  try { await POST(`/api/missions/${m.id}/run`, {}); pre = '<div class="notice warn">Предполётная проверка пропустила борт (осмотр уже выполнен?)</div>'; } catch (e) { pre = `<div class="notice bad"><b>Вылет запрещён:</b> ${esc(e.message)}</div>`; }
+  return `${r.status === "duplicate" ? '<div class="notice warn">Журнал уже загружен — сбросьте демо-данные для чистого прогона.</div>' : ""}
+    <table><thead><tr><th></th><th>До</th><th>После</th></tr></thead><tbody>
+    <tr><td>Падений / столкновений ${esc(ac.name)}</td><td>${ac.events.fall} / ${ac.events.collision}</td><td><b>${ac2.events.fall} / ${ac2.events.collision}</b></td></tr>
+    <tr><td>Допуск</td><td>${readiness(ac)}</td><td>${readiness(ac2)}</td></tr></tbody></table>
+    ${importResultHTML(r).split("<h3").slice(1).filter((x) => /Мониторинг|Сработавшие/.test(x)).map((x) => "<h3" + x.replace(/<\/div>\s*$/, "")).join("")}${pre}`;
+}
+
+async function runS8() {
+  const r1 = await POST("/api/demo-logs/08_dvizhenie_uzlov.xlsx/import");
+  const r2 = await POST("/api/demo-logs/09_dvizhenie_uzlov.pdf/import");
+  const c = await GET(`/api/components/${(await bySerial("ESC40-0320")).id}`);
+  return `<h3>Excel: ${esc(r1.status_label || r1.status)}</h3>${importResultHTML(r1)}
+    <h3 style="margin-top:14px">PDF того же журнала: ${esc(r2.status_label || r2.status)}</h3><div class="small">${r2.messages.slice(0, 3).map(esc).join("<br>")}${r2.messages.length > 3 ? " …" : ""}</div>
+    <div class="notice ok" style="margin-top:10px">${esc(c.serial)}: ${c.location ? `${esc(c.location.aircraft_name)} · ${esc(c.location.position)}` : esc(c.status_label)}, наработка ${hrs(c.hours)},
+      остаточный ресурс ${residualText(c.residual, true)}; борта в истории: ${[...new Set(c.stints.map((s) => s.aircraft_name))].map(esc).join(", ")}.</div>`;
+}
+
+async function runS9() {
+  const b = await GET("/api/board");
+  const a1 = b.aircraft.find((a) => a.serial === "TBT-M4-001"), a2 = b.aircraft.find((a) => a.serial === "TBT-M4-002");
+  const c1 = a1.slots.find((s) => s.position === "ESC1").component, c2 = a2.slots.find((s) => s.position === "ESC1").component;
+  if (!c1 || !c2) throw new Error("Позиции ESC1 не укомплектованы — сбросьте демо-данные");
+  const before = await Promise.all([c1, c2].map((c) => GET(`/api/components/${c.id}`)));
+  const t0 = Date.now(), at = (k) => new Date(t0 + k * 60000).toISOString(), why = "Демо-сценарий 9: обмен ESC1 между бортами";
+  await POST(`/api/components/${c2.id}/remove`, { at: at(0), to_status: "stock", reason: why });
+  await POST(`/api/components/${c1.id}/transfer`, { aircraft_id: a2.id, position: "ESC1", at: at(1), reason: why });
+  await POST(`/api/components/${c2.id}/install`, { aircraft_id: a1.id, position: "ESC1", at: at(2), reason: why });
+  const after = await Promise.all([c1, c2].map((c) => GET(`/api/components/${c.id}`)));
+  const loc = (c) => (c.location ? `${esc(c.location.aircraft_name)} · ${esc(c.location.position)}` : esc(c.status_label));
+  return `<div class="notice ok">Обмен выполнен теми же операциями, что и перетаскивание на <a href="#/board">доске перестановки</a>.</div>
+    <table><thead><tr><th>Узел</th><th>UID</th><th>Было</th><th>Стало</th><th class="num">Наработка</th><th>Остаточный ресурс</th></tr></thead><tbody>
+    ${after.map((c, k) => `<tr><td><a href="#/components/${c.id}">${esc(c.serial)}</a></td><td class="mono small">${fmtUid(c.uid)}</td><td>${loc(before[k])}</td><td><b>${loc(c)}</b></td>
+      <td class="num">${hrs(c.hours)}</td><td>${residualText(c.residual, true)}</td></tr>`).join("")}</tbody></table>`;
+}
+
+async function runS10() {
+  const d = await refreshNavCount() || await GET("/api/notifications");
+  return `<table><thead><tr><th>Категория</th><th class="num">Кол-во</th><th>Примеры</th></tr></thead><tbody>
+    ${["limit", "overdue", "approaching"].map((k) => `<tr><td>${NOTIF_CAT[k].icon} ${esc(d.categories[k])}</td><td class="num"><b>${d.counts[k]}</b></td>
+      <td class="small">${d.items[k].slice(0, 3).map((i) => `${esc(i.entity.serial)} — ${esc(i.rule.name)}`).join("<br>") || "—"}</td></tr>`).join("")}
+    <tr><td>Падения и столкновения за ${d.days} дн.</td><td class="num"><b>${d.counts.sensor_events}</b></td><td class="small">${d.sensor_events.slice(0, 3).map((e) => `${esc(e.aircraft ? e.aircraft.name : "")} — ${esc(e.kind_label)}`).join("<br>") || "—"}</td></tr>
+    </tbody></table><div class="hint">Полный список с действиями «Выполнить» / «Заменить» — <a href="#/notifications">Уведомления</a>.</div>`;
 }
 
 // ------------------------------------------------------------------ запуск

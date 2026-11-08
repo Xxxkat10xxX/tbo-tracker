@@ -451,3 +451,22 @@ def test_board_and_move_recalculates_passport(client):
     # несовместимая позиция отклоняется
     fc = next(s for s in a1["slots"] if s["position"] == "FC")["component"]
     assert client.post(f"/api/components/{fc['id']}/transfer", json={"aircraft_id": a2["id"], "position": "ESC2"}).status_code == 400
+
+
+def test_component_passport_uid_specs_residual(client):
+    c = client.get(f"/api/components/{by_serial(client, 'FC7-0106')['id']}").json()
+    assert len(c["uid"]) == 32 and c["serial"] == "FC7-0106" and c["in_service_at"] and c["model"]
+    assert any(s["name"] == "Процессор" for s in c["specs"])
+    assert c["residual"]["hours"] == round(2000 - c["hours"], 2) or abs(c["residual"]["hours"] - (2000 - c["hours"])) < 0.01
+    # новый узел получает типовой набор характеристик и свой UID
+    tid = c["type"]["id"]
+    n1 = client.post("/api/components", json={"serial": "FC7-NEW1", "type_id": tid}).json()
+    n2 = client.post("/api/components", json={"serial": "FC7-NEW2", "type_id": tid,
+                                               "specs": [{"name": "Процессор", "value": "STM32H7"}]}).json()
+    assert n1["uid"] != n2["uid"]
+    assert client.get(f"/api/components/{n2['id']}").json()["specs"] == [{"name": "Процессор", "value": "STM32H7"}]
+    # характеристики редактируются, реквизиты UID и серийный номер — нет
+    r = client.patch(f"/api/components/{n1['id']}", json={"specs": [{"name": "Масса", "value": "40 г"}], "uid": "x", "serial": "HACK"})
+    assert r.status_code in (200, 422)
+    after = client.get(f"/api/components/{n1['id']}").json()
+    assert after["uid"] == n1["uid"] and after["serial"] == "FC7-NEW1"

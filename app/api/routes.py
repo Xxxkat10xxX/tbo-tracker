@@ -385,7 +385,7 @@ def create_component(data: ComponentIn, s: Session = Depends(get_session)):
                   in_service_at=_dt(data.in_service_at) or utcnow(), manufactured_at=_dt(data.manufactured_at))
     s.add(c)
     _commit(s)
-    return {"id": c.id}
+    return {"id": c.id, "uid": c.uid, "serial": c.serial}
 
 
 @router.patch("/components/{cid}")
