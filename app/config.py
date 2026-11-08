@@ -1,6 +1,7 @@
 import os
 from pathlib import Path
 
+VERSION = "1.0.0"
 BASE_DIR = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.environ.get("TBO_DATA_DIR", BASE_DIR / "data"))
 DATABASE_URL = os.environ.get("TBO_DATABASE_URL", f"sqlite:///{DATA_DIR / 'tbo.db'}")
@@ -16,3 +17,8 @@ FUTURE_TOLERANCE_MIN = 10
 MAX_FLIGHT_HOURS = 24
 # Окно (дней) для расчёта средней интенсивности эксплуатации при прогнозе
 FORECAST_WINDOW_DAYS = 30
+# Доступ по паролю (HTTP Basic) — включается, если задан пароль. Установщик Raspberry Pi задаёт его сам.
+AUTH_USER = os.environ.get("TBO_AUTH_USER", "admin")
+AUTH_PASSWORD = os.environ.get("TBO_AUTH_PASSWORD", "")
+# Фоновые задачи (уведомления, рассылка, резервные копии) внутри процесса сервера
+SCHEDULER = os.environ.get("TBO_SCHEDULER", "1") == "1"

@@ -299,3 +299,7 @@ table.spec-edit td{padding:3px 4px;border:0}
 .seg-switch a.active { background: var(--panel); color: var(--text, #1f2a3d); box-shadow: 0 1px 3px rgba(20, 30, 50, .12); }
 .chart .lbl .yr { display: block; font-size: 10px; color: var(--muted); line-height: 1.1; }
 .seg-switch a, .seg-switch a:hover { text-decoration: none; }
+
+/* страница «Сервер» */
+label.chk { display: inline-flex; align-items: center; gap: 6px; font-size: 13.5px; margin: 2px 12px 6px 0; cursor: pointer; }
+label.chk input { width: auto; margin: 0; }

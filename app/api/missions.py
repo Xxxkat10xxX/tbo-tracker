@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from ..db import get_session
 from ..errors import DomainError, NotFound
 from ..models import Aircraft, LogImport, Mission, MissionRun
-from ..schemas import MissionIn, MissionRunIn
+from ..schemas import MissionEstimateIn, MissionIn, MissionRunIn
 from ..services import autopilot, logs
 from ..services.maintenance import due_items
 from ..services.usage import current_installations
@@ -64,6 +64,13 @@ def list_missions(s: Session = Depends(get_session)):
         d["last_run"] = _rdict(last) if last else None
         out.append(d)
     return out
+
+
+@router.post("/missions/estimate")
+def estimate_mission(data: MissionEstimateIn):
+    """Протяжённость и оценка времени маршрута — для редактора миссии (без сохранения)."""
+    d = data.model_dump()
+    return autopilot.plan_stats(d) if d["waypoints"] else {"distance_m": 0, "duration_s": 0, "waypoints": 0, "max_alt_m": 0}
 
 
 @router.get("/missions/{mid}")

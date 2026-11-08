@@ -78,7 +78,8 @@ function eventsTable(list) {
 function metricHTML(m) {
   const cls = m.status === "overdue" ? "bad" : m.status === "due_soon" ? "warn" : "";
   const w = Math.min(100, m.ratio * 100);
-  const rem = m.remaining <= 0 ? `<b style="color:var(--bad)">превышено на ${num(-m.remaining, 1)} ${m.unit}</b>`
+  const rem = m.remaining < 0 ? `<b style="color:var(--bad)">превышено на ${num(-m.remaining, 1)} ${m.unit}</b>`
+    : m.remaining === 0 ? '<b style="color:var(--bad)">порог достигнут</b>'
     : `осталось ${num(m.remaining, 1)} ${m.unit}`;
   return `<div class="metric"><div class="mt"><span>${METRIC[m.metric]}: <b>${num(m.used, 1)}</b> / ${num(m.limit, 0)} ${m.unit}</span><span class="muted">${rem}</span></div>
     <div class="bar"><span class="${cls}" style="width:${w}%"></span></div></div>`;
@@ -420,18 +421,6 @@ const toXY = (h, lat, lon) => [((lon - h.lon) * Math.PI / 180) * R_EARTH * Math.
 const toLL = (h, x, y) => [h.lat + (y / R_EARTH) * 180 / Math.PI, h.lon + (x / (R_EARTH * Math.cos(h.lat * Math.PI / 180))) * 180 / Math.PI];
 const PHASE_RU = { takeoff: "Взлёт", mission: "Полёт по маршруту", hold: "Удержание на точке", rtl: "Возврат домой", land: "Посадка", crash: "Аварийное завершение" };
 
-function missionStats(m) {
-  const h = { lat: m.home_lat, lon: m.home_lon };
-  const pts = [[0, 0]].concat(m.waypoints.map((w) => toXY(h, w.lat, w.lon)));
-  let d = 0;
-  for (let i = 1; i < pts.length; i++) d += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
-  if (m.return_home && pts.length > 1) d += Math.hypot(pts[pts.length - 1][0], pts[pts.length - 1][1]);
-  const hold = m.waypoints.reduce((s, w) => s + (+w.hold_s || 0), 0);
-  const first = m.waypoints.length ? +m.waypoints[0].alt : +m.takeoff_alt;
-  const last = m.waypoints.length ? +m.waypoints[m.waypoints.length - 1].alt : first;
-  const t = d / Math.max(1, +m.speed_ms) * 1.08 + hold + first / 2.5 + last / 1.5 + 6;
-  return { distance: d, duration: t };
-}
 const fmtDur = (s) => `${Math.floor(s / 60)} мин ${String(Math.round(s % 60)).padStart(2, "0")} с`;
 
 async function pageMissions() {
@@ -561,10 +550,19 @@ async function pageMission(id) {
     const f = $('[name="fault"]');
     f.innerHTML = `<option value="">без отказов</option>` + st.waypoints.map((_, i) => `<option value="${i + 1}">столкновение у точки ${i + 1}</option>`).join("");
   }
+  // Длину маршрута и время считает сервер (autopilot.plan_stats) — тот же расчёт, что при выполнении миссии
+  let statsTimer = null, statsSeq = 0;
   function drawStats() {
     if (!st.waypoints.length) { $("#m-stats").textContent = "Маршрут пуст"; return; }
-    const s = missionStats(st);
-    $("#m-stats").innerHTML = `Маршрут <b>${num(s.distance / 1000, 2)} км</b> · оценка времени <b>${fmtDur(s.duration)}</b> · точек ${st.waypoints.length} · макс. высота ${num(Math.max(...st.waypoints.map((w) => +w.alt)), 0)} м`;
+    clearTimeout(statsTimer);
+    statsTimer = setTimeout(async () => {
+      const my = ++statsSeq;
+      const s = await POST("/api/missions/estimate", { home_lat: +st.home_lat, home_lon: +st.home_lon, takeoff_alt: +st.takeoff_alt,
+        speed_ms: +st.speed_ms, return_home: st.return_home, waypoints: st.waypoints.map((w) => ({ lat: +w.lat, lon: +w.lon, alt: +w.alt, hold_s: +w.hold_s || 0 })) })
+        .catch(() => null);
+      if (!s || my !== statsSeq || !$("#m-stats")) return;
+      $("#m-stats").innerHTML = `Маршрут <b>${num(s.distance_m / 1000, 2)} км</b> · оценка времени <b>${fmtDur(s.duration_s)}</b> · точек ${s.waypoints} · макс. высота ${num(s.max_alt_m, 0)} м`;
+    }, 120);
   }
   function drawAll() { drawMap(); drawTable(); drawStats(); }
   const readForm = () => {
@@ -643,6 +641,17 @@ async function pageMission(id) {
 const view_ = () => $("#view");
 
 // ------------------------------------------------------------------ Перестановка узлов: drag & drop
+function moveResultHTML(r, closable = true) {
+  const loc = (c) => (c.location ? `${esc(c.location.aircraft_name)} · ${esc(c.location.position)}` : esc(c.status_label));
+  const delta = (a, b, d) => (Math.abs(b - a) > 0.005 ? ` <span class="${b < a ? "neg" : "pos"}">(${b > a ? "+" : ""}${num(b - a, d)})</span>` : "");
+  return `<div class="card move-res"><div class="card-head"><h2>✓ ${esc(r.title)}</h2>${closable ? '<button class="sm" id="mr-close">Скрыть</button>' : ""}</div>
+    <div class="small muted" style="margin-bottom:8px">${r.messages.map(esc).join(" · ")}</div>
+    <div class="table-wrap"><table><thead><tr><th>Узел (паспорт)</th><th>Местоположение: было → стало</th><th class="num">Наработка, ч</th><th class="num">Циклы</th><th>Остаточный ресурс</th><th>Регламент</th></tr></thead><tbody>
+    ${r.components.map(({ before: b, after: a }) => `<tr><td><a href="#/components/${a.id}"><b>${esc(a.serial)}</b></a><div class="small muted mono">${fmtUid(a.uid)}</div></td>
+      <td>${loc(b)} → <b>${loc(a)}</b></td><td class="num">${num(a.hours, 2)}${delta(b.hours, a.hours, 2)}</td><td class="num">${num(a.cycles, 0)}${delta(b.cycles, a.cycles, 0)}</td>
+      <td>${residualText(a.residual, true)}${residualBar(a.residual)}</td><td>${dueBadge(a.maintenance ? a.maintenance.status : "ok")}</td></tr>`).join("")}</tbody></table></div>
+    <div class="hint">История установок в паспорте дополнена; наработка = исходная + налёт бортов за периоды установки + внебортовая. Если дата операции в прошлом, полёты после неё переотнесены.</div></div>`;
+}
 const nodesSwitch = (active) => `<div class="seg-switch" role="tablist">
   <a href="#/board" class="${active === "board" ? "active" : ""}" role="tab">⇄ Перестановка</a>
   <a href="#/components" class="${active === "components" ? "active" : ""}" role="tab">▣ Узлы и склад</a></div>`;
@@ -686,11 +695,6 @@ async function pageBoard() {
     }
     bind();
   }
-  const find = (cid) => {
-    for (const a of data.aircraft) for (const sl of a.slots) if (sl.component && sl.component.id === cid) return { c: sl.component, a, sl };
-    const c = data.spare.find((x) => x.id === cid);
-    return c ? { c } : null;
-  };
   const clearHi = () => $$(".dz").forEach((d) => d.classList.remove("ok-target", "no-target", "over"));
   const highlight = (type, from) => $$(".dz").forEach((d) => {
     const ok = d.dataset.drop === "slot" ? d.dataset.type === type && `${d.dataset.aid}|${d.dataset.pos}` !== from : d.dataset.drop !== from;
@@ -719,91 +723,167 @@ async function pageBoard() {
       d.addEventListener("click", () => { if (picked && d.classList.contains("ok-target")) { const cid = picked; picked = null; clearHi(); askMove(cid, d); } });
     });
   }
-  function askMove(cid, d) {
-    const src = find(cid);
-    if (!src) return;
-    const c = src.c, kind = d.dataset.drop;
-    let plan = [], title = "";
-    if (kind === "slot") {
-      const ta = data.aircraft.find((a) => a.id === +d.dataset.aid), pos = d.dataset.pos;
-      const occ = ta.slots.find((x) => x.position === pos).component;
-      if (occ && !src.a) {          // из резерва на занятую позицию: снять установленный в резерв, поставить новый
-        plan = [{ op: "remove", c: occ, to: "stock" }, { op: "install", c, a: ta, pos }];
-        title = `Замена: ${occ.serial} → резерв, ${c.serial} → ${ta.name} · ${pos}`;
-      } else if (occ) {             // обмен местами между позициями
-        plan = [{ op: "remove", c: occ, to: "stock" }, { op: "transfer", c, a: ta, pos }, { op: "install", c: occ, a: src.a, pos: src.sl.position }];
-        title = `Обмен: ${c.serial} ⇄ ${occ.serial}`;
-      } else {
-        plan = [{ op: src.a ? "transfer" : "install", c, a: ta, pos }];
-        title = src.a ? `Перестановка ${c.serial}: ${src.a.name} · ${src.sl.position} → ${ta.name} · ${pos}` : `Установка ${c.serial} из резерва → ${ta.name} · ${pos}`;
-      }
-    } else {
-      if (!src.a && c.status === kind) return;
-      if (!src.a) { toast("Перевод между резервом и ремонтом выполняется в карточке узла", true); return; }
-      plan = [{ op: "remove", c, to: kind }];
-      title = `Снятие ${c.serial} с ${src.a.name} · ${src.sl.position} → ${kind === "stock" ? "резерв" : "ремонт"}`;
-    }
-    const OPL = { install: "Установка", remove: "Снятие", transfer: "Перестановка" };
-    const defaultAt = toLocalInput(new Date());
-    modal("Подтверждение операции с узлом", `<p><b>${esc(title)}</b></p>
-      <ol class="small">${plan.map((p) => `<li>${OPL[p.op]} ${esc(p.c.serial)}${p.op === "remove" ? ` → ${p.to === "stock" ? "резерв" : "ремонт"}` : ` → ${esc(p.a.name)} · ${esc(p.pos)}`}</li>`).join("")}</ol>
-      <div class="row2"><div class="field"><label>Дата и время операции</label><input type="datetime-local" name="at" value="${defaultAt}"></div>
+  // Операцию определяет и выполняет сервер: клиент сообщает только «какой узел куда»
+  async function askMove(cid, d) {
+    const target = d.dataset.drop === "slot" ? { kind: "slot", aircraft_id: +d.dataset.aid, position: d.dataset.pos } : { kind: d.dataset.drop };
+    let pl;
+    try { pl = await POST("/api/board/plan", { component_id: cid, target }); } catch (e) { toast(e.message, true); return; }
+    const defLocal = toLocalInput(new Date(pl.default_at));
+    modal("Подтверждение операции с узлом", `<p><b>${esc(pl.title)}</b></p>
+      <ol class="small">${pl.steps.map((s) => `<li>${esc(s.text)}</li>`).join("")}</ol>
+      <div class="row2"><div class="field"><label>Дата и время операции</label><input type="datetime-local" name="at" value="${defLocal}"></div>
       <div class="field"><label>Исполнитель</label><input name="by" placeholder="ФИО"></div></div>
       <div class="field"><label>Основание</label><input name="reason" placeholder="напр. замена по результатам диагностики"></div>
-      <div class="hint">Если указать прошедшую дату, полёты после неё будут отнесены к новой установке, и наработка узлов пересчитается.</div>`, {
+      <div class="hint">Все шаги выполняются на сервере одной операцией: либо применяются все, либо ни один. Если указать прошедшую дату,
+        полёты после неё будут отнесены к новой установке, и наработка узлов пересчитается. Не раньше: ${fmtDT(pl.min_at)}.</div>`, {
       okText: "Выполнить", onOk: async (root) => {
-        const raw = val(root, "at"), by = val(root, "by") || null, reason = val(root, "reason") || null;
+        const raw = val(root, "at");
         if (!raw) throw new Error("Укажите дату и время операции");
-        const before = {};
-        for (const p of plan) before[p.c.id] = await GET(`/api/components/${p.c.id}`);
-        // Операция не может быть раньше последней установки/снятия задействованных узлов
-        let last = 0, lastSerial = "";
-        for (const c of Object.values(before)) for (const st of c.stints || []) for (const d of [st.installed_at, st.removed_at]) {
-          const ms = d ? Date.parse(d) : 0;
-          if (ms > last) { last = ms; lastSerial = c.serial; }
-        }
-        const minAt = Math.floor(last / 1000) * 1000 + 1000;
-        let at;
-        if (raw === defaultAt) {
-          // дата не менялась — «сейчас» с точностью до секунды, но не раньше предыдущей операции
-          at = Math.max(Math.floor(Date.now() / 1000) * 1000, minAt);
-        } else {
-          at = new Date(raw).getTime();
-          if (at < minAt) throw new Error(`Дата операции раньше последней операции с узлом ${lastSerial} (${fmtDT(new Date(last).toISOString())}). Укажите более позднюю дату.`);
-        }
-        const msgs = [];
-        for (let i = 0; i < plan.length; i++) {
-          const p = plan[i], when = new Date(at + i * 1000).toISOString();
-          try {
-            const r = p.op === "remove"
-              ? await POST(`/api/components/${p.c.id}/remove`, { at: when, to_status: p.to, reason, performed_by: by })
-              : await POST(`/api/components/${p.c.id}/${p.op}`, { aircraft_id: p.a.id, position: p.pos, at: when, reason, performed_by: by });
-            msgs.push(r.message);
-          } catch (e) {
-            if (i > 0) { data = await GET("/api/board"); render(); }      // часть шагов выполнена — показать фактическое состояние
-            throw new Error(`Шаг ${i + 1} не выполнен: ${e.message}`);
-          }
-        }
-        const ids = [...new Set(plan.map((p) => p.c.id))];
-        const after = await Promise.all(ids.map((id) => GET(`/api/components/${id}`)));
+        const r = await POST("/api/board/move", { component_id: cid, target, at: raw === defLocal ? null : fromLocalInput(raw),
+          reason: val(root, "reason") || null, performed_by: val(root, "by") || null });
         data = await GET("/api/board");
-        lastMove = { id: plan[plan.length - 1].c.id, html: moveResult(title, msgs, ids.map((id, k) => [before[id], after[k]])) };
+        lastMove = { id: r.moved_id, html: moveResultHTML(r) };
         AIRCRAFT_CACHE = null; refreshNavCount(); render(); toast("Операция выполнена, данные пересчитаны");
       },
     });
   }
-  function moveResult(title, msgs, pairs) {
-    const loc = (c) => (c.location ? `${esc(c.location.aircraft_name)} · ${esc(c.location.position)}` : esc(c.status_label));
-    const delta = (a, b, d) => (Math.abs(b - a) > 0.005 ? ` <span class="${b < a ? "neg" : "pos"}">(${b > a ? "+" : ""}${num(b - a, d)})</span>` : "");
-    return `<div class="card move-res"><div class="card-head"><h2>✓ ${esc(title)}</h2><button class="sm" id="mr-close">Скрыть</button></div>
-      <div class="small muted" style="margin-bottom:8px">${msgs.map(esc).join(" · ")}</div>
-      <div class="table-wrap"><table><thead><tr><th>Узел (паспорт)</th><th>Местоположение: было → стало</th><th class="num">Наработка, ч</th><th class="num">Циклы</th><th>Остаточный ресурс</th><th>Регламент</th></tr></thead><tbody>
-      ${pairs.map(([b, a]) => `<tr><td><a href="#/components/${a.id}"><b>${esc(a.serial)}</b></a><div class="small muted mono">${fmtUid(a.uid)}</div></td>
-        <td>${loc(b)} → <b>${loc(a)}</b></td><td class="num">${num(a.hours, 2)}${delta(b.hours, a.hours, 2)}</td><td class="num">${num(a.cycles, 0)}${delta(b.cycles, a.cycles, 0)}</td>
-        <td>${residualText(a.residual, true)}${residualBar(a.residual)}</td><td>${dueBadge(a.maintenance ? a.maintenance.status : "ok")}</td></tr>`).join("")}</tbody></table></div>
-      <div class="hint">История установок в паспорте дополнена; наработка = исходная + налёт бортов за периоды установки + внебортовая. Если дата операции в прошлом, полёты после неё переотнесены.</div></div>`;
-  }
   render();
+}
+
+// ------------------------------------------------------------------ Сервер (Raspberry Pi): состояние, уведомления вне браузера, резервные копии
+const fmtBytes = (n) => {
+  if (n == null) return "—";
+  const u = ["Б", "КБ", "МБ", "ГБ", "ТБ"]; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return `${num(n, i ? 1 : 0)} ${u[i]}`;
+};
+const fmtUptime = (s) => {
+  if (s == null) return "—";
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
+  return (d ? `${d} д ` : "") + `${h} ч ${m} мин`;
+};
+const BK_KIND = { auto: "по расписанию", manual: "вручную", "pre-restore": "перед восстановлением", "pre-update": "перед обновлением", upload: "загружена" };
+
+async function pageServer() {
+  view().innerHTML = `<div class="page-head"><div><h1>Сервер</h1><div class="sub">Состояние Raspberry Pi, уведомления вне браузера и резервные копии. Вся логика выполняется на сервере; эта страница — пульт администратора.</div></div>
+    <div class="actions"><button id="srv-refresh">↻ Обновить</button></div></div>
+    <div id="srv-status"><div class="loading">Загрузка…</div></div>
+    <div class="grid g2">
+      <div class="card"><h2>Уведомления вне браузера</h2><div id="srv-notify"><div class="loading">Загрузка…</div></div></div>
+      <div class="card"><div class="card-head"><h2>Резервные копии</h2><div class="actions"><label class="btn sm" style="margin:0">⇪ Загрузить .zip<input type="file" id="bk-up" accept=".zip" hidden></label>
+        <button class="primary sm" id="bk-new">+ Создать копию</button></div></div><div id="srv-backups"><div class="loading">Загрузка…</div></div></div>
+    </div>
+    <div class="card"><h2>Командная строка (SSH)</h2>
+      <div class="small muted" style="margin-bottom:8px">Установка, обновление, пароль и восстановление при недоступном веб-интерфейсе — утилита <span class="mono">tbo-ctl</span> (см. docs/RASPBERRY_PI.md).</div>
+      <table class="small"><tbody>
+        ${[["sudo tbo-ctl status", "состояние сервиса, температура, питание, адреса"], ["sudo tbo-ctl logs", "журнал сервиса в реальном времени"],
+          ["sudo tbo-ctl backup", "резервная копия сейчас"], ["sudo tbo-ctl restore ИМЯ.zip", "восстановление (сервис останавливается на время операции)"],
+          ["sudo tbo-ctl update", "обновление из git с копией перед обновлением"], ["sudo tbo-ctl password", "сменить пароль входа"],
+          ["sudo tbo-ctl port 8080", "сменить порт"], ["sudo tbo-ctl restart", "перезапуск сервиса"]].map(([c, d]) => `<tr><td class="mono nowrap">${c}</td><td>${d}</td></tr>`).join("")}
+      </tbody></table></div>`;
+
+  async function loadStatus() {
+    const st = await GET("/api/server/status");
+    if (!$("#srv-status")) return;
+    const h = st.host, m = st.memory, sg = st.storage, d = st.data, sc = st.scheduler;
+    const memUsed = m.total ? 1 - m.available / m.total : 0, diskUsed = sg.total ? sg.used / sg.total : 0;
+    const bar = (k) => `<div class="bar" style="margin-top:4px"><span class="${k > 0.9 ? "bad" : k > 0.75 ? "warn" : ""}" style="width:${Math.round(k * 100)}%"></span></div>`;
+    $("#srv-status").innerHTML = `${st.warnings.map((w) => `<div class="notice warn">⚠ ${esc(w)}</div>`).join("")}
+      <div class="kpis">
+        <div class="kpi"><div class="v" style="font-size:16px">${esc(h.model)}</div><div class="l">${esc(h.os)} · ${esc(h.arch)} · ${h.cpus} ядра</div></div>
+        <div class="kpi ${h.cpu_temp_c >= 75 ? "bad" : h.cpu_temp_c >= 65 ? "warn" : "ok"}"><div class="v">${h.cpu_temp_c != null ? num(h.cpu_temp_c, 1) + " °C" : "—"}</div><div class="l">температура процессора</div></div>
+        <div class="kpi"><div class="v">${h.load ? num(h.load[0], 2) : "—"}</div><div class="l">загрузка (1 мин) · работает ${fmtUptime(h.uptime_s)}</div></div>
+        <div class="kpi"><div class="v">${fmtBytes(m.available)}</div><div class="l">свободно ОЗУ из ${fmtBytes(m.total)}</div>${bar(memUsed)}</div>
+        <div class="kpi ${sg.kind === "microSD" ? "warn" : ""}"><div class="v">${fmtBytes(sg.free)}</div><div class="l">свободно на ${esc(sg.kind)} из ${fmtBytes(sg.total)}</div>${bar(diskUsed)}</div>
+        <div class="kpi ${h.throttled && h.throttled.flags.length ? "bad" : "ok"}"><div class="v" style="font-size:16px">${h.throttled ? (h.throttled.flags.length ? "есть замечания" : "в норме") : "—"}</div><div class="l">питание и охлаждение (vcgencmd)</div></div>
+      </div>
+      <div class="grid g2">
+        <div class="card"><h2>Доступ</h2>
+          <p>Откройте с любого компьютера, планшета или телефона в той же сети:</p>
+          <ul>${st.urls.map((u) => `<li><a href="${esc(u)}" class="mono">${esc(u)}</a></li>`).join("")}</ul>
+          <p class="small">${st.app.auth ? `Вход по паролю <b>включён</b> (пользователь <span class="mono">${esc(st.app.auth_user)}</span>). Сменить пароль: <span class="mono">sudo tbo-ctl password</span>.`
+            : 'Вход по паролю <b>выключен</b> — любой в сети может вносить изменения. Включить: <span class="mono">sudo tbo-ctl password</span>.'}</p></div>
+        <div class="card"><h2>Сервис</h2><table class="small"><tbody>
+          <tr><td class="muted">Версия tbo-tracker</td><td>${esc(st.app.version)} · Python ${esc(st.app.python)}</td></tr>
+          <tr><td class="muted">Сервис работает</td><td>${fmtUptime(st.app.uptime_s)}</td></tr>
+          <tr><td class="muted">Каталог данных</td><td class="mono">${esc(st.app.data_dir)}</td></tr>
+          <tr><td class="muted">База / фото / копии</td><td>${fmtBytes(d.db_bytes)} / ${fmtBytes(d.uploads_bytes)} / ${d.backups} шт., ${fmtBytes(d.backups_bytes)}</td></tr>
+          <tr><td class="muted">Последняя копия</td><td>${d.last_backup ? `${esc(d.last_backup.name)}` : "нет"}</td></tr>
+          <tr><td class="muted">Фоновая проверка</td><td>${sc.last_tick ? `последняя: ${fmtDT(sc.last_tick)}` : sc.started_at ? "запущена" : '<span class="muted">выключена</span>'}${sc.last_error ? `<div class="small" style="color:var(--bad)">${esc(sc.last_error)}</div>` : ""}</td></tr>
+          <tr><td class="muted">Последняя рассылка</td><td>${sc.last_delivery ? `${fmtDT(sc.last_delivery.at)}: ${Object.entries(sc.last_delivery.result).map(([k, v]) => `${esc(k)} — ${esc(v)}`).join("; ")}` : "—"}</td></tr>
+          <tr><td class="muted">Хранилище</td><td>${esc(sg.device || "—")}</td></tr>
+        </tbody></table></div>
+      </div>`;
+  }
+
+  async function loadNotify() {
+    const c = await GET("/api/server/settings");
+    const CATS = [["limit", "Достигнут предельный ресурс"], ["overdue", "Просроченные работы"], ["sensor", "Падения и столкновения"], ["approaching", "Приближение срока"]];
+    const root = $("#srv-notify");
+    root.innerHTML = `
+      <div class="small muted" style="margin-bottom:10px">Сервер проверяет регламенты и датчики сам и отправляет новые уведомления одним сообщением — даже когда никто не открыл сайт.</div>
+      <div class="field"><label>Что рассылать</label><div class="chips">${CATS.map(([k, l]) => `<label class="chk"><input type="checkbox" name="cat" value="${k}" ${c.categories.includes(k) ? "checked" : ""}> ${l}</label>`).join("")}</div></div>
+      <h3>Telegram</h3>
+      <label class="chk"><input type="checkbox" name="tg_on" ${c.telegram.enabled ? "checked" : ""}> Отправлять в Telegram</label>
+      <div class="row2"><div class="field"><label>Токен бота (от @BotFather)</label><input name="tg_token" placeholder="${c.telegram.has_token ? esc(c.telegram.token) + " — сохранён" : "123456:ABC…"}" autocomplete="off"></div>
+        <div class="field"><label>chat_id (личный чат или группа)</label><input name="tg_chat" value="${esc(c.telegram.chat_id)}" placeholder="напр. 123456789 или -100…"></div></div>
+      <div class="hint">Создайте бота у @BotFather, напишите ему любое сообщение, chat_id — в ответе https://api.telegram.org/bot&lt;токен&gt;/getUpdates. Нужен доступ Raspberry Pi в интернет.</div>
+      <h3>Webhook</h3>
+      <label class="chk"><input type="checkbox" name="wh_on" ${c.webhook.enabled ? "checked" : ""}> POST JSON на адрес (диспетчерская, Mattermost, n8n, SCADA…)</label>
+      <div class="field"><input name="wh_url" value="${esc(c.webhook.url)}" placeholder="http://192.168.1.20:5678/webhook/tbo"></div>
+      <div class="row3"><div class="field"><label>Адрес сайта для ссылок в сообщениях</label><input name="public_url" value="${esc(c.public_url)}" placeholder="http://tbo-tracker.local"></div>
+        <div class="field"><label>Проверка каждые, с</label><input type="number" min="15" max="3600" name="scan" value="${c.scan_interval_s}"></div><div></div></div>
+      <h3>Резервные копии по расписанию</h3>
+      <div class="row3"><label class="chk"><input type="checkbox" name="bk_on" ${c.backup.enabled ? "checked" : ""}> Каждый день</label>
+        <div class="field"><label>Час (местное время)</label><input type="number" min="0" max="23" name="bk_hour" value="${c.backup.hour}"></div>
+        <div class="field"><label>Хранить автокопий</label><input type="number" min="1" max="365" name="bk_keep" value="${c.backup.keep}"></div></div>
+      <div class="actions"><button class="primary" id="ntf-save">Сохранить настройки</button><button id="ntf-test">Отправить тестовое сообщение</button></div>
+      <div id="ntf-res"></div>`;
+    const form = () => ({
+      scan_interval_s: +val(root, "scan") || 60, public_url: val(root, "public_url") || "",
+      categories: $$('[name="cat"]', root).filter((x) => x.checked).map((x) => x.value),
+      telegram: { enabled: $('[name="tg_on"]', root).checked, token: val(root, "tg_token") || "", chat_id: val(root, "tg_chat") || "" },
+      webhook: { enabled: $('[name="wh_on"]', root).checked, url: val(root, "wh_url") || "" },
+      backup: { enabled: $('[name="bk_on"]', root).checked, hour: +val(root, "bk_hour"), keep: +val(root, "bk_keep") },
+    });
+    $("#ntf-save").onclick = async () => { try { await api("PUT", "/api/server/settings", form()); toast("Настройки сервера сохранены"); loadNotify(); } catch (e) { toast(e.message, true); } };
+    $("#ntf-test").onclick = async () => {
+      try {
+        await api("PUT", "/api/server/settings", form());
+        const r = await POST("/api/server/notify/test");
+        $("#ntf-res").innerHTML = `<div class="notice ${Object.values(r.result).every((v) => v.startsWith("ok")) ? "ok" : "bad"}">${Object.entries(r.result).map(([k, v]) => `${esc(k)}: ${esc(v)}`).join("<br>")}</div>`;
+      } catch (e) { $("#ntf-res").innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; }
+    };
+  }
+
+  async function loadBackups() {
+    const list = await GET("/api/server/backups");
+    const root = $("#srv-backups");
+    root.innerHTML = list.length ? `<div class="table-wrap"><table><thead><tr><th>Копия</th><th>Тип</th><th class="num">Размер</th><th></th></tr></thead><tbody>
+      ${list.map((b) => `<tr><td><span class="mono small">${esc(b.name)}</span><div class="small muted">${fmtDT(b.created_at)}</div></td><td class="small">${esc(BK_KIND[b.kind] || b.kind)}</td>
+        <td class="num">${fmtBytes(b.size)}</td><td class="nowrap"><a class="btn sm" href="/api/server/backups/${encodeURIComponent(b.name)}">⇩</a>
+        <button class="sm" data-restore="${esc(b.name)}">Восстановить</button> <button class="sm danger" data-del-bk="${esc(b.name)}">✕</button></td></tr>`).join("")}
+      </tbody></table></div>` : '<div class="empty-state">Копий пока нет</div>';
+    root.insertAdjacentHTML("beforeend", '<div class="hint">Копия — архив с базой и загруженными фото. Перед восстановлением текущее состояние сохраняется автоматически. Скачивайте копии на другой носитель.</div>');
+    $$("[data-restore]", root).forEach((b) => b.addEventListener("click", () => modal("Восстановление из копии",
+      `<p>Заменить все данные содержимым копии <b class="mono">${esc(b.dataset.restore)}</b>?</p><p class="small muted">Текущее состояние будет сохранено как копия «перед восстановлением».</p>`,
+      { okText: "Восстановить", onOk: async () => { const r = await POST(`/api/server/backups/${encodeURIComponent(b.dataset.restore)}/restore`); toast(r.message); META = null; AIRCRAFT_CACHE = null; refreshNavCount(); loadAll(); } })));
+    $$("[data-del-bk]", root).forEach((b) => b.addEventListener("click", () => modal("Удаление копии", `<p>Удалить <b class="mono">${esc(b.dataset.delBk)}</b>?</p>`,
+      { okText: "Удалить", onOk: async () => { const r = await api("DELETE", `/api/server/backups/${encodeURIComponent(b.dataset.delBk)}`); toast(r.message); loadBackups(); } })));
+  }
+  const loadAll = () => Promise.all([loadStatus(), loadBackups()]).catch((e) => toast(e.message, true));
+  $("#srv-refresh").onclick = loadAll;
+  $("#bk-new").onclick = async (e) => {
+    e.target.disabled = true;
+    try { const r = await POST("/api/server/backups"); toast(r.message); loadAll(); } catch (err) { toast(err.message, true); } finally { e.target.disabled = false; }
+  };
+  $("#bk-up").onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    try { const r = await api("POST", "/api/server/backups/upload", fd, true); toast(r.message); loadBackups(); } catch (err) { toast(err.message, true); }
+  };
+  await Promise.all([loadStatus(), loadNotify(), loadBackups()]);
+  const timer = setInterval(() => { if (!$("#srv-status")) { clearInterval(timer); return; } loadStatus().catch(() => {}); }, 15000);
 }
 
 // ------------------------------------------------------------------ навигация
@@ -822,6 +902,7 @@ const routes = [
   [/^#\/rules$/, "rules", pageRules],
   [/^#\/analytics$/, "analytics", pageAnalytics],
   [/^#\/scenarios$/, "scenarios", pageScenarios],
+  [/^#\/server$/, "server", pageServer],
   [/^#\/missions$/, "missions", pageMissions],
   [/^#\/missions\/(\d+)$/, "missions", pageMission],
 ];
@@ -842,47 +923,47 @@ async function router() {
 }
 const reload = () => router();
 // ------------------------------------------------------------------ автоматические уведомления
-const NOTIF_SEEN = "tbo-notif-seen";
 const NOTIF_CAT = {
   limit: { icon: "⛔", cls: "bad", hint: "Регламент вида «назначенный ресурс» или индивидуальный ресурс экземпляра исчерпан — замена / списание / ремонт у изготовителя." },
   overdue: { icon: "⚠", cls: "bad", hint: "Периодическая работа не выполнена к сроку: по часам, циклам, календарю или после падения/столкновения." },
   approaching: { icon: "⏳", cls: "warn", hint: "Остаток до срока меньше порога предупреждения регламента (по умолчанию 10 % интервала)." },
 };
-const notifKey = (i) => `${i.category}|${i.key}`;
-function loadSeen() { try { return new Set(JSON.parse(localStorage.getItem(NOTIF_SEEN) || "[]")); } catch (_) { return null; } }
-function saveSeen(keys) { try { localStorage.setItem(NOTIF_SEEN, JSON.stringify(keys)); } catch (_) { /* приватный режим */ } }
-let NOTIF_FIRST = true;
-async function refreshNavCount() {
+// Журнал уведомлений ведёт сервер (проверка раз в минуту, рассылка в Telegram/webhook).
+// Браузер получает новые записи ленты и показывает их всплывающим сообщением.
+let NOTIF_LAST = null, NOTIF_QUEUE = Promise.resolve();
+// Запросы ленты выполняются строго по очереди: каждое событие показывается один раз
+function refreshNavCount() {
+  const run = NOTIF_QUEUE.then(pollFeed, pollFeed);
+  NOTIF_QUEUE = run.catch(() => null);
+  return run;
+}
+async function pollFeed() {
   try {
-    const d = await GET("/api/notifications");
+    const since = NOTIF_LAST;
+    const d = await GET(`/api/notifications/feed${since !== null ? `?after=${since}` : ""}`);
+    NOTIF_LAST = d.last_id;            // запросы идут по очереди; после сброса демо-данных счётчик начинается заново
     const c = d.counts, bad = c.limit + c.overdue;
     const nb = $("#nav-notif");
     nb.hidden = !c.total; nb.textContent = c.total; nb.classList.toggle("warn", !bad);
-    // новые уведомления с прошлого раза — всплывающее сообщение и (если разрешено) уведомление браузера
-    const all = ["limit", "overdue", "approaching"].flatMap((k) => d.items[k]);
-    const seen = loadSeen();
-    if (seen) {
-      const fresh = all.filter((i) => !seen.has(notifKey(i)) && i.category !== "approaching");
-      if (fresh.length && !(NOTIF_FIRST && !seen.size)) {
-        const msg = fresh.slice(0, 3).map((i) => `${i.entity.name || i.entity.serial}: ${i.rule.name}`).join("; ") + (fresh.length > 3 ? ` и ещё ${fresh.length - 3}` : "");
-        toast(`🔔 Новые уведомления (${fresh.length}): ${msg}`, true);
-        if (window.Notification && Notification.permission === "granted") {
-          try { new Notification("tbo-tracker: требуется обслуживание", { body: msg }); } catch (_) { /* не поддерживается */ }
-        }
+    const fresh = d.events.filter((e) => e.category !== "approaching" && (since === null || e.id > since));
+    if (fresh.length) {
+      const msg = fresh.slice(0, 3).map((e) => e.title).join("; ") + (fresh.length > 3 ? ` и ещё ${fresh.length - 3}` : "");
+      toast(`🔔 Новые уведомления (${fresh.length}): ${msg}`, true);
+      if (window.Notification && Notification.permission === "granted") {
+        try { new Notification("tbo-tracker: требуется обслуживание", { body: msg }); } catch (_) { /* не поддерживается */ }
       }
-      saveSeen(all.map(notifKey));
     }
-    NOTIF_FIRST = false;
     return d;
   } catch (_) { return null; /* не критично */ }
 }
 setInterval(refreshNavCount, 60000);
 
 async function renderNotifications(root) {
-  const d = await refreshNavCount() || await GET("/api/notifications");
+  await refreshNavCount();
+  const [d, hist] = await Promise.all([GET("/api/notifications"), GET("/api/notifications/history?limit=50")]);
   const c = d.counts;
   const perm = window.Notification ? Notification.permission : "unsupported";
-  root.innerHTML = `<div class="toolbar"><div class="small muted">Формируются автоматически при каждом изменении наработки (импорт журнала, автономный полёт, ручная запись) и по календарю. Проверка — каждую минуту.</div>
+  root.innerHTML = `<div class="toolbar"><div class="small muted">Формируются автоматически при каждом изменении наработки (импорт журнала, автономный полёт, ручная запись) и по календарю. Проверка выполняется сервером каждую минуту, даже когда браузер закрыт; доставка в Telegram / webhook — раздел <a href="#/server">«Сервер»</a>.</div>
       <div>${perm === "default" ? '<button class="sm" id="n-perm">🔔 Уведомления в браузере</button>' : perm === "granted" ? '<span class="badge ok">уведомления браузера включены</span>' : ""}</div></div>
     <div class="kpis">
       ${["limit", "overdue", "approaching"].map((k) => `<div class="kpi clickable ${c[k] ? NOTIF_CAT[k].cls : "ok"}" data-scroll="n-${k}"><div class="v">${c[k]}</div><div class="l">${esc(d.categories[k])}</div></div>`).join("")}
@@ -894,7 +975,14 @@ async function renderNotifications(root) {
       ${d.sensor_events.length ? `<div class="table-wrap"><table><thead><tr><th>Когда</th><th>Борт</th><th>Событие</th><th class="num">Перегрузка</th><th>Источник</th></tr></thead><tbody>
         ${d.sensor_events.map((e) => `<tr><td class="nowrap">${fmtDT(e.occurred_at)}</td><td>${e.aircraft ? `<a href="#/aircraft/${e.aircraft.id}">${esc(e.aircraft.name)}</a> <span class="small muted">${esc(e.aircraft.serial)}</span>` : "—"}</td>
           <td><span class="badge ${EV_BADGE[e.kind]}">${esc(e.kind_label)}</span></td><td class="num">${e.peak_g != null ? num(e.peak_g, 1) + " g" : "—"}</td><td class="small">${esc(e.details || e.source)}</td></tr>`).join("")}
-        </tbody></table></div>` : `<div class="empty-state">За ${d.days} дней падений и столкновений не зафиксировано</div>`}</div>`;
+        </tbody></table></div>` : `<div class="empty-state">За ${d.days} дней падений и столкновений не зафиксировано</div>`}</div>
+    <div class="card flat"><h2>Журнал уведомлений сервера</h2>
+      ${hist.length ? `<div class="table-wrap"><table><thead><tr><th>Появилось</th><th>Категория</th><th>Что</th><th>Закрыто</th><th>Доставка</th></tr></thead><tbody>
+        ${hist.map((e) => `<tr><td class="nowrap">${fmtDT(e.created_at)}</td><td><span class="badge ${e.category === "approaching" ? "warn" : "bad"}">${esc(e.category_label)}</span></td>
+          <td>${e.href ? `<a href="${esc(e.href)}">${esc(e.title)}</a>` : esc(e.title)}${e.text ? `<div class="small muted">${esc(e.text)}</div>` : ""}</td>
+          <td class="nowrap small">${e.resolved_at ? fmtDT(e.resolved_at) : '<span class="muted">действует</span>'}</td>
+          <td class="small">${Object.keys(e.delivery).length ? Object.entries(e.delivery).map(([k, v]) => `${esc(k)}: ${esc(v)}`).join("<br>") : e.delivered_at ? '<span class="muted">только в интерфейсе</span>' : '<span class="muted">ожидает</span>'}</td></tr>`).join("")}
+        </tbody></table></div>` : '<div class="empty-state">Новых уведомлений с момента заполнения базы не было. Импортируйте журнал или выполните миссию — здесь появятся записи.</div>'}</div>`;
   ["limit", "overdue", "approaching"].forEach((k) => bindDueActions($(`[data-cat="${k}"]`), d.items[k], () => { refreshNavCount(); renderNotifications(root); }));
   $$("[data-scroll]").forEach((k) => k.addEventListener("click", () => document.getElementById(k.dataset.scroll).scrollIntoView({ behavior: "smooth" })));
   const pb = $("#n-perm");
@@ -924,13 +1012,7 @@ async function pageDashboard() {
   bindDueActions($("#due"), d.due, reload);
 }
 
-function readiness(a) {
-  if (a.status !== "active") return `<span class="dot gray"></span>${esc(a.status_label)}`;
-  if (a.slots_filled < a.slots_total) return `<span class="dot bad"></span>Некомплект (${a.slots_filled}/${a.slots_total})`;
-  if (a.maintenance.overdue) return `<span class="dot bad"></span>Не допущен: просрочено ТО (${a.maintenance.overdue})`;
-  if (a.maintenance.due_soon) return `<span class="dot warn"></span>Допущен, скоро ТО (${a.maintenance.due_soon})`;
-  return `<span class="dot"></span>Допущен`;
-}
+function readiness(a) { return readinessHTML(a.readiness); }   // уровень и текст допуска рассчитывает сервер
 
 function fleetTable(list) {
   return `<div class="table-wrap"><table class="fleet"><thead><tr><th style="width:84px"></th><th>Борт</th><th>Тип</th><th>Статус</th><th>Готовность (борт + узлы)</th><th class="num">Налёт</th><th class="num">Циклы</th><th class="num">Полёты</th><th>Базирование</th></tr></thead><tbody>
@@ -1689,27 +1771,29 @@ async function pageAnalytics() {
           ["manual_minutes_per_operation", "Ручной поиск истории узла на операцию, мин", "1"],
           ["engineer_rate", "Стоимость часа инженера, ₽", "100"]].map(([key, lbl, step]) => `<div class="field"><label>${lbl}</label><input type="number" min="0" step="${step}" data-p="${key}" value="${d.economics[key]}"></div>`).join("")}
       </div><div class="calc-res" id="calc"></div></div>`;
-  function calc() {
-    const p = {};
-    $$("[data-p]").forEach((i) => { p[i.dataset.p] = parseFloat(i.value) || 0; });
-    const failLoss = p.failure_cost + p.downtime_days_per_failure * p.downtime_cost_per_day;
-    const atRisk = k.prevented_misses + k.overdue_in_operation;
-    const risk = atRisk * p.failure_probability * failLoss;
-    const flightsYear = k.flights_90d * 365 / 90, opsYear = k.component_operations_90d * 365 / 90;
-    const laborH = (flightsYear * p.manual_minutes_per_flight + opsYear * p.manual_minutes_per_operation) / 60;
-    const labor = laborH * p.engineer_rate;
+  // Формулы считает сервер (services/analytics.estimate); здесь только ввод параметров и вывод
+  const params = () => { const p = {}; $$("[data-p]").forEach((i) => { p[i.dataset.p] = parseFloat(i.value) || 0; }); return p; };
+  function showEstimate(e) {
+    const p = e.params;
     $("#calc").innerHTML = `
-      <div class="box"><div class="small muted">Предотвращённый ожидаемый ущерб (текущий срез)</div><div class="big-num">${rub(risk)}</div>
-        <div class="formula">(${k.prevented_misses} предотвр. пропусков + ${k.overdue_in_operation} выявленных просрочек) × ${p.failure_probability} × (${rub(p.failure_cost)} + ${p.downtime_days_per_failure} дн × ${rub(p.downtime_cost_per_day)})</div></div>
-      <div class="box"><div class="small muted">Экономия трудозатрат на учёт, в год</div><div class="big-num">${rub(labor)}</div>
-        <div class="formula">(${num(flightsYear, 0)} полётов × ${p.manual_minutes_per_flight} мин + ${num(opsYear, 0)} операций × ${p.manual_minutes_per_operation} мин) / 60 = ${num(laborH, 0)} ч × ${rub(p.engineer_rate)}</div></div>
-      <div class="box total"><div class="small muted">Оценка эффекта для парка из ${k.aircraft} бортов</div><div class="big-num">${rub(risk + labor)}</div>
-        <div class="formula">≈ ${rub((risk + labor) / Math.max(1, k.aircraft))} на борт. Не учтены: снижение штрафов за срыв заданий, рост остаточной стоимости узлов с подтверждённой историей, данные для производителя о надёжности.</div></div>`;
-    return p;
+      <div class="box"><div class="small muted">Предотвращённый ожидаемый ущерб (текущий срез)</div><div class="big-num">${rub(e.risk)}</div>
+        <div class="formula">(${e.prevented_misses} предотвр. пропусков + ${e.overdue_in_operation} выявленных просрочек) × ${p.failure_probability} × (${rub(p.failure_cost)} + ${p.downtime_days_per_failure} дн × ${rub(p.downtime_cost_per_day)})</div></div>
+      <div class="box"><div class="small muted">Экономия трудозатрат на учёт, в год</div><div class="big-num">${rub(e.labor)}</div>
+        <div class="formula">(${num(e.flights_year, 0)} полётов × ${p.manual_minutes_per_flight} мин + ${num(e.ops_year, 0)} операций × ${p.manual_minutes_per_operation} мин) / 60 = ${num(e.labor_hours, 0)} ч × ${rub(p.engineer_rate)}</div></div>
+      <div class="box total"><div class="small muted">Оценка эффекта для парка из ${e.aircraft} бортов</div><div class="big-num">${rub(e.total)}</div>
+        <div class="formula">≈ ${rub(e.per_aircraft)} на борт. Не учтены: снижение штрафов за срыв заданий, рост остаточной стоимости узлов с подтверждённой историей, данные для производителя о надёжности.</div></div>`;
   }
-  $$("[data-p]").forEach((i) => i.addEventListener("input", calc));
-  calc();
-  $("#save").onclick = async () => { try { await api("PUT", "/api/settings/economics", calc()); toast("Параметры сохранены"); } catch (e) { toast(e.message, true); } };
+  let timer = null, seq = 0;
+  const recalc = () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const my = ++seq;
+      try { const e = await POST("/api/analytics/estimate", params()); if (my === seq) showEstimate(e); } catch (err) { $("#calc").innerHTML = `<div class="notice bad">${esc(err.message)}</div>`; }
+    }, 350);
+  };
+  $$("[data-p]").forEach((i) => i.addEventListener("input", recalc));
+  showEstimate(d.estimate);
+  $("#save").onclick = async () => { try { await api("PUT", "/api/settings/economics", params()); toast("Параметры сохранены"); } catch (e) { toast(e.message, true); } };
 }
 
 // ------------------------------------------------------------------ Сценарии проверки
@@ -1765,12 +1849,11 @@ async function pageScenarios() {
       <li>Раздел <a href="#/maintenance">ТО и уведомления</a> → «Уведомления»: «Достигнут предельный ресурс» (${link("ESC40-0315")} — индивидуальный ресурс 150 ч исчерпан), «Просрочено» (${link("BVK2-0405")}), «Приближается» (${link("ESC40-0318")}, ${link("IMU3-0206")} …).</li>
       <li>После импорта журнала или автономного полёта новые позиции появляются всплывающим сообщением (и уведомлением браузера, если оно разрешено); счётчик в меню обновляется каждую минуту.</li>`)}`;
   $("#reset2").onclick = resetDemo;
-  const runners = { 1: runS1, 2: runS2, 3: runS3, 4: runS4, 5: runS5, 6: runS6, 7: runS7, 8: runS8, 9: runS9, 10: runS10 };
   $$("[data-run]").forEach((b) => b.addEventListener("click", async () => {
     const out = $(`#out${b.dataset.run}`);
     b.disabled = true;
     out.innerHTML = '<div class="loading">Выполняется…</div>';
-    try { out.innerHTML = await runners[b.dataset.run](); refreshNavCount(); } catch (e) { out.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; } finally { b.disabled = false; }
+    try { const r = await POST(`/api/scenarios/${b.dataset.run}/run`); out.innerHTML = renderBlocks(r.blocks); AIRCRAFT_CACHE = null; refreshNavCount(); } catch (e) { out.innerHTML = `<div class="notice bad">${esc(e.message)}</div>`; } finally { b.disabled = false; }
   }));
 }
 
@@ -1779,175 +1862,53 @@ function scenarioCard(n, title, steps) {
     <div class="small"><b>Вручную:</b><ol>${steps}</ol></div><div class="out" id="out${n}"></div></div>`;
 }
 
-const bySerial = async (serial, kind) => {
-  if (kind === "aircraft") { const a = (await aircraftList(true)).find((x) => x.serial === serial); if (!a) throw new Error(`Нет борта ${serial}`); return a; }
-  const c = (await GET(`/api/components?q=${encodeURIComponent(serial)}`)).find((x) => x.serial === serial);
-  if (!c) throw new Error(`Нет узла ${serial}`);
-  return c;
-};
-
+// Результат сценария строит сервер (app/services/scenarios.py); здесь только отображение блоков
 function diffTable(rows) {
   return `<table><thead><tr><th>Объект</th><th class="num">До</th><th class="num">После</th><th class="num">Изменение</th></tr></thead><tbody>
     ${rows.map((r) => {
       const dh = r.after.hours - r.before.hours, dc = r.after.cycles - r.before.cycles;
-      return `<tr><td>${r.label}</td><td class="num">${hrs(r.before.hours)} · ${r.before.cycles} ц.</td><td class="num">${hrs(r.after.hours)} · ${r.after.cycles} ц.</td>
+      const label = r.href ? `<a href="${esc(r.href)}"><b>${esc(r.label)}</b></a>` : `<b>${esc(r.label)}</b>`;
+      return `<tr><td>${label}${r.sub ? ` <span class="small muted">${esc(r.sub)}</span>` : ""}</td><td class="num">${hrs(r.before.hours)} · ${r.before.cycles} ц.</td><td class="num">${hrs(r.after.hours)} · ${r.after.cycles} ц.</td>
         <td class="num ${dh || dc ? "delta-up" : "muted"}">${dh || dc ? `+${num(dh, 2)} ч · +${dc} ц.` : "без изменений"}</td></tr>`;
     }).join("")}</tbody></table>`;
 }
-
-async function snapshotAircraft(id) {
-  const a = await GET(`/api/aircraft/${id}`);
-  const rows = [{ key: "ac", label: `<b>${esc(a.name)}</b> (борт)`, v: { hours: a.hours, cycles: a.cycles } }];
-  a.configuration.forEach((s) => { if (s.component) rows.push({ key: s.component.id, label: `${esc(s.component.serial)} <span class="small muted">${esc(s.label)}</span>`, v: { hours: s.component.hours, cycles: s.component.cycles } }); });
-  return rows;
+function readinessHTML(r) { return `<span class="dot ${r.level === "ok" ? "" : r.level}"></span>${esc(r.text)}`; }
+function cellHTML(c) {
+  if (c === null || c === undefined) return "";
+  if (typeof c !== "object") return esc(c);
+  let h;
+  if (c.due) h = dueBadge(c.due);
+  else if (c.readiness) h = readinessHTML(c.readiness);
+  else if (c.metric) h = metricHTML(c.metric);
+  else if (c.entity) h = entityLink(c.entity);
+  else if (c.imp_status) h = `<span class="badge ${IMP_ST[c.imp_status]}">${esc(c.text)}</span>`;
+  else if (c.dt) h = fmtDT(c.dt);
+  else h = esc(c.text ?? "");
+  if (c.href) h = `<a href="${esc(c.href)}">${h}</a>`;
+  if (c.bold) h = `<b>${h}</b>`;
+  if (c.mono) h = `<span class="mono">${h}</span>`;
+  return h + (c.sub ? `<div class="small muted">${esc(c.sub)}</div>` : "");
 }
-const mergeSnap = (b, a) => b.map((r) => ({ label: r.label, before: r.v, after: (a.find((x) => x.key === r.key) || r).v }));
-
-async function runS1() {
-  const ac = await bySerial("TBT-M4-001", "aircraft");
-  const before = await snapshotAircraft(ac.id);
-  const r = await POST("/api/demo-logs/01_TBT-M4-001_smena.json/import");
-  const after = await snapshotAircraft(ac.id);
-  return `${importResultHTML(r).split("<h3>")[0]}${diffTable(mergeSnap(before, after))}
-    ${r.summary && r.summary.alerts && r.summary.alerts.length ? `<h3 style="margin-top:12px">Сработавшие напоминания</h3>${r.summary.alerts.map((a) => `<div>${esc(a.entity.serial)} — ${esc(a.rule.name)}: ${a.previous_status ? dueBadge(a.previous_status) + " → " : ""}${dueBadge(a.status)}</div>`).join("")}` : ""}
-    ${r.status === "duplicate" ? '<div class="notice warn" style="margin-top:10px">Журнал уже был загружен ранее — для чистого прогона сбросьте демо-данные.</div>' : ""}`;
-}
-
-async function runS2() {
-  const fc = await GET(`/api/components/${(await bySerial("FC7-0102")).id}`);
-  const a3 = await bySerial("TBT-M4-003", "aircraft");
-  const before = { hours: fc.hours, cycles: fc.cycles };
-  const fcDueBefore = fc.due.find((i) => i.rule.code === "FC-CHK");
-  let out = "";
-  if (fc.location && fc.location.aircraft_id === a3.id) {
-    out += '<div class="notice warn">FC7-0102 уже стоит на «Борт 03» — перестановка пропущена.</div>';
-  } else {
-    const r = await POST(`/api/components/${fc.id}/transfer`, { aircraft_id: a3.id, position: "FC", at: daysAgo(2, 12).toISOString(), reason: "Демо-сценарий: перестановка ПК с «Борт 02» на «Борт 03»", performed_by: "Демо" });
-    out += `<div class="notice ok">${esc(r.message)}</div>`;
-  }
-  await api("PATCH", `/api/aircraft/${a3.id}`, { status: "active" });
-  const mid = await GET(`/api/components/${fc.id}`);
-  const imp = await POST("/api/demo-logs/02_TBT-M4-003_posle_perestanovki.csv/import");
-  const after = await GET(`/api/components/${fc.id}`);
-  const fcDueAfter = after.due.find((i) => i.rule.code === "FC-CHK");
-  return `${out}${importResultHTML(imp).split("<h3>")[0]}
-    ${diffTable([{ label: "FC7-0102 — сквозная наработка", before, after: { hours: after.hours, cycles: after.cycles } }])}
-    <p class="small">Сразу после перестановки наработка узла: <b>${hrs(mid.hours)}</b> (не изменилась), на новом борту — ${hrs(mid.on_board_hours)}. После журнала на «Борт 03»: на новом борту <b>${hrs(after.on_board_hours)}</b>.</p>
-    <h3>Борта в истории узла</h3><table><tbody>${after.stints.map((s) => `<tr><td>${esc(s.aircraft_name)} (${esc(s.position)})</td><td class="small">${fmtDT(s.installed_at)} — ${s.removed_at ? fmtDT(s.removed_at) : "сейчас"}</td><td class="num">${hrs(s.hours)}</td></tr>`).join("")}</tbody></table>
-    <h3 style="margin-top:12px">Межсервисный интервал «ТО полётного контроллера» не обнулился при перестановке</h3>
-    <div>${fcDueBefore ? dueBadge(fcDueBefore.status) + " " + num(fcDueBefore.driver.used, 1) + " ч" : ""} → ${fcDueAfter ? dueBadge(fcDueAfter.status) + " " + num(fcDueAfter.driver.used, 1) + " ч из " + fcDueAfter.driver.limit : ""}
-    · <a href="#/analytics">в разделе «Эффект» это предотвращённый пропуск ТО</a></div>`;
-}
-
-async function runS3() {
-  const ac = await bySerial("TBT-M4-001", "aircraft");
-  const steps = [["01_TBT-M4-001_smena.json", "Тот же файл ещё раз"], ["03_TBT-M4-001_smena_POVTOR.json", "Копия под другим именем"], ["04_TBT-M4-001_bortovoi_registrator.csv", "Другая выгрузка тех же полётов + 2 новых"]];
-  let html = "<table><thead><tr><th>Загрузка</th><th>Результат</th><th class='num'>Новых / дубл.</th><th class='num'>Налёт борта до → после</th></tr></thead><tbody>";
-  for (const [file, title] of steps) {
-    const b = (await GET(`/api/aircraft/${ac.id}`)).hours;
-    const r = await POST(`/api/demo-logs/${file}/import`);
-    const a = (await GET(`/api/aircraft/${ac.id}`)).hours;
-    html += `<tr><td><b>${esc(title)}</b><div class="mono small">${esc(file)}</div></td><td><span class="badge ${IMP_ST[r.status]}">${esc(r.status_label)}</span><div class="small muted">${esc((r.messages[0] || "").slice(0, 140))}</div></td>
-      <td class="num">${r.flights_new} / ${r.flights_duplicate}</td><td class="num">${hrs(b)} → ${hrs(a)}</td></tr>`;
-  }
-  return html + "</tbody></table><p class='small muted'>Если первая строка показывает «Импортирован», журнал №1 ещё не загружался (сценарий 1 не выполнен) — это и есть первичная загрузка; последующие строки демонстрируют защиту.</p>";
-}
-
-async function runS4() {
-  const items = await GET("/api/maintenance/due?status=");
-  const watch = [["IMU3-0206", "IMU-CAL", "часы"], ["ESC40-0301", "ESC-DIAG", "циклы"], ["TBT-VT2-011", "AC-ANNUAL", "календарь"], ["BVK2-0405", "BVK-SVC", "календарь"], ["ESC40-0318", "ESC-LIFE", "назначенный ресурс"], ["FC7-0102", "FC-CHK", "часы (после перестановки)"]];
-  const rows = watch.map(([s, code, kind]) => [items.find((i) => i.entity.serial === s && i.rule.code === code), kind]).filter(([i]) => i);
-  return `<table><thead><tr><th>Объект</th><th>Регламент</th><th>Тип порога</th><th>Статус</th><th>Счётчик</th></tr></thead><tbody>
-    ${rows.map(([i, kind]) => `<tr><td>${entityLink(i.entity)}</td><td>${esc(i.rule.name)}</td><td>${kind}</td><td>${dueBadge(i.status)}</td><td>${metricHTML(i.driver)}</td></tr>`).join("")}</tbody></table>
-    <p class="small"><a href="#/maintenance">Полный список предстоящих и просроченных работ →</a></p>`;
-}
-
-async function runS5() {
-  const c = await GET(`/api/components/${(await bySerial("BVK2-0405")).id}`);
-  const ac = c.location ? await GET(`/api/aircraft/${c.location.aircraft_id}`) : null;
-  const it = c.due.find((i) => i.rule.code === "BVK-SVC");
-  const r = await POST("/api/maintenance/records", { target: "component", entity_id: c.id, rule_id: it.rule.id, performed_by: "Демо: инженер Смирнов Д. А.",
-    work_type: "scheduled", description: "Проверка SMART, чистка радиатора, обновление ПО", result: "Выполнено, замечаний нет" });
-  const c2 = await GET(`/api/components/${c.id}`);
-  const ac2 = ac ? await GET(`/api/aircraft/${ac.id}`) : null;
-  const it2 = c2.due.find((i) => i.rule.code === "BVK-SVC");
-  return `<div class="notice ok">${esc(r.message)}</div>
-    <table><thead><tr><th></th><th>До</th><th>После</th></tr></thead><tbody>
-    <tr><td>Статус работы «${esc(it.rule.name)}»</td><td>${dueBadge(it.status)}<div class="small">${it.metrics.map((m) => `${METRIC[m.metric]}: ${num(m.used, 1)}/${m.limit}`).join("; ")}</div></td>
-      <td>${dueBadge(it2.status)}<div class="small">${it2.metrics.map((m) => `${METRIC[m.metric]}: ${num(m.used, 1)}/${m.limit}`).join("; ")}</div></td></tr>
-    <tr><td>Сквозная наработка узла</td><td>${hrs(c.hours)}</td><td>${hrs(c2.hours)} <span class="small muted">(не изменилась)</span></td></tr>
-    ${ac ? `<tr><td>Допуск ${esc(ac.name)}</td><td>${readiness(ac)}</td><td>${readiness(ac2)}</td></tr>` : ""}
-    </tbody></table>`;
-}
-
-async function runS6() {
-  const m = (await GET("/api/missions")).find((x) => x.name.startsWith("Облёт ЛЭП"));
-  let aid = m.aircraft_id, refused = "";
-  const fleet = await aircraftList(true);
-  if (!fleet.find((a) => a.id === aid).airworthy) {        // предполётная проверка не пропустит — показать отказ и взять допущенный борт
-    try { await POST(`/api/missions/${m.id}/run`, {}); } catch (e) { refused = `<div class="notice warn"><b>Предполётная проверка:</b> ${esc(e.message)}</div>`; }
-    const ok = fleet.find((a) => a.airworthy);
-    if (!ok) throw new Error("Нет допущенных к полёту бортов — выполните сценарий 5 или сбросьте демо-данные");
-    aid = ok.id; refused += `<div class="small muted" style="margin-bottom:8px">Миссия выполнена на допущенном борту «${esc(ok.name)}».</div>`;
-  }
-  const before = await snapshotAircraft(aid);
-  const r = await POST(`/api/missions/${m.id}/run`, { aircraft_id: aid, wind_ms: 4, wind_from_deg: 250 });
-  const after = await snapshotAircraft(aid);
-  const s = r.summary;
-  return `${refused}<div class="notice ${r.status === "completed" ? "ok" : "bad"}">Миссия «${esc(m.name)}» ${r.status === "completed" ? "выполнена" : "прервана"}: ${fmtDur(s.duration_s)},
-      путь ${num(s.distance_m / 1000, 2)} км, макс. боковое отклонение ${num(s.max_xte_m, 1)} м при ветре ${s.wind.speed_ms} м/с. Фазы: ${[...new Set(r.track.map((p) => PHASE_RU[p[5]]))].join(" → ")}.
-      <a href="#/missions/${m.id}">Открыть миссию с треком →</a></div>${diffTable(mergeSnap(before, after))}`;
-}
-
-async function runS7() {
-  const ac = await bySerial("TBT-VT2-011", "aircraft");
-  const r = await POST("/api/demo-logs/07_TBT-VT2-011_padenie.json/import");
-  const ac2 = await bySerial("TBT-VT2-011", "aircraft");
-  const m = (await GET("/api/missions")).find((x) => x.aircraft_id === ac.id);
-  let pre = "";
-  try { await POST(`/api/missions/${m.id}/run`, {}); pre = '<div class="notice warn">Предполётная проверка пропустила борт (осмотр уже выполнен?)</div>'; } catch (e) { pre = `<div class="notice bad"><b>Вылет запрещён:</b> ${esc(e.message)}</div>`; }
-  return `${r.status === "duplicate" ? '<div class="notice warn">Журнал уже загружен — сбросьте демо-данные для чистого прогона.</div>' : ""}
-    <table><thead><tr><th></th><th>До</th><th>После</th></tr></thead><tbody>
-    <tr><td>Падений / столкновений ${esc(ac.name)}</td><td>${ac.events.fall} / ${ac.events.collision}</td><td><b>${ac2.events.fall} / ${ac2.events.collision}</b></td></tr>
-    <tr><td>Допуск</td><td>${readiness(ac)}</td><td>${readiness(ac2)}</td></tr></tbody></table>
-    ${importResultHTML(r).split("<h3").slice(1).filter((x) => /Мониторинг|Сработавшие/.test(x)).map((x) => "<h3" + x.replace(/<\/div>\s*$/, "")).join("")}${pre}`;
-}
-
-async function runS8() {
-  const r1 = await POST("/api/demo-logs/08_dvizhenie_uzlov.xlsx/import");
-  const r2 = await POST("/api/demo-logs/09_dvizhenie_uzlov.pdf/import");
-  const c = await GET(`/api/components/${(await bySerial("ESC40-0320")).id}`);
-  return `<h3>Excel: ${esc(r1.status_label || r1.status)}</h3>${importResultHTML(r1)}
-    <h3 style="margin-top:14px">PDF того же журнала: ${esc(r2.status_label || r2.status)}</h3><div class="small">${r2.messages.slice(0, 3).map(esc).join("<br>")}${r2.messages.length > 3 ? " …" : ""}</div>
-    <div class="notice ok" style="margin-top:10px">${esc(c.serial)}: ${c.location ? `${esc(c.location.aircraft_name)} · ${esc(c.location.position)}` : esc(c.status_label)}, наработка ${hrs(c.hours)},
-      остаточный ресурс ${residualText(c.residual, true)}; борта в истории: ${[...new Set(c.stints.map((s) => s.aircraft_name))].map(esc).join(", ")}.</div>`;
-}
-
-async function runS9() {
-  const b = await GET("/api/board");
-  const a1 = b.aircraft.find((a) => a.serial === "TBT-M4-001"), a2 = b.aircraft.find((a) => a.serial === "TBT-M4-002");
-  const c1 = a1.slots.find((s) => s.position === "ESC1").component, c2 = a2.slots.find((s) => s.position === "ESC1").component;
-  if (!c1 || !c2) throw new Error("Позиции ESC1 не укомплектованы — сбросьте демо-данные");
-  const before = await Promise.all([c1, c2].map((c) => GET(`/api/components/${c.id}`)));
-  const t0 = Math.floor(Date.now() / 1000) * 1000, at = (k) => new Date(t0 + k * 1000).toISOString(), why = "Демо-сценарий 9: обмен ESC1 между бортами";
-  await POST(`/api/components/${c2.id}/remove`, { at: at(0), to_status: "stock", reason: why });
-  await POST(`/api/components/${c1.id}/transfer`, { aircraft_id: a2.id, position: "ESC1", at: at(1), reason: why });
-  await POST(`/api/components/${c2.id}/install`, { aircraft_id: a1.id, position: "ESC1", at: at(2), reason: why });
-  const after = await Promise.all([c1, c2].map((c) => GET(`/api/components/${c.id}`)));
-  const loc = (c) => (c.location ? `${esc(c.location.aircraft_name)} · ${esc(c.location.position)}` : esc(c.status_label));
-  return `<div class="notice ok">Обмен выполнен теми же операциями, что и перетаскивание на <a href="#/board">доске перестановки</a>.</div>
-    <table><thead><tr><th>Узел</th><th>UID</th><th>Было</th><th>Стало</th><th class="num">Наработка</th><th>Остаточный ресурс</th></tr></thead><tbody>
-    ${after.map((c, k) => `<tr><td><a href="#/components/${c.id}">${esc(c.serial)}</a></td><td class="mono small">${fmtUid(c.uid)}</td><td>${loc(before[k])}</td><td><b>${loc(c)}</b></td>
-      <td class="num">${hrs(c.hours)}</td><td>${residualText(c.residual, true)}</td></tr>`).join("")}</tbody></table>`;
-}
-
-async function runS10() {
-  const d = await refreshNavCount() || await GET("/api/notifications");
-  return `<table><thead><tr><th>Категория</th><th class="num">Кол-во</th><th>Примеры</th></tr></thead><tbody>
-    ${["limit", "overdue", "approaching"].map((k) => `<tr><td>${NOTIF_CAT[k].icon} ${esc(d.categories[k])}</td><td class="num"><b>${d.counts[k]}</b></td>
-      <td class="small">${d.items[k].slice(0, 3).map((i) => `${esc(i.entity.serial)} — ${esc(i.rule.name)}`).join("<br>") || "—"}</td></tr>`).join("")}
-    <tr><td>Падения и столкновения за ${d.days} дн.</td><td class="num"><b>${d.counts.sensor_events}</b></td><td class="small">${d.sensor_events.slice(0, 3).map((e) => `${esc(e.aircraft ? e.aircraft.name : "")} — ${esc(e.kind_label)}`).join("<br>") || "—"}</td></tr>
-    </tbody></table><div class="hint">Полный список с действиями «Выполнить» / «Заменить» — <a href="#/maintenance">ТО и уведомления</a>.</div>`;
+function renderBlocks(blocks) {
+  const link = (b) => (b.href ? ` <a href="${esc(b.href)}">${esc(b.link || "Открыть →")}</a>` : "");
+  return blocks.map((b) => {
+    switch (b.t) {
+      case "notice": return `<div class="notice ${b.level || ""}">${esc(b.text)}${link(b)}</div>`;
+      case "p": return `<p class="${b.small ? "small" : ""}">${esc(b.text)}${link(b)}</p>`;
+      case "h3": return `<h3 style="margin-top:12px">${esc(b.text)}</h3>`;
+      case "diff": return diffTable(b.rows);
+      case "table": return `<div class="table-wrap"><table><thead><tr>${b.head.map((x) => `<th>${esc(x)}</th>`).join("")}</tr></thead><tbody>
+        ${b.rows.map((r) => `<tr>${r.map((c) => `<td>${cellHTML(c)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`;
+      case "import": {
+        const h = importResultHTML(b.data);
+        if (b.part === "full") return h;
+        if (b.part === "sensors") return h.split("<h3").slice(1).filter((x) => /Мониторинг|Сработавшие/.test(x)).map((x) => "<h3" + x.replace(/<\/div>\s*$/, "")).join("");
+        return h.split("<h3")[0];
+      }
+      case "move": return moveResultHTML(b.data, false);
+      default: return "";
+    }
+  }).join("");
 }
 
 // ------------------------------------------------------------------ запуск

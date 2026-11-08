@@ -140,7 +140,21 @@ def aircraft_brief(a: Aircraft, tot: Usage, summ: dict, positions: set[str]) -> 
         "events": sensors.counts_by_kind(object_session(a), a.id),
         "slots_all": len(a.type.slots or []), "slots_all_filled": len(positions),
         "maintenance": summ, "airworthy": summ["overdue"] == 0 and filled == slots and a.status == "active",
+        "readiness": readiness(a, summ, filled, slots),
     }
+
+
+def readiness(a: Aircraft, summ: dict, filled: int, slots: int) -> dict:
+    """Допуск борта к полётам: уровень (ok / warn / bad / gray) и текст для интерфейса."""
+    if a.status != "active":
+        return {"level": "gray", "text": AIRCRAFT_STATUSES[a.status]}
+    if filled < slots:
+        return {"level": "bad", "text": f"Некомплект ({filled}/{slots})"}
+    if summ["overdue"]:
+        return {"level": "bad", "text": f"Не допущен: просрочено ТО ({summ['overdue']})"}
+    if summ["due_soon"]:
+        return {"level": "warn", "text": f"Допущен, скоро ТО ({summ['due_soon']})"}
+    return {"level": "ok", "text": "Допущен"}
 
 
 def _residual_by_component(items: list[dict]) -> dict[int, dict]:
@@ -402,6 +416,15 @@ def patch_component(cid: int, data: ComponentPatch, s: Session = Depends(get_ses
         setattr(c, k, v)
     _commit(s)
     return {"ok": True}
+
+
+def passport_snapshot(s: Session, cid: int) -> dict:
+    """Краткий паспорт узла: местоположение, наработка, остаточный ресурс, статус ТО."""
+    c = _get(s, Component, cid, "Узел")
+    items = due_items(s, component_id=cid)
+    tot = component_totals(s, [c])[c.id]
+    cur = next(iter(s.scalars(select(Installation).where(Installation.component_id == cid, Installation.removed_at.is_(None)))), None)
+    return component_brief(c, tot, cur, _worst_by_component(items).get(c.id), _residual_by_component(items).get(c.id))
 
 
 @router.get("/components/{cid}")

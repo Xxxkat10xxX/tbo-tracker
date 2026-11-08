@@ -32,6 +32,24 @@ DEFAULT_ECONOMICS = {
 }
 
 
+def estimate(kpi: dict, p: dict) -> dict:
+    """Калькулятор экономического эффекта (формулы показываются в интерфейсе)."""
+    p = {**DEFAULT_ECONOMICS, **(p or {})}
+    fail_loss = p["failure_cost"] + p["downtime_days_per_failure"] * p["downtime_cost_per_day"]
+    at_risk = kpi["prevented_misses"] + kpi["overdue_in_operation"]
+    risk = at_risk * p["failure_probability"] * fail_loss
+    flights_year = kpi["flights_90d"] * 365 / 90
+    ops_year = kpi["component_operations_90d"] * 365 / 90
+    labor_h = (flights_year * p["manual_minutes_per_flight"] + ops_year * p["manual_minutes_per_operation"]) / 60
+    labor = labor_h * p["engineer_rate"]
+    total = risk + labor
+    return {"params": p, "fail_loss": round(fail_loss, 2), "at_risk": at_risk, "risk": round(risk, 2),
+            "flights_year": round(flights_year, 1), "ops_year": round(ops_year, 1), "labor_hours": round(labor_h, 1),
+            "labor": round(labor, 2), "total": round(total, 2), "per_aircraft": round(total / max(1, kpi["aircraft"]), 2),
+            "prevented_misses": kpi["prevented_misses"], "overdue_in_operation": kpi["overdue_in_operation"],
+            "aircraft": kpi["aircraft"]}
+
+
 def _status(metrics_spec):
     st = "ok"
     for interval, warn, used in metrics_spec:
@@ -136,7 +154,7 @@ def analytics(s: Session, now: datetime | None = None) -> dict:
     imports = s.scalar(select(func.count(LogImport.id))) or 0
     overdue_installed = [it for it in items if it["status"] == "overdue" and
                          (it["entity"]["kind"] == "aircraft" or it["entity"]["location"])]
-    return {
+    out = {
         "generated_at": iso(now),
         "kpi": {
             "aircraft": len([a for a in aircraft if a.status != "retired"]),
@@ -160,3 +178,5 @@ def analytics(s: Session, now: datetime | None = None) -> dict:
         "aircraft_names": [a.name for a in aircraft],
         "economics": economics_settings(s),
     }
+    out["estimate"] = estimate(out["kpi"], out["economics"])
+    return out

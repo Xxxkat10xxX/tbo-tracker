@@ -11,13 +11,15 @@ class Base(DeclarativeBase):
 def make_engine(url: str = DATABASE_URL):
     if url.startswith("sqlite"):
         DATA_DIR.mkdir(parents=True, exist_ok=True)
-        eng = create_engine(url, connect_args={"check_same_thread": False})
+        eng = create_engine(url, connect_args={"check_same_thread": False, "timeout": 30})
 
         @event.listens_for(eng, "connect")
         def _pragmas(dbapi_conn, _):
             cur = dbapi_conn.cursor()
             cur.execute("PRAGMA foreign_keys=ON")
             cur.execute("PRAGMA journal_mode=WAL")
+            cur.execute("PRAGMA synchronous=NORMAL")   # безопасно в режиме WAL, меньше записей на SD/SSD
+            cur.execute("PRAGMA busy_timeout=10000")   # фоновая проверка и запросы не мешают друг другу
             cur.close()
 
         return eng

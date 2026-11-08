@@ -218,6 +218,10 @@ class MissionIn(BaseModel):
     notes: str | None = None
 
 
+class MissionEstimateIn(MissionIn):
+    name: str = "—"
+
+
 class MissionRunIn(BaseModel):
     aircraft_id: int | None = None
     wind_ms: float = Field(3, ge=0, le=20)

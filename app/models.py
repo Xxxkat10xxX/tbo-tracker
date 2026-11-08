@@ -331,3 +331,24 @@ class MissionRun(Base):
     status: Mapped[str] = mapped_column(String(20))           # completed | aborted
     summary: Mapped[dict] = mapped_column(JSON, default=dict)
     track: Mapped[list] = mapped_column(JSON, default=list)   # [[t, lat, lon, alt, v, фаза], …]
+
+
+class NotificationEvent(Base):
+    """Журнал уведомлений сервера: когда позиция появилась, когда закрылась, куда доставлена.
+
+    Заполняется периодической проверкой на сервере (services/notify.py), поэтому уведомления
+    формируются и отправляются (Telegram, webhook) даже когда ни один браузер не открыт.
+    """
+
+    __tablename__ = "notification_events"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    key: Mapped[str] = mapped_column(String(200), index=True)
+    category: Mapped[str] = mapped_column(String(20))       # limit | overdue | approaching | sensor
+    title: Mapped[str] = mapped_column(String(300))
+    text: Mapped[str | None] = mapped_column(Text)
+    href: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime)
+    silent: Mapped[bool] = mapped_column(Boolean, default=False)     # первичное заполнение — без рассылки
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime)
+    delivery: Mapped[dict | None] = mapped_column(JSON)
