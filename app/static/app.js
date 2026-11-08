@@ -387,7 +387,7 @@ function resourceText(r) {
 function openResourceModal({ kind, entity, onDone }) {
   const name = kind === "aircraft" ? `борта ${entity.name}` : `узла ${entity.serial}`;
   modal(`Индивидуальный ресурс ${name}`, `${resourceFields(entity.resource)}
-    <div class="notice small" style="margin-top:12px">Ресурс появится в «ТО и напоминания» как «Индивидуальный ресурс (паспорт / формуляр)»: «Приближается» за 10 % до порога, «Требуется» — по достижении. Типовые регламенты продолжают действовать.</div>`, {
+    <div class="notice small" style="margin-top:12px">Ресурс появится в «ТО и уведомления» как «Индивидуальный ресурс (паспорт / формуляр)»: «Приближается» за 10 % до порога, «Требуется» — по достижении. Типовые регламенты продолжают действовать.</div>`, {
     okText: "Сохранить",
     onOk: async (root) => {
       await api("PATCH", `/api/${kind === "aircraft" ? "aircraft" : "components"}/${entity.id}`, readResource(root));
@@ -400,7 +400,7 @@ async function quickComponentType(select, onCreated) {
   modal("Новый тип узла", `<div class="row2"><div class="field"><label>Код (латиница, без пробелов)</label><input name="code" placeholder="gnss"></div>
     <div class="field"><label>Название</label><input name="name" placeholder="GNSS-приёмник"></div></div>
     <div class="field"><label>Описание</label><input name="description"></div>
-    <div class="hint">Чтобы узлы нового типа можно было устанавливать на борт, добавьте для него позицию в разделе «Типы бортов и узлов».</div>`, {
+    <div class="hint">Чтобы узлы нового типа можно было устанавливать на борт, добавьте для него позицию: «Узлы и склад» → «⊞ Свои типы узлов».</div>`, {
     okText: "Создать тип",
     onOk: async (root) => {
       const r = await POST("/api/component-types", { code: val(root, "code"), name: val(root, "name"), description: orNull(val(root, "description")) });
@@ -643,6 +643,9 @@ async function pageMission(id) {
 const view_ = () => $("#view");
 
 // ------------------------------------------------------------------ Перестановка узлов: drag & drop
+const nodesSwitch = (active) => `<div class="seg-switch" role="tablist">
+  <a href="#/board" class="${active === "board" ? "active" : ""}" role="tab">⇄ Перестановка</a>
+  <a href="#/components" class="${active === "components" ? "active" : ""}" role="tab">▣ Узлы и склад</a></div>`;
 async function pageBoard() {
   let data = await GET("/api/board");
   let picked = null;           // выбор щелчком (для тачскринов и без мыши)
@@ -658,7 +661,7 @@ async function pageBoard() {
   };
   function render() {
     const spareStock = data.spare.filter((c) => c.status === "stock"), spareRep = data.spare.filter((c) => c.status === "maintenance");
-    view().innerHTML = `<div class="page-head"><div><h1>Перестановка узлов</h1>
+    view().innerHTML = `${nodesSwitch("board")}<div class="page-head"><div><h1>Перестановка узлов</h1>
         <div class="sub">Перетащите узел на позицию соседнего борта, в резерв или в ремонт. Совместимые позиции подсвечиваются; занятая позиция — обмен узлами.
         После операции наработка и паспорт узла пересчитываются по истории установок (налёт до даты операции остаётся за прежним бортом).</div></div></div>
       <div id="move-result"></div>
@@ -808,13 +811,13 @@ const routes = [
   [/^#?\/?$/, "dash", pageDashboard],
   [/^#\/aircraft$/, "aircraft", pageAircraftList],
   [/^#\/aircraft\/(\d+)$/, "aircraft", pageAircraft],
-  [/^#\/components(?:\?.*)?$/, "components", pageComponents],
-  [/^#\/components\/(\d+)(?:\?.*)?$/, "components", pageComponent],
+  [/^#\/components(?:\?.*)?$/, "board", pageComponents],
+  [/^#\/components\/(\d+)(?:\?.*)?$/, "board", pageComponent],
   [/^#\/generator$/, "generator", pageGenerator],
-  [/^#\/types$/, "types", pageTypes],
+  [/^#\/types$/, "board", pageTypes],
   [/^#\/imports$/, "imports", pageImports],
-  [/^#\/maintenance$/, "maintenance", pageMaintenance],
-  [/^#\/notifications$/, "notifications", pageNotifications],
+  [/^#\/maintenance(?:\?tab=(\w+))?$/, "maintenance", pageMaintenance],
+  [/^#\/notifications$/, "maintenance", () => pageMaintenance("notif")],
   [/^#\/board$/, "board", pageBoard],
   [/^#\/rules$/, "rules", pageRules],
   [/^#\/analytics$/, "analytics", pageAnalytics],
@@ -853,8 +856,6 @@ async function refreshNavCount() {
   try {
     const d = await GET("/api/notifications");
     const c = d.counts, bad = c.limit + c.overdue;
-    const el = $("#nav-due");
-    el.hidden = !bad; el.textContent = bad;
     const nb = $("#nav-notif");
     nb.hidden = !c.total; nb.textContent = c.total; nb.classList.toggle("warn", !bad);
     // новые уведомления с прошлого раза — всплывающее сообщение и (если разрешено) уведомление браузера
@@ -877,29 +878,27 @@ async function refreshNavCount() {
 }
 setInterval(refreshNavCount, 60000);
 
-async function pageNotifications() {
+async function renderNotifications(root) {
   const d = await refreshNavCount() || await GET("/api/notifications");
   const c = d.counts;
   const perm = window.Notification ? Notification.permission : "unsupported";
-  view().innerHTML = `<div class="page-head"><div><h1>Уведомления</h1>
-      <div class="sub">Формируются автоматически при каждом изменении наработки (импорт журнала, автономный полёт, ручная запись) и по календарю. Проверка — каждую минуту.</div></div>
-      <div class="actions">${perm === "default" ? '<button id="n-perm">🔔 Уведомления в браузере</button>' : perm === "granted" ? '<span class="badge ok">уведомления браузера включены</span>' : ""}
-      <a class="btn" href="#/maintenance">Все работы ТО →</a></div></div>
+  root.innerHTML = `<div class="toolbar"><div class="small muted">Формируются автоматически при каждом изменении наработки (импорт журнала, автономный полёт, ручная запись) и по календарю. Проверка — каждую минуту.</div>
+      <div>${perm === "default" ? '<button class="sm" id="n-perm">🔔 Уведомления в браузере</button>' : perm === "granted" ? '<span class="badge ok">уведомления браузера включены</span>' : ""}</div></div>
     <div class="kpis">
       ${["limit", "overdue", "approaching"].map((k) => `<div class="kpi clickable ${c[k] ? NOTIF_CAT[k].cls : "ok"}" data-scroll="n-${k}"><div class="v">${c[k]}</div><div class="l">${esc(d.categories[k])}</div></div>`).join("")}
       <div class="kpi clickable ${c.sensor_events ? "warn" : "ok"}" data-scroll="n-sens"><div class="v">${c.sensor_events}</div><div class="l">Падений и столкновений за ${d.days} дн.</div></div>
     </div>
-    ${["limit", "overdue", "approaching"].map((k) => `<div class="card notif-${NOTIF_CAT[k].cls}" id="n-${k}"><div class="card-head"><h2>${NOTIF_CAT[k].icon} ${esc(d.categories[k])} <span class="muted">(${c[k]})</span></h2></div>
+    ${["limit", "overdue", "approaching"].map((k) => `<div class="card flat notif-${NOTIF_CAT[k].cls}" id="n-${k}"><div class="card-head"><h2>${NOTIF_CAT[k].icon} ${esc(d.categories[k])} <span class="muted">(${c[k]})</span></h2></div>
       <div class="small muted" style="margin:-6px 0 10px">${NOTIF_CAT[k].hint}</div><div data-cat="${k}">${dueTable(d.items[k], { empty: "Нет уведомлений" })}</div></div>`).join("")}
-    <div class="card" id="n-sens"><h2>Мониторинг датчиков: падения и столкновения</h2>
+    <div class="card flat" id="n-sens"><h2>Мониторинг датчиков: падения и столкновения</h2>
       ${d.sensor_events.length ? `<div class="table-wrap"><table><thead><tr><th>Когда</th><th>Борт</th><th>Событие</th><th class="num">Перегрузка</th><th>Источник</th></tr></thead><tbody>
         ${d.sensor_events.map((e) => `<tr><td class="nowrap">${fmtDT(e.occurred_at)}</td><td>${e.aircraft ? `<a href="#/aircraft/${e.aircraft.id}">${esc(e.aircraft.name)}</a> <span class="small muted">${esc(e.aircraft.serial)}</span>` : "—"}</td>
           <td><span class="badge ${EV_BADGE[e.kind]}">${esc(e.kind_label)}</span></td><td class="num">${e.peak_g != null ? num(e.peak_g, 1) + " g" : "—"}</td><td class="small">${esc(e.details || e.source)}</td></tr>`).join("")}
         </tbody></table></div>` : `<div class="empty-state">За ${d.days} дней падений и столкновений не зафиксировано</div>`}</div>`;
-  ["limit", "overdue", "approaching"].forEach((k) => bindDueActions($(`[data-cat="${k}"]`), d.items[k], () => { refreshNavCount(); reload(); }));
+  ["limit", "overdue", "approaching"].forEach((k) => bindDueActions($(`[data-cat="${k}"]`), d.items[k], () => { refreshNavCount(); renderNotifications(root); }));
   $$("[data-scroll]").forEach((k) => k.addEventListener("click", () => document.getElementById(k.dataset.scroll).scrollIntoView({ behavior: "smooth" })));
   const pb = $("#n-perm");
-  if (pb) pb.onclick = async () => { await Notification.requestPermission(); reload(); };
+  if (pb) pb.onclick = async () => { await Notification.requestPermission(); renderNotifications(root); };
 }
 
 // ------------------------------------------------------------------ Обзор
@@ -1247,7 +1246,7 @@ async function pageGenerator() {
 async function pageTypes() {
   META = null;
   const m = await meta();
-  view().innerHTML = `<div class="page-head"><div><h1>Типы бортов и узлов</h1><div class="sub">Справочники: добавьте свои типы узлов (GNSS, АКБ, моторы, подвесы…) и посадочные места для них в типах БПЛА.
+  view().innerHTML = `<div class="crumbs"><a href="#/components">Узлы и склад</a> / Свои типы</div><div class="page-head"><div><h1>Типы бортов и узлов</h1><div class="sub">Справочники: добавьте свои типы узлов (GNSS, АКБ, моторы, подвесы…) и посадочные места для них в типах БПЛА.
     Затем — «Узлы и склад» → «+ Добавить узел» и регламенты в разделе «Регламенты».</div></div></div>
     <div class="card"><div class="card-head"><h2>Типы узлов</h2><button class="primary sm" id="add-ct">+ Тип узла</button></div>
       <table><thead><tr><th>Код</th><th>Название</th><th>Описание</th><th>Используется в позициях</th><th></th></tr></thead><tbody>
@@ -1317,7 +1316,7 @@ async function pageComponents() {
   const params = new URLSearchParams(location.hash.split("?")[1] || "");
   const m = await meta();
   let status = params.get("status") || "", typeId = "", q = "";
-  view().innerHTML = `<div class="page-head"><div><h1>Узлы и склад</h1><div class="sub">Паспорта заменяемых компонентов: сквозная наработка, местонахождение, состояние ТО</div></div>
+  view().innerHTML = `${nodesSwitch("components")}<div class="page-head"><div><h1>Узлы и склад</h1><div class="sub">Паспорта заменяемых компонентов: сквозная наработка, местонахождение, состояние ТО</div></div>
     <div class="actions"><a class="btn" href="#/types">⊞ Свои типы узлов</a><button class="primary" id="add">+ Добавить узел</button></div></div>
     <div class="card"><div class="toolbar"><div class="chips" id="chips">
       ${[["", "Все"], ["installed", "Установлены"], ["stock", "Резерв / склад"], ["maintenance", "На обслуживании"], ["retired", "Списаны"]]
@@ -1544,10 +1543,11 @@ async function pageImports() {
 }
 
 // ------------------------------------------------------------------ ТО
-async function pageMaintenance() {
+async function pageMaintenance(tab) {
   let filter = "overdue,due_soon";
-  view().innerHTML = `<div class="page-head"><div><h1>ТО и напоминания</h1><div class="sub">Список формируется автоматически по текущей наработке, циклам и календарным срокам согласно регламентам</div></div></div>
-    <div class="card"><div class="tabs" id="tabs"><button class="active" data-t="due">Предстоящие и просроченные работы</button><button data-t="rec">Журнал выполненных работ</button></div>
+  tab = ["notif", "due", "rec"].includes(tab) ? tab : "notif";
+  view().innerHTML = `<div class="page-head"><div><h1>ТО и уведомления</h1><div class="sub">Уведомления и список работ формируются автоматически по текущей наработке, циклам, календарю и событиям датчиков согласно регламентам</div></div></div>
+    <div class="card"><div class="tabs" id="tabs"><button data-t="notif">🔔 Уведомления</button><button data-t="due">Все сроки ТО</button><button data-t="rec">Журнал выполненных работ</button></div>
     <div id="tb"></div></div>`;
   async function showDue() {
     $("#tb").innerHTML = `<div class="toolbar"><div class="chips" id="chips">${[["overdue,due_soon", "Требуют внимания"], ["overdue", "Требуется / просрочено"], ["due_soon", "Приближается"], ["", "Все регламенты"]]
@@ -1559,8 +1559,15 @@ async function pageMaintenance() {
     bindDueActions($("#list"), items, showDue);
   }
   async function showRec() { $("#tb").innerHTML = recordsTable(await GET("/api/maintenance/records?limit=300")); }
-  $$("#tabs button").forEach((b) => b.addEventListener("click", () => { $$("#tabs button").forEach((x) => x.classList.toggle("active", x === b)); (b.dataset.t === "due" ? showDue : showRec)(); }));
-  showDue();
+  const show = { notif: () => renderNotifications($("#tb")), due: showDue, rec: showRec };
+  const open = (k) => {
+    $$("#tabs button").forEach((x) => x.classList.toggle("active", x.dataset.t === k));
+    history.replaceState(null, "", k === "notif" ? "#/maintenance" : `#/maintenance?tab=${k}`);
+    $("#tb").innerHTML = '<div class="loading">Расчёт…</div>';
+    show[k]();
+  };
+  $$("#tabs button").forEach((b) => b.addEventListener("click", () => open(b.dataset.t)));
+  open(tab);
 }
 
 // ------------------------------------------------------------------ Регламенты
@@ -1640,7 +1647,7 @@ async function pageAnalytics() {
   const maxTotal = Math.max(1, ...d.monthly.map((m) => m.total));
   const names = d.aircraft_names;
   const MONTHS = ["янв", "фев", "мар", "апр", "май", "июн", "июл", "авг", "сен", "окт", "ноя", "дек"];
-  view().innerHTML = `<div class="page-head"><div><h1>Эффект для эксплуатанта и сервисной службы</h1>
+  view().innerHTML = `<div class="page-head"><div><h1>Статистика</h1>
     <div class="sub">Что даёт поэкземплярный учёт ресурса по сравнению с традиционным учётом «по борту» (формуляр аппарата)</div></div></div>
     <div class="kpis">
       <div class="kpi bad"><div class="v">${k.prevented_misses}</div><div class="l">пропусков ТО предотвращено — учёт «по борту» их бы не увидел</div></div>
@@ -1664,10 +1671,10 @@ async function pageAnalytics() {
         ${d.hidden_hours.length ? `<table><thead><tr><th>Узел</th><th>Борт</th><th class="num">На борту</th><th class="num">Фактически</th><th class="num">Скрыто</th></tr></thead><tbody>
         ${d.hidden_hours.map((r) => `<tr><td><a href="#/components/${r.component_id}">${esc(r.serial)}</a><div class="small muted">${esc(r.type)}</div></td><td>${esc(r.aircraft)}</td>
           <td class="num">${hrs(r.on_board_hours)}</td><td class="num">${hrs(r.tsn_hours)}</td><td class="num"><b>${hrs(r.hidden_hours)}</b></td></tr>`).join("")}</tbody></table>` : '<div class="empty-state">Нет</div>'}</div>
-      <div class="card"><h2>Налёт парка по месяцам</h2>
+      <div class="card"><h2>Налёт парка по месяцам${d.monthly.length ? `, ${d.monthly[0].month.slice(0, 4) === d.monthly[d.monthly.length - 1].month.slice(0, 4) ? d.monthly[0].month.slice(0, 4) : `${d.monthly[0].month.slice(0, 4)}–${d.monthly[d.monthly.length - 1].month.slice(0, 4)}`} г.` : ""}</h2>
         <div class="chart">${d.monthly.map((mo) => `<div class="col"><div class="tot">${num(mo.total, 0)}</div>
           ${names.map((n, i) => mo.by_aircraft[n] ? `<div class="seg" title="${esc(n)}: ${num(mo.by_aircraft[n], 1)} ч" style="height:${(mo.by_aircraft[n] / maxTotal) * 170}px;background:${PALETTE[i % PALETTE.length]}"></div>` : "").reverse().join("")}
-          <div class="lbl">${MONTHS[+mo.month.slice(5) - 1]}</div></div>`).join("")}</div>
+          <div class="lbl">${MONTHS[+mo.month.slice(5) - 1]}<span class="yr">${mo.month.slice(0, 4)}</span></div></div>`).join("")}</div>
         <div class="legend">${names.map((n, i) => `<span><i style="background:${PALETTE[i % PALETTE.length]}"></i>${esc(n)}</span>`).join("")}</div>
         <div class="small muted" style="margin-top:8px">Часы налёта, загруженные из журналов эксплуатации.</div></div>
     </div>
@@ -1732,9 +1739,9 @@ async function pageScenarios() {
       <li><b>Часы:</b> ${link("IMU3-0206")} — калибровка ИНС каждые 50 ч: до сценария 1 «Приближается», после — «Требуется».</li>
       <li><b>Циклы:</b> ${link("ESC40-0301")} — диагностика ESC каждые 200 циклов: 195 → 203 после сценария 1.</li>
       <li><b>Календарь:</b> ${link("TBT-VT2-011")} — годовое ТО (180 дн.) через ~9 дней; ${link("BVK2-0405")} — ТО вычислителя (120 дн.) просрочено.</li>
-      <li><b>Назначенный ресурс:</b> ${link("ESC40-0318")} — 372 из 400 ч. Всё видно в разделе <a href="#/maintenance">ТО и напоминания</a>.</li>`)}
+      <li><b>Назначенный ресурс:</b> ${link("ESC40-0318")} — 372 из 400 ч. Всё видно в разделе <a href="#/maintenance">ТО и уведомления</a>.</li>`)}
     ${scenarioCard(5, "Проведение обслуживания по напоминанию", `
-      <li>В <a href="#/maintenance">ТО и напоминания</a> найдите «ТО бортового вычислителя» для ${link("BVK2-0405")} (${link("TBT-VT2-012")}) → «Выполнить».</li>
+      <li>В <a href="#/maintenance?tab=due">ТО и уведомления → Все сроки ТО</a> найдите «ТО бортового вычислителя» для ${link("BVK2-0405")} (${link("TBT-VT2-012")}) → «Выполнить».</li>
       <li>Ожидается: напоминание уходит в «В норме», интервал отсчитывается от даты работы, сквозная наработка узла не изменилась, «Борт 12» снова допущен к полётам.</li>
       <li>Аналогично можно выполнить калибровку ${link("IMU3-0206")} после сценария 1.</li>`)}
     <h2 style="margin:22px 0 10px">Критерии конкурсного задания</h2>
@@ -1755,7 +1762,7 @@ async function pageScenarios() {
       <li>Подтвердите дату и основание. Ожидается: карточки обоих бортов обновлены, таблица «было → стало» по паспортам: местоположение изменилось, наработка и UID сохранены, остаточный ресурс пересчитан.</li>
       <li>С прошедшей датой операции полёты после неё переотносятся — наработка узлов меняется соответственно.</li>`)}
     ${scenarioCard(10, "Автоматические уведомления (К7)", `
-      <li>Раздел <a href="#/notifications">Уведомления</a>: «Достигнут предельный ресурс» (${link("ESC40-0315")} — индивидуальный ресурс 150 ч исчерпан), «Просрочено» (${link("BVK2-0405")}), «Приближается» (${link("ESC40-0318")}, ${link("IMU3-0206")} …).</li>
+      <li>Раздел <a href="#/maintenance">ТО и уведомления</a> → «Уведомления»: «Достигнут предельный ресурс» (${link("ESC40-0315")} — индивидуальный ресурс 150 ч исчерпан), «Просрочено» (${link("BVK2-0405")}), «Приближается» (${link("ESC40-0318")}, ${link("IMU3-0206")} …).</li>
       <li>После импорта журнала или автономного полёта новые позиции появляются всплывающим сообщением (и уведомлением браузера, если оно разрешено); счётчик в меню обновляется каждую минуту.</li>`)}`;
   $("#reset2").onclick = resetDemo;
   const runners = { 1: runS1, 2: runS2, 3: runS3, 4: runS4, 5: runS5, 6: runS6, 7: runS7, 8: runS8, 9: runS9, 10: runS10 };
@@ -1940,7 +1947,7 @@ async function runS10() {
     ${["limit", "overdue", "approaching"].map((k) => `<tr><td>${NOTIF_CAT[k].icon} ${esc(d.categories[k])}</td><td class="num"><b>${d.counts[k]}</b></td>
       <td class="small">${d.items[k].slice(0, 3).map((i) => `${esc(i.entity.serial)} — ${esc(i.rule.name)}`).join("<br>") || "—"}</td></tr>`).join("")}
     <tr><td>Падения и столкновения за ${d.days} дн.</td><td class="num"><b>${d.counts.sensor_events}</b></td><td class="small">${d.sensor_events.slice(0, 3).map((e) => `${esc(e.aircraft ? e.aircraft.name : "")} — ${esc(e.kind_label)}`).join("<br>") || "—"}</td></tr>
-    </tbody></table><div class="hint">Полный список с действиями «Выполнить» / «Заменить» — <a href="#/notifications">Уведомления</a>.</div>`;
+    </tbody></table><div class="hint">Полный список с действиями «Выполнить» / «Заменить» — <a href="#/maintenance">ТО и уведомления</a>.</div>`;
 }
 
 // ------------------------------------------------------------------ запуск
