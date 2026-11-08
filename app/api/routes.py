@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy import or_, select, true
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from ..config import DEMO_LOGS_DIR
 from ..db import get_session
@@ -25,6 +25,7 @@ from ..models import (
     LogImport,
     MaintenanceRecord,
     MaintenanceRule,
+    SensorEvent,
     Setting,
 )
 from ..schemas import (
@@ -45,7 +46,7 @@ from ..schemas import (
     RuleIn,
     UsageEntryIn,
 )
-from ..services import images, inventory, logs, manual
+from ..services import images, inventory, logs, manual, sensors
 from ..services.analytics import analytics
 from ..services.maintenance import STATUS_ORDER, Evaluator, due_items, record_dict, record_maintenance, records_query
 from ..services.usage import (
@@ -88,7 +89,8 @@ def meta(s: Session = Depends(get_session)):
         "aircraft_types": [{"id": t.id, "code": t.code, "name": t.name, "category": t.category,
                             "manufacturer": t.manufacturer, "slots": t.slots}
                            for t in s.scalars(select(AircraftType).order_by(AircraftType.id))],
-        "component_types": [{"id": t.id, "code": t.code, "name": t.name, "description": t.description}
+        "component_types": [{"id": t.id, "code": t.code, "name": t.name, "description": t.description,
+                             "spec_fields": t.spec_fields or []}
                             for t in s.scalars(select(ComponentType).order_by(ComponentType.id))],
         "now": iso(utcnow()),
     }
@@ -135,14 +137,35 @@ def aircraft_brief(a: Aircraft, tot: Usage, summ: dict, positions: set[str]) -> 
         "status": a.status, "status_label": AIRCRAFT_STATUSES[a.status], "operator": a.operator, "base": a.base,
         "in_service_at": iso(a.in_service_at), "hours": round(tot.hours, 2), "cycles": tot.cycles, "flights": tot.flights,
         "slots_total": slots, "slots_filled": filled, "resource": _res(a), "image": a.image,
+        "events": sensors.counts_by_kind(object_session(a), a.id),
         "slots_all": len(a.type.slots or []), "slots_all_filled": len(positions),
         "maintenance": summ, "airworthy": summ["overdue"] == 0 and filled == slots and a.status == "active",
     }
 
 
-def component_brief(c: Component, tot: Usage, inst: Installation | None, worst: dict | None) -> dict:
+def _residual_by_component(items: list[dict]) -> dict[int, dict]:
+    """Остаточный ресурс узла: минимальный остаток по каждому счётчику среди назначенных ресурсов
+    (типовые регламенты вида «назначенный ресурс» и индивидуальный ресурс экземпляра)."""
+    out: dict[int, dict] = {}
+    for it in items:
+        if it["entity"]["kind"] != "component" or it["rule"]["kind"] != "life":
+            continue
+        r = out.setdefault(it["entity"]["id"], {"hours": None, "cycles": None, "days": None, "fraction": None, "limit_by": None})
+        for m in it["metrics"]:
+            k = m["metric"]
+            if r[k] is None or m["remaining"] < r[k]:
+                r[k] = m["remaining"]
+            frac = max(0.0, 1 - m["ratio"])
+            if r["fraction"] is None or frac < r["fraction"]:
+                r["fraction"], r["limit_by"] = round(frac, 4), it["rule"]["name"]
+    return out
+
+
+def component_brief(c: Component, tot: Usage, inst: Installation | None, worst: dict | None, residual: dict | None = None) -> dict:
     return {
-        "id": c.id, "serial": c.serial, "type": {"id": c.type.id, "code": c.type.code, "name": c.type.name},
+        "id": c.id, "serial": c.serial, "uid": c.uid, "specs": c.specs or [], "residual": residual,
+        "manufactured_at": iso(c.manufactured_at), "in_service_at": iso(c.in_service_at),
+        "type": {"id": c.type.id, "code": c.type.code, "name": c.type.name},
         "model": c.model, "part_number": c.part_number, "manufacturer": c.manufacturer, "firmware": c.firmware,
         "status": c.status, "status_label": COMPONENT_STATUSES[c.status],
         "hours": round(tot.hours, 2), "cycles": tot.cycles, "flights": tot.flights,
@@ -314,6 +337,8 @@ def get_aircraft(aid: int, s: Session = Depends(get_session)):
         **aircraft_brief(a, tot, summ, set(current)),
         "initial_hours": a.initial_hours, "initial_cycles": a.initial_cycles, "notes": a.notes,
         "configuration": config, "due": items, "installations": history,
+        "sensor_events": [sensors.event_dict(e) for e in s.scalars(select(SensorEvent).where(SensorEvent.aircraft_id == aid)
+                                                                     .order_by(SensorEvent.occurred_at.desc()))],
         "flight_log": [_flight_dict(f, mids) for f in flights],
         "maintenance_records": [record_dict(r) for r in records],
     }
@@ -324,7 +349,7 @@ def _manual_ids(s: Session) -> set[int]:
 
 
 def _flight_dict(f: Flight, manual_ids: set[int] | None = None) -> dict:
-    return {"manual": bool(manual_ids and f.import_id in manual_ids), "source": "flight","id": f.id, "aircraft_id": f.aircraft_id, "aircraft_name": f.aircraft.name, "external_id": f.external_id,
+    return {"events": len(f.events),"manual": bool(manual_ids and f.import_id in manual_ids), "source": "flight","id": f.id, "aircraft_id": f.aircraft_id, "aircraft_name": f.aircraft.name, "external_id": f.external_id,
             "started_at": iso(f.started_at), "ended_at": iso(f.ended_at), "duration_h": round(f.duration_h, 3),
             "cycles": f.cycles, "mission": f.mission, "pilot": f.pilot, "import_id": f.import_id}
 
@@ -346,8 +371,9 @@ def list_components(status: str | None = None, type_id: int | None = None, q: st
     if aircraft_id:
         comps = [c for c in comps if c.id in cur and cur[c.id].aircraft_id == aircraft_id]
     tots = component_totals(s, comps)
-    worst = _worst_by_component(due_items(s))
-    return [component_brief(c, tots[c.id], cur.get(c.id), worst.get(c.id)) for c in comps]
+    items = due_items(s)
+    worst, resid = _worst_by_component(items), _residual_by_component(items)
+    return [component_brief(c, tots[c.id], cur.get(c.id), worst.get(c.id), resid.get(c.id)) for c in comps]
 
 
 @router.post("/components", status_code=201)
@@ -368,6 +394,10 @@ def patch_component(cid: int, data: ComponentPatch, s: Session = Depends(get_ses
     upd = data.model_dump(exclude_unset=True)
     if "status" in upd and c.status == "installed":
         raise DomainError("Статус установленного узла меняется операцией снятия")
+    if "manufactured_at" in upd:
+        upd["manufactured_at"] = _dt(upd["manufactured_at"])
+    if "specs" in upd and upd["specs"] is None:
+        upd["specs"] = []
     for k, v in upd.items():
         setattr(c, k, v)
     _commit(s)
@@ -429,8 +459,8 @@ def get_component(cid: int, s: Session = Depends(get_session)):
     timeline.sort(key=lambda e: e["at"], reverse=True)
     worst = _worst_by_component(items).get(c.id)
     return {
-        **component_brief(c, tot, cur, worst),
-        "manufactured_at": iso(c.manufactured_at), "in_service_at": iso(c.in_service_at), "notes": c.notes,
+        **component_brief(c, tot, cur, worst, _residual_by_component(items).get(c.id)),
+        "notes": c.notes,
         "on_board_hours": round(stint.get(cur.id, Usage()).hours, 2) if cur else None,
         "boards_count": len({i.aircraft_id for i in installs}),
         "stints": list(reversed(stints)), "due": items, "maintenance_records": records,
@@ -555,6 +585,15 @@ def _demo_file(name: str):
     return path
 
 
+@router.get("/templates/movements.xlsx")
+def movements_template():
+    from fastapi.responses import Response
+
+    from ..services.movements import template_xlsx
+    return Response(template_xlsx(), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    headers={"Content-Disposition": 'attachment; filename="tbo-tracker_dvizhenie_uzlov.xlsx"'})
+
+
 @router.get("/demo-logs")
 def demo_logs():
     import json
@@ -582,7 +621,7 @@ def rule_dict(r: MaintenanceRule) -> dict:
         else (r.component_type.name if r.component_type else "Все типы узлов"),
         "kind": r.kind, "interval_hours": r.interval_hours, "interval_cycles": r.interval_cycles,
         "interval_days": r.interval_days, "warn_hours": r.warn_hours, "warn_cycles": r.warn_cycles,
-        "warn_days": r.warn_days, "active": r.active,
+        "warn_days": r.warn_days, "interval_events": r.interval_events, "warn_events": r.warn_events, "active": r.active,
     }
 
 
@@ -592,8 +631,8 @@ def list_rules(s: Session = Depends(get_session)):
 
 
 def _validate_rule(data: RuleIn):
-    if not (data.interval_hours or data.interval_cycles or data.interval_days):
-        raise DomainError("Задайте хотя бы один порог: часы, циклы или дни")
+    if not (data.interval_hours or data.interval_cycles or data.interval_days or data.interval_events):
+        raise DomainError("Задайте хотя бы один порог: часы, циклы, дни или падения/столкновения")
     if data.target == "aircraft" and data.component_type_id:
         raise DomainError("Регламент борта не может ссылаться на тип узла")
     if data.target == "component" and data.aircraft_type_id:
@@ -681,7 +720,7 @@ def update_component_type(tid: int, data: ComponentTypeIn, s: Session = Depends(
     t = _get(s, ComponentType, tid, "Тип узла")
     if data.code != t.code:
         raise DomainError("Код типа менять нельзя (на него ссылаются позиции бортов)")
-    t.name, t.description = data.name, data.description
+    t.name, t.description, t.spec_fields = data.name, data.description, data.spec_fields
     _commit(s)
     return {"message": "Тип узла обновлён"}
 

@@ -65,7 +65,15 @@ const CO_ST = { installed: "blue", stock: "ok", maintenance: "warn", retired: "b
 const acBadge = (a) => `<span class="badge ${AC_ST[a.status]}">${esc(a.status_label)}</span>`;
 const coBadge = (c) => `<span class="badge ${CO_ST[c.status]}">${esc(c.status_label)}</span>`;
 const IMP_ST = { imported: "ok", partial: "warn", duplicate: "blue", rejected: "bad", rolled_back: "" };
-const METRIC = { hours: "Часы", cycles: "Циклы", days: "Календарь" };
+const METRIC = { hours: "Часы", cycles: "Циклы", days: "Календарь", events: "Падения/столкн." };
+const EV_BADGE = { fall: "bad", collision: "warn" };
+function eventsTable(list) {
+  if (!list.length) return '<div class="empty-state">Падений и столкновений не зафиксировано</div>';
+  return `<div class="table-wrap"><table><thead><tr><th>Когда</th><th>Событие</th><th class="num">Пиковая перегрузка</th><th>Источник</th><th>Полёт</th></tr></thead><tbody>
+    ${list.map((e) => `<tr><td class="nowrap">${fmtDT(e.occurred_at)}</td><td><span class="badge ${EV_BADGE[e.kind]}">${esc(e.kind_label)}</span></td>
+      <td class="num">${e.peak_g != null ? num(e.peak_g, 1) + " g" : "—"}</td><td class="small">${esc(e.details || e.source)}</td><td class="small">№${e.flight_id}</td></tr>`).join("")}</tbody></table></div>
+    <div class="hint">Падение — невесомость |a| &lt; 0,35 g не менее 0,2 с и затем удар ≥ 3 g; столкновение — удар ≥ 4 g без невесомости (анализ акселерометра ИНС/ПК).</div>`;
+}
 
 function metricHTML(m) {
   const cls = m.status === "overdue" ? "bad" : m.status === "due_soon" ? "warn" : "";
@@ -288,6 +296,78 @@ async function openPhotoPicker(a, onDone) {
   render();
 }
 
+// ------------------------------------------------------------------ электронный паспорт
+const fmtUid = (u) => u ? `${u.slice(0, 8)}-${u.slice(8, 12)}-${u.slice(12, 16)}-${u.slice(16, 20)}-${u.slice(20, 32)}`.toUpperCase() : "—";
+function residualText(r, short) {
+  if (!r) return short ? "—" : "назначенный ресурс не задан";
+  const parts = [r.hours != null && `${num(Math.max(0, r.hours), 1)} ч`, r.cycles != null && `${num(Math.max(0, r.cycles), 0)} цикл.`, r.days != null && `${num(Math.max(0, r.days), 0)} дн.`].filter(Boolean);
+  return parts.join(" / ") || "—";
+}
+function residualBar(r) {
+  if (!r || r.fraction == null) return "";
+  const pct = Math.round(r.fraction * 100), cls = r.fraction <= 0 ? "bad" : r.fraction <= 0.1 ? "warn" : "";
+  return `<div class="bar" style="margin-top:4px" title="${pct}% ресурса осталось"><span class="${cls}" style="width:${pct}%"></span></div>`;
+}
+function specRows(specs) {
+  return `<table class="spec-edit"><tbody>${(specs.length ? specs : [{ name: "", value: "" }]).map((s) => `<tr>
+    <td><input name="spec-name" value="${esc(s.name)}" placeholder="Характеристика"></td><td><input name="spec-value" value="${esc(s.value)}" placeholder="Значение"></td>
+    <td style="width:40px"><button class="sm danger" data-spec-rm>✕</button></td></tr>`).join("")}</tbody></table>
+    <button class="sm" data-spec-add style="margin-top:6px">+ Характеристика</button>`;
+}
+function bindSpecs(root) {
+  const bind = () => $$("[data-spec-rm]", root).forEach((b) => { b.onclick = () => b.closest("tr").remove(); });
+  $("[data-spec-add]", root).onclick = () => {
+    $(".spec-edit tbody", root).insertAdjacentHTML("beforeend", `<tr><td><input name="spec-name" placeholder="Характеристика"></td><td><input name="spec-value" placeholder="Значение"></td><td><button class="sm danger" data-spec-rm>✕</button></td></tr>`);
+    bind();
+  };
+  bind();
+}
+const readSpecs = (root) => $$(".spec-edit tbody tr", root).map((tr) => ({ name: $('[name="spec-name"]', tr).value.trim(), value: $('[name="spec-value"]', tr).value.trim() })).filter((s) => s.name);
+function passportHTML(c) {
+  const lifeRules = c.due.filter((i) => i.rule.kind === "life").map((i) => `${esc(i.rule.name)}: ${i.metrics.map((m) => `${num(m.limit, 0)} ${m.unit}`).join(" / ")}`);
+  return `<div class="card passport"><div class="card-head"><h2>Электронный паспорт</h2><button class="sm" id="edit-pass">✎ Изменить паспорт</button></div>
+    <div class="pass-grid">
+      <dl class="pass-ids">
+        <dt>Уникальный идентификатор</dt><dd class="mono">${fmtUid(c.uid)}</dd>
+        <dt>Серийный номер</dt><dd><b>${esc(c.serial)}</b></dd>
+        <dt>Тип / модель</dt><dd>${esc(c.type.name)} · ${esc(c.model || "—")}</dd>
+        <dt>Децимальный номер</dt><dd>${esc(c.part_number || "—")}</dd>
+        <dt>Производитель</dt><dd>${esc(c.manufacturer || "—")}</dd>
+        <dt>Дата изготовления</dt><dd>${fmtD(c.manufactured_at)}</dd>
+        <dt>Ввод в эксплуатацию</dt><dd>${fmtD(c.in_service_at)}</dd>
+        <dt>Версия ПО</dt><dd>${esc(c.firmware || "—")}</dd>
+      </dl>
+      <div><h3>Основные технические характеристики</h3>
+        ${c.specs.length ? `<table class="spec"><tbody>${c.specs.map((s) => `<tr><td class="muted">${esc(s.name)}</td><td>${esc(s.value)}</td></tr>`).join("")}</tbody></table>` : '<div class="muted small">Не заполнены — «✎ Изменить паспорт»</div>'}</div>
+      <div><h3>Ресурс</h3>
+        <div class="small muted">Установленный эксплуатационный ресурс</div>
+        <div class="small">${lifeRules.length ? lifeRules.join("<br>") : "не задан"}</div>
+        <div class="small muted" style="margin-top:8px">Наработка с начала эксплуатации</div><div><b>${hrs(c.hours)}</b> · ${num(c.cycles, 0)} цикл.</div>
+        <div class="small muted" style="margin-top:8px">Остаточный ресурс${c.residual && c.residual.limit_by ? ` (по «${esc(c.residual.limit_by)}»)` : ""}</div>
+        <div class="big-res">${residualText(c.residual)}</div>${residualBar(c.residual)}
+      </div></div></div>`;
+}
+function openPassportModal(c, onDone) {
+  const bg = modal(`Электронный паспорт ${c.serial}`, `
+    <div class="row3"><div class="field"><label>Модель</label><input name="model" value="${esc(c.model || "")}"></div>
+    <div class="field"><label>Децимальный номер</label><input name="part_number" value="${esc(c.part_number || "")}"></div>
+    <div class="field"><label>Версия ПО</label><input name="firmware" value="${esc(c.firmware || "")}"></div></div>
+    <div class="row2"><div class="field"><label>Производитель</label><input name="manufacturer" value="${esc(c.manufacturer || "")}"></div>
+    <div class="field"><label>Дата изготовления</label><input type="date" name="manufactured_at" value="${c.manufactured_at ? c.manufactured_at.slice(0, 10) : ""}"></div></div>
+    <h3>Основные технические характеристики</h3>${specRows(c.specs)}
+    <div class="hint">Серийный номер, уникальный идентификатор и дата ввода в эксплуатацию — неизменяемые реквизиты паспорта. Ресурс — кнопка «⚙ Ресурс».</div>`, {
+    wide: true, okText: "Сохранить паспорт",
+    onOk: async (root) => {
+      const md = val(root, "manufactured_at");
+      await api("PATCH", `/api/components/${c.id}`, { model: orNull(val(root, "model")), part_number: orNull(val(root, "part_number")),
+        firmware: orNull(val(root, "firmware")), manufacturer: orNull(val(root, "manufacturer")),
+        manufactured_at: md ? md + "T00:00:00Z" : null, specs: readSpecs(root) });
+      toast("Паспорт сохранён"); onDone && onDone();
+    },
+  });
+  bindSpecs(bg);
+}
+
 // ------------------------------------------------------------------ ресурс и свои типы
 const RES_HINT = "Максимальный износ конкретного экземпляра (по паспорту, формуляру, решению эксплуатанта). Считается от начала эксплуатации, работами не обнуляется; срабатывает первый достигнутый порог. Пустое поле — порог не задан.";
 function resourceFields(r = {}) {
@@ -334,6 +414,234 @@ function typeOptions(list, cur, extra) {
   return list.map((t) => `<option value="${t.id}" ${t.id === cur ? "selected" : ""}>${esc(t.name)}</option>`).join("") + extra;
 }
 
+// ------------------------------------------------------------------ Миссии: маршрут и автономный полёт
+const R_EARTH = 6371000;
+const toXY = (h, lat, lon) => [((lon - h.lon) * Math.PI / 180) * R_EARTH * Math.cos(h.lat * Math.PI / 180), ((lat - h.lat) * Math.PI / 180) * R_EARTH];
+const toLL = (h, x, y) => [h.lat + (y / R_EARTH) * 180 / Math.PI, h.lon + (x / (R_EARTH * Math.cos(h.lat * Math.PI / 180))) * 180 / Math.PI];
+const PHASE_RU = { takeoff: "Взлёт", mission: "Полёт по маршруту", hold: "Удержание на точке", rtl: "Возврат домой", land: "Посадка", crash: "Аварийное завершение" };
+
+function missionStats(m) {
+  const h = { lat: m.home_lat, lon: m.home_lon };
+  const pts = [[0, 0]].concat(m.waypoints.map((w) => toXY(h, w.lat, w.lon)));
+  let d = 0;
+  for (let i = 1; i < pts.length; i++) d += Math.hypot(pts[i][0] - pts[i - 1][0], pts[i][1] - pts[i - 1][1]);
+  if (m.return_home && pts.length > 1) d += Math.hypot(pts[pts.length - 1][0], pts[pts.length - 1][1]);
+  const hold = m.waypoints.reduce((s, w) => s + (+w.hold_s || 0), 0);
+  const first = m.waypoints.length ? +m.waypoints[0].alt : +m.takeoff_alt;
+  const last = m.waypoints.length ? +m.waypoints[m.waypoints.length - 1].alt : first;
+  const t = d / Math.max(1, +m.speed_ms) * 1.08 + hold + first / 2.5 + last / 1.5 + 6;
+  return { distance: d, duration: t };
+}
+const fmtDur = (s) => `${Math.floor(s / 60)} мин ${String(Math.round(s % 60)).padStart(2, "0")} с`;
+
+async function pageMissions() {
+  const list = await GET("/api/missions");
+  view().innerHTML = `<div class="page-head"><div><h1>Миссии и автономный полёт</h1>
+    <div class="sub">Маршрут из точек (WGS-84, высота над точкой взлёта) → автономный полёт в симуляторе автопилота → полёт в журнале, наработка, датчики. Обмен с QGroundControl, ArduPilot, PX4.</div></div>
+    <div class="actions"><label class="btn" style="margin:0">⇪ Импорт .plan / .waypoints<input type="file" id="m-imp" accept=".plan,.waypoints,.txt,.json" hidden></label>
+    <button class="primary" id="m-new">+ Новая миссия</button></div></div>
+    <div class="card">${list.length ? `<div class="table-wrap"><table><thead><tr><th>Миссия</th><th>Борт</th><th class="num">Точек</th><th class="num">Маршрут</th><th class="num">Время (оценка)</th><th>Последний полёт</th></tr></thead><tbody>
+      ${list.map((m) => `<tr><td><a href="#/missions/${m.id}"><b>${esc(m.name)}</b></a><div class="small muted">${esc(m.notes || "")}</div></td>
+        <td>${m.aircraft_id ? `<a href="#/aircraft/${m.aircraft_id}">${esc(m.aircraft_name)}</a>` : '<span class="muted">не назначен</span>'}</td>
+        <td class="num">${m.waypoints.length}</td><td class="num">${m.stats ? num(m.stats.distance_m / 1000, 2) + " км" : "—"}</td>
+        <td class="num">${m.stats ? fmtDur(m.stats.duration_s) : "—"}</td>
+        <td>${m.last_run ? `<span class="badge ${m.last_run.status === "completed" ? "ok" : "bad"}">${m.last_run.status === "completed" ? "выполнена" : "прервана"}</span> <span class="small muted">${fmtDT(m.last_run.ended_at)}</span>` : '<span class="muted small">не выполнялась</span>'}</td></tr>`).join("")}
+      </tbody></table></div>` : '<div class="empty-state">Миссий пока нет</div>'}</div>`;
+  $("#m-new").onclick = async () => {
+    const base = list[0] || { home_lat: 54.9512, home_lon: 38.2034 };
+    const m = await POST("/api/missions", { name: "Новая миссия", home_lat: base.home_lat, home_lon: base.home_lon, takeoff_alt: 30, speed_ms: 8, return_home: true, waypoints: [] });
+    location.hash = `#/missions/${m.id}`;
+  };
+  $("#m-imp").onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const fd = new FormData(); fd.append("file", f);
+    try { const r = await api("POST", "/api/missions/import", fd, true); toast(r.message); location.hash = `#/missions/${r.id}`; } catch (err) { toast(err.message, true); }
+  };
+}
+
+async function pageMission(id) {
+  const [m, fleet] = await Promise.all([GET(`/api/missions/${id}`), aircraftList(true)]);
+  const st = { ...m, waypoints: m.waypoints.map((w) => ({ ...w })) };
+  const W = 760, H = 520;
+  let view = null;         // {cx, cy, span} в метрах
+  const home = () => ({ lat: +st.home_lat, lon: +st.home_lon });
+  const fit = () => {
+    const pts = [[0, 0]].concat(st.waypoints.map((w) => toXY(home(), w.lat, w.lon)));
+    const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+    const span = Math.max(300, (Math.max(...xs) - Math.min(...xs)) * 1.3, (Math.max(...ys) - Math.min(...ys)) * 1.3 * W / H);
+    view = { cx, cy, span };
+  };
+  fit();
+  const sx = (x) => (x - view.cx) / view.span * W + W / 2;
+  const sy = (y) => H / 2 - (y - view.cy) / view.span * W;
+  const wx = (px) => (px - W / 2) / W * view.span + view.cx;
+  const wy = (py) => (H / 2 - py) / W * view.span + view.cy;
+
+  view_().innerHTML = `<div class="crumbs"><a href="#/missions">Миссии</a> / ${esc(m.name)}</div>
+    <div class="page-head"><div><h1>${esc(m.name)}</h1><div class="sub">Щелчок по карте — новая точка, перетаскивание — перенос точки. Координаты WGS-84, высоты относительно точки взлёта.</div></div>
+    <div class="actions"><button id="m-save" class="primary">Сохранить</button><button id="m-exp-plan">⇩ .plan (ArduPilot)</button><button id="m-exp-px4">⇩ .plan (PX4)</button><button id="m-exp-wpl">⇩ .waypoints</button><button class="danger" id="m-del">Удалить</button></div></div>
+    <div class="mission-grid">
+      <div class="card" style="padding:12px"><div class="map-wrap"><svg id="map" viewBox="0 0 ${W} ${H}"></svg>
+        <div class="map-tools"><button class="sm" id="z-in">+</button><button class="sm" id="z-out">−</button><button class="sm" id="z-fit">Вписать</button></div>
+        <div class="telemetry" id="telemetry" hidden></div></div>
+        <div class="small muted" id="m-stats" style="margin-top:8px"></div></div>
+      <div>
+        <div class="card"><h2>Параметры миссии</h2>
+          <div class="field"><label>Название</label><input name="name" value="${esc(st.name)}"></div>
+          <div class="row2"><div class="field"><label>Борт</label><select name="aircraft_id"><option value="">— не назначен —</option>${fleet.map((a) => `<option value="${a.id}" ${a.id === st.aircraft_id ? "selected" : ""}>${esc(a.name)} · ${esc(a.serial)}</option>`).join("")}</select></div>
+          <div class="field"><label>Крейсерская скорость, м/с</label><input type="number" min="0.5" max="40" step="0.5" name="speed_ms" value="${st.speed_ms}"></div></div>
+          <div class="row3"><div class="field"><label>Точка взлёта: широта</label><input type="number" step="0.000001" name="home_lat" value="${st.home_lat}"></div>
+          <div class="field"><label>долгота</label><input type="number" step="0.000001" name="home_lon" value="${st.home_lon}"></div>
+          <div class="field"><label>Высота взлёта, м</label><input type="number" min="2" max="500" name="takeoff_alt" value="${st.takeoff_alt}"></div></div>
+          <label><input type="checkbox" name="return_home" style="width:auto" ${st.return_home ? "checked" : ""}> Возврат в точку взлёта (RTL) и посадка</label></div>
+        <div class="card"><div class="card-head"><h2>Точки маршрута</h2><span class="small muted" id="wp-count"></span></div><div id="wp-table"></div></div>
+        <div class="card"><h2>Автономный полёт</h2>
+          <div class="row3"><div class="field"><label>Ветер, м/с</label><input type="number" min="0" max="20" step="0.5" name="wind_ms" value="3"></div>
+          <div class="field"><label>Ветер откуда, °</label><input type="number" min="0" max="360" name="wind_from" value="250"></div>
+          <div class="field"><label>Отказ (проверка)</label><select name="fault"><option value="">без отказов</option></select></div></div>
+          <button class="primary" id="m-run">▶ Выполнить автономный полёт</button>
+          <div class="hint">Перед вылетом выполняется предполётная проверка допуска борта (комплектность, просроченные работы). Полёт выполняет симулятор автопилота; результат записывается в журнал и начисляет наработку.</div></div>
+      </div></div>
+    <div class="card" id="run-result" hidden></div>
+    <div class="card"><h2>История выполнения</h2><div id="runs"></div></div>`;
+
+  const map = $("#map");
+  function drawMap(track, dronePos) {
+    const h = home();
+    const step = [10, 20, 50, 100, 200, 500, 1000, 2000].find((s) => view.span / s <= 12) || 5000;
+    let g = "";
+    const x0 = Math.floor(wx(0) / step) * step, x1 = wx(W), y0 = Math.floor(wy(H) / step) * step, y1 = wy(0);
+    for (let x = x0; x <= x1; x += step) g += `<line x1="${sx(x)}" y1="0" x2="${sx(x)}" y2="${H}" class="grid"/>`;
+    for (let y = y0; y <= y1; y += step) g += `<line x1="0" y1="${sy(y)}" x2="${W}" y2="${sy(y)}" class="grid"/>`;
+    const pts = st.waypoints.map((w) => toXY(h, w.lat, w.lon));
+    const path = [[0, 0]].concat(pts).map((p) => `${sx(p[0])},${sy(p[1])}`).join(" ");
+    const back = pts.length && st.return_home ? `<line x1="${sx(pts[pts.length - 1][0])}" y1="${sy(pts[pts.length - 1][1])}" x2="${sx(0)}" y2="${sy(0)}" class="rtl"/>` : "";
+    let tr = "";
+    if (track && track.length) tr = `<polyline class="flown" points="${track.map((p) => { const q = toXY(h, p[1], p[2]); return `${sx(q[0])},${sy(q[1])}`; }).join(" ")}"/>`;
+    const sb = step;
+    map.innerHTML = `<rect width="${W}" height="${H}" class="map-bg"/>${g}
+      <polyline class="route" points="${path}"/>${back}${tr}
+      <g transform="translate(${sx(0)},${sy(0)})"><rect x="-11" y="-11" width="22" height="22" rx="4" class="home"/><text y="5" class="home-t">H</text></g>
+      ${pts.map((p, i) => `<g class="wp" data-i="${i}" transform="translate(${sx(p[0])},${sy(p[1])})"><circle r="13"/><text y="4.5">${i + 1}</text>
+        <text class="wp-alt" y="-19">${num(st.waypoints[i].alt, 0)} м${+st.waypoints[i].hold_s ? ` · ${st.waypoints[i].hold_s} с` : ""}</text></g>`).join("")}
+      ${dronePos ? `<g transform="translate(${dronePos[0]},${dronePos[1]})"><circle r="9" class="drone"/><circle r="17" class="drone-ring"/></g>` : ""}
+      <g transform="translate(${W - 30},34)"><path d="M0,-16 L7,6 L0,1 L-7,6 Z" class="north"/><text y="22" class="north-t">С</text></g>
+      <g transform="translate(16,${H - 18})"><line x1="0" y1="0" x2="${sb / view.span * W}" y2="0" class="scale"/><text x="0" y="-6" class="scale-t">${sb >= 1000 ? sb / 1000 + " км" : sb + " м"}</text></g>`;
+    bindDrag();
+  }
+  let dragging = null, suppressClick = false;
+  const svgPt = (e) => { const r = map.getBoundingClientRect(); return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H]; };
+  function bindDrag() {
+    $$(".wp", map).forEach((g) => g.addEventListener("pointerdown", (e) => { e.stopPropagation(); dragging = +g.dataset.i; map.setPointerCapture(e.pointerId); }));
+  }
+  map.addEventListener("pointermove", (e) => {
+    if (dragging === null) return;
+    const [px, py] = svgPt(e); const [lat, lon] = toLL(home(), wx(px), wy(py));
+    st.waypoints[dragging].lat = +lat.toFixed(7); st.waypoints[dragging].lon = +lon.toFixed(7);
+    drawMap(); drawStats();
+  });
+  map.addEventListener("pointerup", () => { if (dragging !== null) { dragging = null; suppressClick = true; drawTable(); } });
+  map.addEventListener("click", (e) => {
+    if (suppressClick) { suppressClick = false; return; }
+    if (e.target.closest(".wp")) return;
+    const [px, py] = svgPt(e); const [lat, lon] = toLL(home(), wx(px), wy(py));
+    const alt = st.waypoints.length ? st.waypoints[st.waypoints.length - 1].alt : +st.takeoff_alt;
+    st.waypoints.push({ lat: +lat.toFixed(7), lon: +lon.toFixed(7), alt, hold_s: 0 });
+    drawAll();
+  });
+  function drawTable() {
+    $("#wp-count").textContent = `${st.waypoints.length} точек`;
+    $("#wp-table").innerHTML = st.waypoints.length ? `<table class="wp-table"><thead><tr><th>№</th><th>Широта</th><th>Долгота</th><th>Высота, м</th><th>Удерж., с</th><th></th></tr></thead><tbody>
+      ${st.waypoints.map((w, i) => `<tr><td>${i + 1}</td><td><input data-k="lat" data-i="${i}" type="number" step="0.000001" value="${w.lat}"></td><td><input data-k="lon" data-i="${i}" type="number" step="0.000001" value="${w.lon}"></td>
+        <td><input data-k="alt" data-i="${i}" type="number" min="2" max="500" value="${w.alt}"></td><td><input data-k="hold_s" data-i="${i}" type="number" min="0" max="600" value="${w.hold_s || 0}"></td>
+        <td><button class="sm danger" data-rm="${i}">✕</button></td></tr>`).join("")}</tbody></table>` : '<div class="empty-state">Щёлкните по карте, чтобы добавить первую точку</div>';
+    $$("#wp-table input").forEach((inp) => inp.addEventListener("change", () => { st.waypoints[+inp.dataset.i][inp.dataset.k] = +inp.value; drawMap(); drawStats(); }));
+    $$("#wp-table [data-rm]").forEach((b) => b.addEventListener("click", () => { st.waypoints.splice(+b.dataset.rm, 1); drawAll(); }));
+    const f = $('[name="fault"]');
+    f.innerHTML = `<option value="">без отказов</option>` + st.waypoints.map((_, i) => `<option value="${i + 1}">столкновение у точки ${i + 1}</option>`).join("");
+  }
+  function drawStats() {
+    if (!st.waypoints.length) { $("#m-stats").textContent = "Маршрут пуст"; return; }
+    const s = missionStats(st);
+    $("#m-stats").innerHTML = `Маршрут <b>${num(s.distance / 1000, 2)} км</b> · оценка времени <b>${fmtDur(s.duration)}</b> · точек ${st.waypoints.length} · макс. высота ${num(Math.max(...st.waypoints.map((w) => +w.alt)), 0)} м`;
+  }
+  function drawAll() { drawMap(); drawTable(); drawStats(); }
+  const readForm = () => {
+    const r = view_();
+    st.name = val(r, "name"); st.aircraft_id = val(r, "aircraft_id") ? +val(r, "aircraft_id") : null; st.speed_ms = +val(r, "speed_ms");
+    st.home_lat = +val(r, "home_lat"); st.home_lon = +val(r, "home_lon"); st.takeoff_alt = +val(r, "takeoff_alt");
+    st.return_home = $('[name="return_home"]').checked;
+  };
+  ["speed_ms", "home_lat", "home_lon", "takeoff_alt", "return_home"].forEach((n) => $(`[name="${n}"]`).addEventListener("change", () => { readForm(); drawAll(); }));
+  async function save() {
+    readForm();
+    const body = { name: st.name, aircraft_id: st.aircraft_id, home_lat: st.home_lat, home_lon: st.home_lon, takeoff_alt: st.takeoff_alt,
+      speed_ms: st.speed_ms, return_home: st.return_home, waypoints: st.waypoints, notes: st.notes };
+    await api("PUT", `/api/missions/${id}`, body);
+  }
+  $("#m-save").onclick = async () => { try { await save(); toast("Миссия сохранена"); } catch (e) { toast(e.message, true); } };
+  const dl = (fmt, fw) => async () => { try { await save(); location.href = `/api/missions/${id}/export?fmt=${fmt}&firmware=${fw || "ardupilot"}`; } catch (e) { toast(e.message, true); } };
+  $("#m-exp-plan").onclick = dl("plan", "ardupilot"); $("#m-exp-px4").onclick = dl("plan", "px4"); $("#m-exp-wpl").onclick = dl("waypoints");
+  $("#m-del").onclick = () => modal("Удаление миссии", "<p>Удалить миссию? Выполненные полёты останутся в журнале.</p>", { okText: "Удалить", onOk: async () => { await api("DELETE", `/api/missions/${id}`); location.hash = "#/missions"; } });
+  $("#z-in").onclick = () => { view.span /= 1.5; drawMap(); };
+  $("#z-out").onclick = () => { view.span *= 1.5; drawMap(); };
+  $("#z-fit").onclick = () => { fit(); drawMap(); };
+
+  function drawRuns(runs) {
+    $("#runs").innerHTML = runs.length ? `<table><thead><tr><th>Окончание</th><th>Борт</th><th>Итог</th><th class="num">Длительность</th><th class="num">Путь</th><th class="num">Макс. боковое откл.</th><th>Журнал</th></tr></thead><tbody>
+      ${runs.map((r) => `<tr><td class="nowrap">${fmtDT(r.ended_at)}</td><td><a href="#/aircraft/${r.aircraft_id}">${esc(r.summary.aircraft_name || "")}</a></td>
+        <td><span class="badge ${r.status === "completed" ? "ok" : "bad"}">${r.status === "completed" ? "Выполнена" : "Прервана"}</span></td>
+        <td class="num">${fmtDur(r.summary.duration_s || 0)}</td><td class="num">${num((r.summary.distance_m || 0) / 1000, 2)} км</td><td class="num">${num(r.summary.max_xte_m || 0, 1)} м</td>
+        <td class="small">импорт №${r.import_id}</td></tr>`).join("")}</tbody></table>` : '<div class="empty-state">Миссия ещё не выполнялась</div>';
+  }
+  drawRuns(m.runs);
+
+  $("#m-run").onclick = async () => {
+    const btn = $("#m-run"); btn.disabled = true;
+    try {
+      await save();
+      const r = await POST(`/api/missions/${id}/run`, { aircraft_id: st.aircraft_id, wind_ms: +val(view_(), "wind_ms"), wind_from_deg: +val(view_(), "wind_from"),
+        fault_at_wp: val(view_(), "fault") ? +val(view_(), "fault") : null });
+      await playTrack(r);
+      showResult(r);
+      drawRuns((await GET(`/api/missions/${id}`)).runs);
+      refreshNavCount(); AIRCRAFT_CACHE = null;
+    } catch (e) { toast(e.message, true); } finally { btn.disabled = false; }
+  };
+  function playTrack(r) {
+    const tr = r.track, h = home(), tel = $("#telemetry");
+    tel.hidden = false;
+    const total = tr[tr.length - 1][0], ms = Math.min(9000, Math.max(3500, total * 25));
+    return new Promise((resolve) => {
+      const t0 = performance.now();
+      const frame = (now) => {
+        const k = Math.min(1, (now - t0) / ms), tt = k * total;
+        let i = tr.findIndex((p) => p[0] >= tt); if (i < 0) i = tr.length - 1;
+        const p = tr[i], q = toXY(h, p[1], p[2]);
+        drawMap(tr.slice(0, i + 1), [sx(q[0]), sy(q[1])]);
+        tel.innerHTML = `<b>${PHASE_RU[p[5]] || p[5]}</b><span>t = ${fmtDur(p[0])}</span><span>высота ${num(p[3], 1)} м</span><span>скорость ${num(p[4], 1)} м/с</span>`;
+        if (k < 1) requestAnimationFrame(frame); else resolve();
+      };
+      requestAnimationFrame(frame);
+    });
+  }
+  function showResult(r) {
+    const s = r.summary, el = $("#run-result");
+    el.hidden = false;
+    el.innerHTML = `<h2>Результат автономного полёта</h2>
+      <div class="notice ${r.status === "completed" ? "ok" : "bad"}"><b>${r.status === "completed" ? "Миссия выполнена" : "Миссия прервана"}</b> — ${esc(s.aircraft_name)}:
+        ${fmtDur(s.duration_s)}, путь ${num(s.distance_m / 1000, 2)} км, макс. высота ${num(s.max_alt_m, 0)} м, макс. боковое отклонение ${num(s.max_xte_m, 1)} м (ветер ${s.wind.speed_ms} м/с с ${s.wind.from_deg}°).
+        ${s.events.length ? `<ul>${s.events.map((x) => `<li>${esc(x)}</li>`).join("")}</ul>` : ""}</div>
+      <p>Полёт записан в журнал (импорт №${r.import_id}): начислено <b>${hrs(s.hours_added)}</b> борту и ${s.components} узлам.
+        <a href="#/aircraft/${r.aircraft_id}">Открыть борт →</a></p>
+      ${importResultHTML(r.import).split("<h3").slice(1).filter((x) => /Начисление узлам|Мониторинг|Сработавшие/.test(x)).map((x) => "<h3" + x.replace(/<\/div>\s*$/, "")).join("")}`;
+    el.scrollIntoView({ behavior: "smooth" });
+  }
+  drawAll();
+}
+const view_ = () => $("#view");
+
 // ------------------------------------------------------------------ навигация
 const routes = [
   [/^#?\/?$/, "dash", pageDashboard],
@@ -348,6 +656,8 @@ const routes = [
   [/^#\/rules$/, "rules", pageRules],
   [/^#\/analytics$/, "analytics", pageAnalytics],
   [/^#\/scenarios$/, "scenarios", pageScenarios],
+  [/^#\/missions$/, "missions", pageMissions],
+  [/^#\/missions\/(\d+)$/, "missions", pageMission],
 ];
 async function router() {
   $$(".modal-bg").forEach((m) => m.remove());     // окна не переживают переход на другую страницу
@@ -467,6 +777,7 @@ async function pageAircraft(id) {
       <div class="s"><div class="v">${num(a.cycles, 0)}</div><div class="l">циклов (взлёт-посадка)</div></div>
       <div class="s"><div class="v">${num(a.flights, 0)}</div><div class="l">полётов в журналах</div></div>
       <div class="s"><div class="v">${a.slots_filled}/${a.slots_total}</div><div class="l">позиций укомплектовано</div></div>
+      <div class="s"><div class="v"${a.events.fall + a.events.collision ? ' style="color:var(--bad)"' : ""}>${a.events.fall} / ${a.events.collision}</div><div class="l">падений / столкновений</div></div>
       <div class="s"><div class="v" style="font-size:15px;padding-top:4px">${readiness(a)}</div><div class="l">допуск к полётам</div></div>
     </div><div class="small muted" style="margin-top:10px">Индивидуальный ресурс борта: <b>${resourceText(a.resource) || "не задан"}</b></div>
     ${a.notes ? `<div class="notice small" style="margin:12px 0 0">${esc(a.notes)}</div>` : ""}</div></div>
@@ -476,7 +787,8 @@ async function pageAircraft(id) {
       <button data-t="due" class="active">ТО борта и узлов (${a.due.filter((i) => i.status !== "ok").length} требуют внимания)</button>
       <button data-t="rec">История обслуживания (${a.maintenance_records.length})</button>
       <button data-t="cfg">История конфигурации (${a.installations.length})</button>
-      <button data-t="fl">Полёты (${a.flight_log.length}${a.flight_log.length >= 200 ? "+" : ""})</button></div><div id="tab"></div></div>`;
+      <button data-t="fl">Полёты (${a.flight_log.length}${a.flight_log.length >= 200 ? "+" : ""})</button>
+      <button data-t="sens">Датчики: падения и столкновения (${a.sensor_events.length})</button></div><div id="tab"></div></div>`;
   $("#st").onchange = async (e) => {
     try { await api("PATCH", `/api/aircraft/${id}`, { status: e.target.value }); toast("Статус борта обновлён"); reload(); } catch (err) { toast(err.message, true); }
   };
@@ -498,6 +810,7 @@ async function pageAircraft(id) {
   const tabs = {
     due: () => { $("#tab").innerHTML = dueTable(a.due); bindDueActions($("#tab"), a.due, reload); },
     rec: () => { $("#tab").innerHTML = recordsTable(a.maintenance_records); },
+    sens: () => { $("#tab").innerHTML = eventsTable(a.sensor_events); },
     cfg: () => {
       $("#tab").innerHTML = `<div class="table-wrap"><table><thead><tr><th>Позиция</th><th>Узел</th><th>Установлен</th><th>Снят</th><th class="num">Наработка на этом борту</th><th>Основание</th></tr></thead><tbody>
       ${a.installations.map((i) => `<tr><td>${esc(i.position)}</td><td><a href="#/components/${i.component_id}">${esc(i.serial)}</a><div class="small muted">${esc(i.type)}</div></td>
@@ -565,11 +878,11 @@ function flightsTable(fl, opts = {}) {
     : f.manual ? '<span class="badge blue">ручной ввод</span>' : `<span class="small">журнал №${f.import_id ?? "—"}</span>`;
   const del = (f) => f.source === "entry" ? `<button class="sm danger" data-del-entry="${f.id}" title="Удалить запись">✕</button>`
     : f.manual ? `<button class="sm danger" data-del-flight="${f.id}" title="Удалить ручной полёт">✕</button>` : "";
-  return `${head}<div class="table-wrap"><table><thead><tr><th>Взлёт / начало</th><th>Посадка</th><th>Борт</th><th class="num">Длительность</th><th class="num">Циклы</th><th>Задание / примечание</th><th>ID в журнале</th><th>Источник</th><th></th></tr></thead><tbody>
+  return `${head}<div class="table-wrap"><table><thead><tr><th>Взлёт / начало</th><th>Посадка</th><th>Борт</th><th class="num">Длительность</th><th class="num">Циклы</th><th>Задание / примечание</th><th>ID в журнале</th><th>Датчики</th><th>Источник</th><th></th></tr></thead><tbody>
   ${fl.map((f) => `<tr><td class="nowrap">${fmtDT(f.started_at)}</td><td class="nowrap">${fmtDT(f.ended_at)}</td>
     <td>${f.aircraft_id ? `<a href="#/aircraft/${f.aircraft_id}">${esc(f.aircraft_name)}</a>` : `<span class="muted">${esc(f.aircraft_name)}</span>`}</td>
     <td class="num">${f.duration_h < 1 ? num(f.duration_h * 60, 0) + " мин" : num(f.duration_h, 2) + " ч"}</td><td class="num">${f.cycles}</td>
-    <td class="small">${esc(f.mission || "")}</td><td class="mono">${esc(f.external_id)}</td><td>${src(f)}</td><td>${del(f)}</td></tr>`).join("")}</tbody></table></div>`;
+    <td class="small">${esc(f.mission || "")}</td><td class="mono">${esc(f.external_id)}</td><td>${f.events ? `<span class="badge bad">${f.events} соб.</span>` : '<span class="muted small">—</span>'}</td><td>${src(f)}</td><td>${del(f)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function bindFlightDeletes(root, componentId, after) {
@@ -733,10 +1046,13 @@ async function pageTypes() {
         <div class="chips">${a.slots.map((s) => `<span class="badge ${s.required === false ? "" : "blue"}">${esc(s.position)} · ${esc(s.label)}${s.required === false ? " · необязат." : ""}</span>`).join("")}</div></div>`).join("")}</div>`;
   const ctForm = (t = {}) => `<div class="row2"><div class="field"><label>Код (латиница, без пробелов)</label><input name="code" value="${esc(t.code || "")}" ${t.id ? "disabled" : ""} placeholder="gnss"></div>
     <div class="field"><label>Название</label><input name="name" value="${esc(t.name || "")}" placeholder="GNSS-приёмник"></div></div>
-    <div class="field"><label>Описание</label><input name="description" value="${esc(t.description || "")}"></div>`;
+    <div class="field"><label>Описание</label><input name="description" value="${esc(t.description || "")}"></div>
+    <div class="field"><label>Шаблон характеристик паспорта (по одной на строку)</label><textarea name="spec_fields" rows="4" placeholder="Ёмкость&#10;Напряжение&#10;Масса">${esc((t.spec_fields || []).join("\n"))}</textarea>
+      <div class="hint">Эти поля подставляются в паспорт при постановке узла этого типа на учёт.</div></div>`;
   const openCt = (t) => modal(t ? "Изменение типа узла" : "Новый тип узла", ctForm(t || {}), {
     onOk: async (root) => {
-      const body = { code: t ? t.code : val(root, "code"), name: val(root, "name"), description: orNull(val(root, "description")) };
+      const body = { code: t ? t.code : val(root, "code"), name: val(root, "name"), description: orNull(val(root, "description")),
+        spec_fields: (val(root, "spec_fields") || "").split("\n").map((x) => x.trim()).filter(Boolean) };
       const r = await api(t ? "PUT" : "POST", t ? `/api/component-types/${t.id}` : "/api/component-types", body);
       toast(r.message); pageTypes();
     },
@@ -796,11 +1112,12 @@ async function pageComponents() {
     if (typeId) qs.set("type_id", typeId);
     if (q) qs.set("q", q);
     const list = await GET(`/api/components?${qs}`);
-    $("#list").innerHTML = list.length ? `<div class="table-wrap"><table><thead><tr><th>Узел</th><th>Тип</th><th>Статус</th><th>Где сейчас</th><th class="num">Сквозная наработка</th><th class="num">Циклы</th><th>ТО</th></tr></thead><tbody>
+    $("#list").innerHTML = list.length ? `<div class="table-wrap"><table><thead><tr><th>Узел</th><th>Тип</th><th>Статус</th><th>Где сейчас</th><th class="num">Сквозная наработка</th><th class="num">Циклы</th><th>Остаточный ресурс</th><th>ТО</th></tr></thead><tbody>
       ${list.map((c) => `<tr><td><a href="#/components/${c.id}"><b>${esc(c.serial)}</b></a><div class="small muted">${esc(c.model || "")} · ПО ${esc(c.firmware || "—")}</div></td>
         <td>${esc(c.type.name)}</td><td>${coBadge(c)}</td>
         <td>${c.location ? `<a href="#/aircraft/${c.location.aircraft_id}">${esc(c.location.aircraft_name)}</a> <span class="muted small">${esc(c.location.position)}</span>` : '<span class="muted">—</span>'}</td>
         <td class="num">${hrs(c.hours)}</td><td class="num">${num(c.cycles, 0)}</td>
+        <td class="small nowrap" style="min-width:150px">${residualText(c.residual, true)}${residualBar(c.residual)}</td>
         <td>${dueBadge(c.maintenance.status)}${c.maintenance.status !== "ok" ? `<div class="small muted">${esc(c.maintenance.rule)}</div>` : ""}</td></tr>`).join("")}
       </tbody></table></div>` : '<div class="empty-state">Ничего не найдено</div>';
   }
@@ -824,22 +1141,31 @@ async function openComponentCreate() {
     <div class="row2"><div class="field"><label>Наработка до постановки на учёт, ч</label><input type="number" min="0" step="0.1" name="initial_hours" value="0">
       <div class="hint">Стендовые испытания, эксплуатация в другом парке (по формуляру)</div></div>
     <div class="field"><label>Циклы до постановки на учёт</label><input type="number" min="0" name="initial_cycles" value="0"></div></div>
-    ${resourceFields()}`, {
-    okText: "Поставить на учёт",
+    <div class="field"><label>Дата изготовления</label><input type="date" name="manufactured_at" style="max-width:220px"></div>
+    <h3>Основные технические характеристики</h3><div id="spec-box"></div>
+    <h3 style="margin-top:14px">Установленный ресурс</h3>${resourceFields()}`, {
+    okText: "Поставить на учёт", wide: true,
     onOk: async (root) => {
       const r = await POST("/api/components", { serial: val(root, "serial"), type_id: +val(root, "type_id"), model: orNull(val(root, "model")),
         part_number: orNull(val(root, "part_number")), firmware: orNull(val(root, "firmware")), manufacturer: orNull(val(root, "manufacturer")),
         in_service_at: fromLocalInput(val(root, "in_service_at")), initial_hours: +val(root, "initial_hours") || 0, initial_cycles: +val(root, "initial_cycles") || 0,
-        ...readResource(root) });
+        manufactured_at: val(root, "manufactured_at") ? val(root, "manufactured_at") + "T00:00:00Z" : null, specs: readSpecs(root), ...readResource(root) });
       toast("Узел поставлен на учёт (резерв)");
       location.hash = `#/components/${r.id}`;
     },
   });
   const ts = $('[name="type_id"]', bg);
+  let types = m.component_types;
+  const fillSpecs = () => {   // шаблон характеристик из типа узла
+    const tp = types.find((x) => String(x.id) === ts.value);
+    $("#spec-box", bg).innerHTML = specRows((tp && tp.spec_fields || []).map((n) => ({ name: n, value: "" })));
+    bindSpecs($("#spec-box", bg));
+  };
   ts.dataset.prev = ts.value;
+  fillSpecs();
   ts.onchange = () => {
-    if (ts.value !== "__new") { ts.dataset.prev = ts.value; return; }
-    quickComponentType(ts, (mm, id) => { ts.innerHTML = typeOptions(mm.component_types, id, '<option value="__new">+ Новый тип узла…</option>'); ts.dataset.prev = id; });
+    if (ts.value !== "__new") { ts.dataset.prev = ts.value; fillSpecs(); return; }
+    quickComponentType(ts, (mm, id) => { types = mm.component_types; ts.innerHTML = typeOptions(mm.component_types, id, '<option value="__new">+ Новый тип узла…</option>'); ts.dataset.prev = id; fillSpecs(); });
   };
 }
 
@@ -864,6 +1190,7 @@ async function pageComponent(id) {
     </div>
     <div class="small muted" style="margin-top:10px">Индивидуальный ресурс: <b>${resourceText(c.resource) || "не задан"}</b> · Поставлен на учёт ${fmtD(c.in_service_at)}${c.initial_hours || c.initial_cycles ? ` с начальной наработкой ${hrs(c.initial_hours)} / ${c.initial_cycles} ц.` : ""}
       ${c.location ? ` · сейчас: <a href="#/aircraft/${c.location.aircraft_id}">${esc(c.location.aircraft_name)}</a>, позиция ${esc(c.location.position)} с ${fmtDT(c.location.installed_at)}` : ""}${c.notes ? " · " + esc(c.notes) : ""}</div></div>
+    ${passportHTML(c)}
     <div class="card"><div class="card-head"><h2>Регламенты ТО узла</h2></div><div id="due"></div></div>
     <div class="grid g2">
       <div class="card"><h2>Борта в истории узла</h2>${c.stints.length ? `<table><thead><tr><th>Борт</th><th>Период</th><th class="num">Наработка</th></tr></thead><tbody>
@@ -890,6 +1217,7 @@ async function pageComponent(id) {
   const pick = (k) => { $$("#tabs button").forEach((x) => x.classList.toggle("active", x.dataset.t === k)); tabs[k](); };
   $$("#tabs button").forEach((b) => b.addEventListener("click", () => pick(b.dataset.t)));
   pick(new URLSearchParams(location.hash.split("?")[1] || "").get("tab") === "fl" ? "fl" : "rec");
+  $("#edit-pass").onclick = () => openPassportModal(c, reload);
   $$("#acts [data-a]").forEach((b) => b.addEventListener("click", async () => {
     const a = b.dataset.a;
     if (a === "transfer") openInstallModal({ component: c, mode: "transfer", onDone: reload });
@@ -920,6 +1248,12 @@ function importResultHTML(r) {
     Полётов в файле: ${r.flights_total}; новых: <b>${r.flights_new}</b>; дубликатов: ${r.flights_duplicate}; с ошибками: ${r.flights_rejected}.
     Начислено: <b>${hrs(r.hours_added)}</b>, <b>${r.cycles_added}</b> цикл.
     ${r.messages.length ? `<ul>${r.messages.map((m) => `<li>${esc(m)}</li>`).join("")}</ul>` : ""}</div>`;
+  if (s.movements && s.movements.length) {
+    h += `<h3>Применённые операции с узлами</h3><table><thead><tr><th>Дата</th><th>Операция</th><th>Узел</th><th>Борт / позиция</th><th>Результат</th></tr></thead><tbody>
+      ${s.movements.map((m) => `<tr><td class="nowrap">${fmtDT(m.at)}</td><td><span class="badge ${m.op === "transfer" ? "blue" : m.op === "remove" ? "warn" : "ok"}">${esc(m.op_label)}</span></td>
+        <td><a href="#/components/${m.component_id}">${esc(m.serial)}</a></td><td>${m.aircraft ? `<a href="#/aircraft/${m.aircraft_id}">${esc(m.aircraft)}</a> · ${esc(m.position)}` : "—"}</td>
+        <td class="small muted">${esc(m.message)}</td></tr>`).join("")}</tbody></table>`;
+  }
   if (s.aircraft && s.aircraft.length) {
     h += `<h3>Начисление бортам</h3><table><thead><tr><th>Борт</th><th>Период полётов</th><th class="num">Полётов</th><th class="num">Часы</th><th class="num">Циклы</th></tr></thead><tbody>
       ${s.aircraft.map((a) => `<tr><td><a href="#/aircraft/${a.aircraft_id}">${esc(a.name)}</a> <span class="small muted">${esc(a.serial)}</span></td><td class="small">${fmtDT(a.first)} — ${fmtDT(a.last)}</td>
@@ -929,6 +1263,11 @@ function importResultHTML(r) {
     h += `<h3 style="margin-top:14px">Начисление узлам, установленным на момент полётов</h3><table><thead><tr><th>Узел</th><th>Борт / позиция</th><th class="num">Полётов</th><th class="num">Часы</th><th class="num">Циклы</th></tr></thead><tbody>
       ${s.components.map((c) => `<tr><td><a href="#/components/${c.component_id}">${esc(c.serial)}</a> <span class="small muted">${esc(c.type)}</span></td><td>${esc(c.aircraft)} · ${esc(c.position)}</td>
         <td class="num">${c.flights}</td><td class="num">+${num(c.hours, 2)}</td><td class="num">+${c.cycles}</td></tr>`).join("")}</tbody></table>`;
+  }
+  if (s.sensor_events && s.sensor_events.length) {
+    h += `<h3 style="margin-top:14px">Мониторинг датчиков: выявленные события</h3><table><tbody>${s.sensor_events.map((e) => `<tr>
+      <td><a href="#/aircraft/${e.aircraft_id}">${esc(e.aircraft)}</a></td><td><span class="badge ${EV_BADGE[e.kind]}">${esc(e.kind_label)}</span></td>
+      <td class="nowrap">${fmtDT(e.at)}</td><td class="num">${e.peak_g != null ? num(e.peak_g, 1) + " g" : "—"}</td><td class="small muted">${e.source === "imu" ? "анализ акселерометра" : "из журнала"}</td></tr>`).join("")}</tbody></table>`;
   }
   if (s.alerts && s.alerts.length) {
     h += `<h3 style="margin-top:14px">Сработавшие напоминания</h3><table><tbody>${s.alerts.map((a) => `<tr><td>${entityLink(a.entity)}</td><td>${esc(a.rule.name)}</td>
@@ -941,9 +1280,10 @@ async function pageImports() {
   const [list, demo] = await Promise.all([GET("/api/imports"), GET("/api/demo-logs")]);
   view().innerHTML = `<div class="page-head"><div><h1>Импорт журналов эксплуатации</h1><div class="sub">Наработка автоматически начисляется борту и всем узлам, стоявшим на нём в момент каждого полёта</div></div></div>
     <div class="grid g2">
-      <div class="card"><h2>Загрузить файл</h2>
+      <div class="card"><div class="card-head"><h2>Загрузить файл</h2><a class="small" href="/api/templates/movements.xlsx" download>⇩ Шаблон журнала движения узлов (Excel)</a></div>
         <div class="drop" id="drop"><div style="font-size:26px">⇪</div><div><b>Перетащите файл журнала</b> или нажмите для выбора</div>
-          <div class="small muted">JSON «tbo-flightlog/1.0» или CSV · до 20 МБ</div><input type="file" id="file" accept=".json,.csv,.txt" hidden></div>
+          <div class="small muted">Полёты: JSON «tbo-flightlog/1.0», CSV, Excel, PDF · Движение узлов (установка / снятие / перестановка): Excel, PDF · до 20 МБ</div>
+          <input type="file" id="file" accept=".json,.csv,.txt,.xlsx,.pdf" hidden></div>
         <div id="fname" class="small" style="margin:8px 0"></div>
         <div class="actions"><button id="check" disabled>Проверить без записи</button><button class="primary" id="go" disabled>Импортировать</button></div>
         <div class="hint">Защита от двойного начисления: повторная загрузка того же файла (SHA-256) и полёты, уже учтённые из других выгрузок (по ID и пересечению по времени), не начисляются.</div></div>
@@ -1008,7 +1348,7 @@ async function pageMaintenance() {
 // ------------------------------------------------------------------ Регламенты
 async function pageRules() {
   const [rules, m] = await Promise.all([GET("/api/rules"), meta()]);
-  const lim = (r) => [r.interval_hours && `${num(r.interval_hours, 1)} ч`, r.interval_cycles && `${r.interval_cycles} цикл.`, r.interval_days && `${r.interval_days} дн.`].filter(Boolean).join(" / ");
+  const lim = (r) => [r.interval_hours && `${num(r.interval_hours, 1)} ч`, r.interval_cycles && `${r.interval_cycles} цикл.`, r.interval_days && `${r.interval_days} дн.`, r.interval_events && `${r.interval_events} падение/столкн.`].filter(Boolean).join(" / ");
   const warn = (r) => [r.warn_hours != null && `${num(r.warn_hours, 1)} ч`, r.warn_cycles != null && `${r.warn_cycles} ц.`, r.warn_days != null && `${r.warn_days} дн.`].filter(Boolean).join(" / ") || "10 % интервала";
   view().innerHTML = `<div class="page-head"><div><h1>Регламенты ТО</h1><div class="sub">Правила и пороги планового обслуживания для типов аппаратов и узлов. Срабатывает первый достигнутый порог.</div></div>
     <button class="primary" id="add">+ Новый регламент</button></div>
@@ -1029,6 +1369,7 @@ async function pageRules() {
     <div class="row3"><div class="field"><label>Интервал, ч</label><input type="number" step="0.1" min="0" name="interval_hours" value="${r.interval_hours ?? ""}"></div>
     <div class="field"><label>Интервал, циклы</label><input type="number" min="0" name="interval_cycles" value="${r.interval_cycles ?? ""}"></div>
     <div class="field"><label>Интервал, дни</label><input type="number" min="0" name="interval_days" value="${r.interval_days ?? ""}"></div></div>
+    <div class="row3"><div class="field"><label>Падений/столкновений (датчики)</label><input type="number" min="0" name="interval_events" value="${r.interval_events ?? ""}" placeholder="напр. 1"></div><div></div><div></div></div>
     <div class="row3"><div class="field"><label>Предупреждать за, ч</label><input type="number" step="0.1" min="0" name="warn_hours" value="${r.warn_hours ?? ""}"></div>
     <div class="field"><label>за, циклов</label><input type="number" min="0" name="warn_cycles" value="${r.warn_cycles ?? ""}"></div>
     <div class="field"><label>за, дней</label><input type="number" min="0" name="warn_days" value="${r.warn_days ?? ""}"></div></div>
@@ -1042,7 +1383,7 @@ async function pageRules() {
         const target = val(root, "target"), type = val(root, "type");
         const body = { code: val(root, "code"), name: val(root, "name"), description: orNull(val(root, "description")), target, kind: val(root, "kind"),
           aircraft_type_id: target === "aircraft" && type ? +type : null, component_type_id: target === "component" && type ? +type : null,
-          interval_hours: n("interval_hours"), interval_cycles: n("interval_cycles", 1), interval_days: n("interval_days", 1),
+          interval_hours: n("interval_hours"), interval_cycles: n("interval_cycles", 1), interval_days: n("interval_days", 1), interval_events: n("interval_events", 1),
           warn_hours: n("warn_hours"), warn_cycles: n("warn_cycles", 1), warn_days: n("warn_days", 1), active: $('[name="active"]', root).checked };
         await api(r ? "PUT" : "POST", r ? `/api/rules/${r.id}` : "/api/rules", body);
         toast("Регламент сохранён");

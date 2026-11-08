@@ -32,6 +32,11 @@ class AircraftPatch(BaseModel):
     resource_days: int | None = Field(None, gt=0)
 
 
+class SpecIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    value: str = Field("", max_length=300)
+
+
 class ComponentIn(BaseModel):
     serial: str = Field(min_length=1, max_length=100)
     type_id: int
@@ -48,10 +53,15 @@ class ComponentIn(BaseModel):
     resource_hours: float | None = Field(None, gt=0)
     resource_cycles: int | None = Field(None, gt=0)
     resource_days: int | None = Field(None, gt=0)
+    specs: list[SpecIn] = Field(default_factory=list, max_length=40)
 
 
 class ComponentPatch(BaseModel):
     model: str | None = None
+    part_number: str | None = None
+    manufacturer: str | None = None
+    manufactured_at: datetime | None = None
+    specs: list[SpecIn] | None = Field(None, max_length=40)
     firmware: str | None = None
     notes: str | None = None
     status: Literal["stock", "maintenance", "retired"] | None = None
@@ -86,9 +96,11 @@ class RuleIn(BaseModel):
     interval_hours: float | None = Field(None, gt=0)
     interval_cycles: int | None = Field(None, gt=0)
     interval_days: int | None = Field(None, gt=0)
+    interval_events: int | None = Field(None, gt=0)
     warn_hours: float | None = Field(None, ge=0)
     warn_cycles: int | None = Field(None, ge=0)
     warn_days: int | None = Field(None, ge=0)
+    warn_events: int | None = Field(None, ge=0)
     active: bool = True
 
 
@@ -148,6 +160,7 @@ class ComponentTypeIn(BaseModel):
     code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_\-]+$")
     name: str = Field(min_length=1, max_length=200)
     description: str | None = None
+    spec_fields: list[str] = Field(default_factory=list, max_length=40)
 
 
 class SlotIn(BaseModel):
@@ -184,3 +197,29 @@ class GeneratorIn(BaseModel):
     seed: int | None = None
     import_now: bool = False
     dry_run: bool = False
+
+
+class WaypointIn(BaseModel):
+    lat: float = Field(ge=-90, le=90)
+    lon: float = Field(ge=-180, le=180)
+    alt: float = Field(ge=2, le=500)
+    hold_s: float = Field(0, ge=0, le=600)
+
+
+class MissionIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    aircraft_id: int | None = None
+    home_lat: float = Field(ge=-90, le=90)
+    home_lon: float = Field(ge=-180, le=180)
+    takeoff_alt: float = Field(30, ge=2, le=500)
+    speed_ms: float = Field(8, ge=0.5, le=40)
+    return_home: bool = True
+    waypoints: list[WaypointIn] = Field(default_factory=list, max_length=200)
+    notes: str | None = None
+
+
+class MissionRunIn(BaseModel):
+    aircraft_id: int | None = None
+    wind_ms: float = Field(3, ge=0, le=20)
+    wind_from_deg: float = Field(250, ge=0, le=360)
+    fault_at_wp: int | None = Field(None, ge=1, le=200)

@@ -263,3 +263,139 @@ def test_photo_pool(client):
     assert client.delete("/api/drone-images", params={"url": j["added"][1]}).status_code == 200
     assert client.get(j["added"][1]).status_code == 404
     assert client.delete("/api/drone-images", params={"url": "/static/drones/agro.svg"}).status_code == 400
+
+
+def test_sensor_detector_thresholds():
+    from app.services.sensors import detect
+    hover = [1.0] * 100
+    assert detect(hover, 50) == []
+    fall = detect(hover + [0.1] * 15 + [7.0] + hover, 50)
+    assert [e["kind"] for e in fall] == ["fall"] and fall[0]["peak_g"] == 7.0
+    hit = detect(hover + [5.0] + hover, 50)
+    assert [e["kind"] for e in hit] == ["collision"]
+    assert detect(hover + [3.5] + hover, 50) == []                       # 3.5 g без невесомости — не столкновение
+    assert len(detect(hover + [6.0, 1.0, 6.5] + hover, 50)) == 1          # одно событие, а не два
+
+
+def test_fall_from_log_triggers_inspection_and_counters(client):
+    a11 = by_serial(client, "TBT-VT2-011")
+    assert a11["events"] == {"fall": 0, "collision": 0}
+    assert due(client, "TBT-VT2-011", "AC-CRASH")["status"] == "ok"
+    r = client.post("/api/demo-logs/07_TBT-VT2-011_padenie.json/import").json()
+    assert r["status"] == "imported"
+    ev = r["summary"]["sensor_events"]
+    assert len(ev) == 1 and ev[0]["kind"] == "fall" and ev[0]["peak_g"] >= 7
+    alerts = {(x["entity"]["serial"], x["rule"]["code"]) for x in r["summary"]["alerts"]}
+    assert ("TBT-VT2-011", "AC-CRASH") in alerts and ("IMU3-0204", "IMU-SHOCK") in alerts
+    assert by_serial(client, "TBT-VT2-011")["events"]["fall"] == 1
+    assert not by_serial(client, "TBT-VT2-011")["airworthy"]
+    assert due(client, "TBT-VT2-011", "AC-CRASH")["status"] == "overdue"
+    assert due(client, "IMU3-0204", "IMU-SHOCK")["status"] == "overdue"     # ИНС на борту в момент удара
+    assert due(client, "IMU3-0201", "IMU-SHOCK")["status"] == "ok"          # узел со склада удара не получил
+    card = client.get(f"/api/aircraft/{a11['id']}").json()
+    assert card["sensor_events"][0]["kind_label"] == "Падение"
+    # осмотр выполнен — напоминание закрыто
+    rule = due(client, "TBT-VT2-011", "AC-CRASH")["rule"]["id"]
+    client.post("/api/maintenance/records", json={"target": "aircraft", "entity_id": a11["id"], "rule_id": rule})
+    assert due(client, "TBT-VT2-011", "AC-CRASH")["status"] == "ok"
+    # откат импорта удаляет и событие
+    client.post(f"/api/imports/{r['id']}/rollback")
+    assert by_serial(client, "TBT-VT2-011")["events"]["fall"] == 0
+
+
+def test_history_collision_already_inspected(client):
+    a2 = by_serial(client, "TBT-M4-002")
+    assert a2["events"]["collision"] == 1
+    assert due(client, "TBT-M4-002", "AC-CRASH")["status"] == "ok"
+
+
+def test_excel_movements_and_pdf_duplicate(client):
+    r = client.post("/api/demo-logs/08_dvizhenie_uzlov.xlsx/import").json()
+    assert r["status"] == "partial" and r["flights_new"] == 5 and r["flights_rejected"] == 1
+    assert any("FC7-9999" in m for m in r["messages"])
+    esc320 = by_serial(client, "ESC40-0320")
+    assert esc320["location"]["aircraft_name"] == "Борт 11" and esc320["location"]["position"] == "ESC4"
+    assert by_serial(client, "ESC40-0302")["status"] == "maintenance"
+    card = client.get(f"/api/components/{esc320['id']}").json()
+    assert [s["aircraft_name"] for s in card["stints"]][:2] == ["Борт 11", "Борт 12"]      # перестановка с сохранением истории
+    pdf = client.post("/api/demo-logs/09_dvizhenie_uzlov.pdf/import").json()
+    assert pdf["status"] == "duplicate" and pdf["flights_duplicate"] == 5
+    assert client.post(f"/api/imports/{r['id']}/rollback").status_code == 400          # движение откатывается операциями
+
+
+def test_pdf_movements_alone(client):
+    r = client.post("/api/demo-logs/09_dvizhenie_uzlov.pdf/import").json()
+    assert r["status"] == "imported" and r["flights_new"] == 5 and r["format"] == "pdf-движение"
+    assert by_serial(client, "ESC40-0325")["location"]["aircraft_name"] == "Борт 12"
+
+
+def test_excel_flights_with_collision_column(client):
+    a12 = by_serial(client, "TBT-VT2-012")
+    r = client.post("/api/demo-logs/10_polety_Bort12.xlsx/import").json()
+    assert r["status"] == "imported" and r["flights_new"] == 3 and r["format"] == "xlsx"
+    after = by_serial(client, "TBT-VT2-012")
+    assert after["events"]["collision"] == 1 and after["hours"] > a12["hours"] + 3
+
+
+def test_movement_template_and_bad_files(client):
+    t = client.get("/api/templates/movements.xlsx")
+    assert t.status_code == 200 and t.content[:2] == b"PK"
+    r = client.post("/api/imports", files={"file": ("x.pdf", b"%PDF-1.4 broken", "application/pdf")}).json()
+    assert r["status"] == "rejected"
+    # шаблон сам по себе — корректный журнал движения
+    r = client.post("/api/imports", data={"dry_run": "true"}, files={"file": ("t.xlsx", t.content, "application/octet-stream")}).json()
+    assert r["format"] == "xlsx-движение" and r["dry_run"]
+
+
+# ------------------------------------------------------------------ К1: миссии и автономный полёт
+def _mission(client, name):
+    return next(m for m in client.get("/api/missions").json() if m["name"].startswith(name))
+
+
+def test_autonomous_mission_flight_accrues_hours(client):
+    m = _mission(client, "Облёт ЛЭП")
+    assert m["stats"]["waypoints"] == 4 and m["stats"]["distance_m"] > 500
+    h0, comps0 = _snap(client, "TBT-M4-001")
+    r = client.post(f"/api/missions/{m['id']}/run", json={"wind_ms": 4}).json()
+    assert r["status"] == "completed"
+    assert r["summary"]["max_xte_m"] < 10                          # автопилот держит линию пути при ветре
+    track = r["track"]
+    assert track[0][5] == "takeoff" and track[-1][5] == "land" and track[-1][3] < 0.5
+    assert {p[5] for p in track} >= {"takeoff", "mission", "hold", "rtl", "land"}
+    h1, comps1 = _snap(client, "TBT-M4-001")
+    assert r["summary"]["hours_added"] > 0 and abs((h1 - h0) - r["summary"]["hours_added"]) < 0.011
+    assert all(comps1[k] > comps0[k] for k in comps0 if comps0[k] is not None)   # наработка начислена всем установленным узлам
+    imp = client.get("/api/imports").json()[0]
+    assert imp["id"] == r["import_id"] and imp["flights_new"] == 1
+    assert client.get(f"/api/missions/{m['id']}").json()["runs"][0]["status"] == "completed"
+
+
+def test_mission_fault_detects_fall_and_preflight_blocks(client):
+    m = _mission(client, "Аэрофотосъёмка")
+    r = client.post(f"/api/missions/{m['id']}/run", json={"fault_at_wp": 3}).json()
+    assert r["status"] == "aborted"
+    assert [e["kind"] for e in r["summary"]["sensor_events"]] == ["fall"]       # обнаружено по акселерометру
+    assert {a["rule"]["code"] for a in r["summary"]["alerts"]} >= {"AC-CRASH", "IMU-SHOCK"}
+    again = client.post(f"/api/missions/{m['id']}/run", json={})
+    assert again.status_code == 400 and "не допущен" in again.json()["detail"]
+
+
+def test_mission_crud_validation_and_export_roundtrip(client):
+    assert client.post("/api/missions", json={"name": "x", "home_lat": 95, "home_lon": 0, "waypoints": []}).status_code == 422
+    body = {"name": "Тест", "home_lat": 55.0, "home_lon": 37.0, "takeoff_alt": 20, "speed_ms": 6, "return_home": True,
+            "waypoints": [{"lat": 55.001, "lon": 37.0, "alt": 25, "hold_s": 3}, {"lat": 55.001, "lon": 37.002, "alt": 30, "hold_s": 0}]}
+    m = client.post("/api/missions", json=body).json()
+    assert client.post(f"/api/missions/{m['id']}/run", json={}).status_code == 400    # борт не выбран
+    for fmt in ("plan", "waypoints"):
+        f = client.get(f"/api/missions/{m['id']}/export?fmt={fmt}")
+        assert f.status_code == 200
+        if fmt == "plan":
+            plan = f.json()
+            cmds = [i["command"] for i in plan["mission"]["items"]]
+            assert cmds == [22, 16, 16, 20]                                   # TAKEOFF, WAYPOINT×2, RTL
+        back = client.post("/api/missions/import", files={"file": (f"m.{fmt}", f.content)}).json()
+        assert len(back["waypoints"]) == 2 and back["return_home"]
+        assert abs(back["waypoints"][1]["lon"] - 37.002) < 1e-6 and back["waypoints"][0]["hold_s"] == 3
+    bad = client.post("/api/missions/import", files={"file": ("x.plan", b"{oops")})
+    assert bad.status_code == 400
+    assert client.delete(f"/api/missions/{m['id']}").status_code == 200

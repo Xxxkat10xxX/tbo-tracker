@@ -212,3 +212,41 @@ table.fleet td{vertical-align:middle}
 .ph-tools button{background:rgba(255,255,255,.94);box-shadow:0 1px 3px rgba(16,24,40,.15);padding:3px 8px}
 .ph-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:8px}.ph-head h3{margin:0}
 .ph-empty{border:2px dashed #c9d2e2;border-radius:10px;padding:18px;text-align:center;color:var(--muted);background:#fbfcfe;font-size:13px}
+
+/* ---------- электронный паспорт */
+.pass-grid{display:grid;grid-template-columns:minmax(260px,1.1fr) 1.2fr 1fr;gap:26px}
+.pass-ids{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;margin:0;font-size:13.5px}
+.pass-ids dt{color:var(--muted)}.pass-ids dd{margin:0}
+table.spec td{padding:5px 8px;font-size:13.5px}
+table.spec-edit td{padding:3px 4px;border:0}
+.big-res{font-size:18px;font-weight:700}
+@media (max-width:1100px){.pass-grid{grid-template-columns:1fr}}
+
+/* ------------------------------------------------------------------ миссии */
+.mission-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+@media (max-width: 1100px) { .mission-grid { grid-template-columns: 1fr; } }
+.map-wrap { position: relative; }
+#map { width: 100%; height: auto; display: block; border-radius: 8px; cursor: crosshair; touch-action: none; user-select: none; }
+#map .map-bg { fill: #eef3ea; }
+#map .grid { stroke: #d5dfd0; stroke-width: 1; }
+#map .route { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-dasharray: 7 5; }
+#map .rtl { stroke: #8a94a6; stroke-width: 2; stroke-dasharray: 3 5; }
+#map .flown { fill: none; stroke: #e0682b; stroke-width: 3; stroke-linejoin: round; }
+#map .home { fill: #1f2a3d; }
+#map .home-t { fill: #fff; font: 700 12px Inter, sans-serif; text-anchor: middle; }
+#map .wp { cursor: grab; }
+#map .wp circle { fill: #fff; stroke: var(--accent); stroke-width: 3; }
+#map .wp text { fill: #1f2a3d; font: 700 12px Inter, sans-serif; text-anchor: middle; pointer-events: none; }
+#map .wp .wp-alt { font: 500 10.5px Inter, sans-serif; fill: #44506a; paint-order: stroke; stroke: #eef3ea; stroke-width: 3px; }
+#map .drone { fill: #e0682b; stroke: #fff; stroke-width: 2; }
+#map .drone-ring { fill: none; stroke: #e0682b; stroke-opacity: .35; stroke-width: 2; }
+#map .north { fill: #1f2a3d; }
+#map .north-t, #map .scale-t { fill: #1f2a3d; font: 600 11px Inter, sans-serif; text-anchor: middle; }
+#map .scale-t { text-anchor: start; }
+#map .scale { stroke: #1f2a3d; stroke-width: 3; }
+.map-tools { position: absolute; top: 10px; left: 10px; display: flex; gap: 4px; }
+.map-tools button { background: #fff; }
+.telemetry { position: absolute; right: 52px; top: 10px; background: rgba(31, 42, 61, .88); color: #fff; border-radius: 8px; padding: 8px 12px;
+  font-size: 12.5px; display: flex; gap: 14px; flex-wrap: wrap; }
+.wp-table input { padding: 4px 6px; font-size: 12.5px; min-width: 0; width: 100%; }
+.wp-table td, .wp-table th { padding: 4px 4px; }

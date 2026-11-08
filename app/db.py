@@ -29,7 +29,12 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 
 
 RESOURCE_COLUMNS = {"resource_hours": "FLOAT", "resource_cycles": "INTEGER", "resource_days": "INTEGER"}
-EXTRA_COLUMNS = {"aircraft": {"image": "VARCHAR(300)"}}
+EXTRA_COLUMNS = {
+    "aircraft": {"image": "VARCHAR(300)"},
+    "components": {"uid": "VARCHAR(40)", "specs": "JSON"},
+    "component_types": {"spec_fields": "JSON"},
+    "maintenance_rules": {"interval_events": "INTEGER", "warn_events": "INTEGER"},
+}
 
 
 def migrate(eng=None):
@@ -38,13 +43,16 @@ def migrate(eng=None):
     eng = eng or engine
     insp = inspect(eng)
     with eng.begin() as conn:
-        for table in ("aircraft", "components"):
+        for table in ("aircraft", "components", "component_types", "maintenance_rules"):
             if not insp.has_table(table):
                 continue
             have = {c["name"] for c in insp.get_columns(table)}
-            for col, typ in {**RESOURCE_COLUMNS, **EXTRA_COLUMNS.get(table, {})}.items():
+            cols = {**(RESOURCE_COLUMNS if table in ("aircraft", "components") else {}), **EXTRA_COLUMNS.get(table, {})}
+            for col, typ in cols.items():
                 if col not in have:
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col} {typ}"))
+        if insp.has_table("components"):   # старым паспортам — уникальные идентификаторы
+            conn.execute(text("UPDATE components SET uid = lower(hex(randomblob(16))) WHERE uid IS NULL"))
 
 
 def get_session():
