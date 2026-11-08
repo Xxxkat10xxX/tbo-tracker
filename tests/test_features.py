@@ -399,3 +399,55 @@ def test_mission_crud_validation_and_export_roundtrip(client):
     bad = client.post("/api/missions/import", files={"file": ("x.plan", b"{oops")})
     assert bad.status_code == 400
     assert client.delete(f"/api/missions/{m['id']}").status_code == 200
+
+
+# ------------------------------------------------------------------ К7: уведомления, К10: доска перестановки
+def test_notifications_three_categories(client):
+    d = client.get("/api/notifications").json()
+    keys = lambda cat: {(i["entity"]["serial"], i["rule"]["code"]) for i in d["items"][cat]}  # noqa: E731
+    assert ("ESC40-0315", "RESOURCE") in keys("limit")             # индивидуальный ресурс исчерпан
+    assert ("BVK2-0405", "BVK-SVC") in keys("overdue")              # периодическая работа просрочена
+    assert ("ESC40-0318", "ESC-LIFE") in keys("approaching")        # приближение к назначенному ресурсу
+    assert all(i["rule"]["kind"] == "life" for i in d["items"]["limit"])
+    assert d["counts"]["total"] == sum(len(v) for v in d["items"].values())
+    assert any(e["kind"] == "collision" for e in d["sensor_events"])
+    # падение из журнала → новое просроченное уведомление (осмотр после падения)
+    client.post("/api/demo-logs/07_TBT-VT2-011_padenie.json/import")
+    d2 = client.get("/api/notifications").json()
+    assert ("TBT-VT2-011", "AC-CRASH") in {(i["entity"]["serial"], i["rule"]["code"]) for i in d2["items"]["overdue"]}
+    assert d2["counts"]["sensor_events"] == d["counts"]["sensor_events"] + 1
+
+
+def test_board_and_move_recalculates_passport(client):
+    b = client.get("/api/board").json()
+    a1 = next(a for a in b["aircraft"] if a["serial"] == "TBT-M4-001")
+    a2 = next(a for a in b["aircraft"] if a["serial"] == "TBT-M4-002")
+    slot = next(s for s in a1["slots"] if s["position"] == "ESC1")
+    comp = slot["component"]
+    assert comp["residual"]["hours"] is not None and comp["uid"]
+    spare = {c["serial"] for c in b["spare"]}
+    assert "ESC40-0324" in spare and "ESC40-0315" in spare
+    # обмен ESC1 между бортами, как делает доска: снять → переставить → установить; дата в прошлом
+    other = next(s for s in a2["slots"] if s["position"] == "ESC1")["component"]
+    fl = client.get(f"/api/aircraft/{a1['id']}").json()["flight_log"]                   # последние полёты Борт 01
+    t0 = datetime.fromisoformat(fl[2]["started_at"].replace("Z", "+00:00")) - timedelta(minutes=5)
+    moved = sum(f["duration_h"] for f in fl[:3])
+    at, at2, at3 = (t0.isoformat(), (t0 + timedelta(minutes=1)).isoformat(), (t0 + timedelta(minutes=2)).isoformat())
+    before = client.get(f"/api/components/{comp['id']}").json()
+    assert client.post(f"/api/components/{other['id']}/remove", json={"at": at, "to_status": "stock"}).status_code == 200
+    assert client.post(f"/api/components/{comp['id']}/transfer", json={"aircraft_id": a2["id"], "position": "ESC1", "at": at2}).status_code == 200
+    assert client.post(f"/api/components/{other['id']}/install", json={"aircraft_id": a1["id"], "position": "ESC1", "at": at3}).status_code == 200
+    after = client.get(f"/api/components/{comp['id']}").json()
+    assert after["location"]["aircraft_id"] == a2["id"]
+    assert after["uid"] == before["uid"]
+    # полёты Борт 01 за последние 3 дня больше не начисляются этому узлу, зато начисляются полёты Борт 02
+    fl2 = [f for f in client.get(f"/api/aircraft/{a2['id']}").json()["flight_log"]
+           if datetime.fromisoformat(f["started_at"].replace("Z", "+00:00")) >= t0 + timedelta(minutes=1)]
+    expected = before["hours"] - moved + sum(f["duration_h"] for f in fl2)
+    assert moved > 0 and abs(after["hours"] - expected) < 0.02                         # налёт переотнесён по дате операции
+    assert [s["aircraft_name"] for s in after["stints"]][:2] == ["Борт 02", "Борт 01"]
+    b2 = client.get("/api/board").json()
+    assert next(s for s in next(a for a in b2["aircraft"] if a["id"] == a1["id"])["slots"] if s["position"] == "ESC1")["component"]["id"] == other["id"]
+    # несовместимая позиция отклоняется
+    fc = next(s for s in a1["slots"] if s["position"] == "FC")["component"]
+    assert client.post(f"/api/components/{fc['id']}/transfer", json={"aircraft_id": a2["id"], "position": "ESC2"}).status_code == 400

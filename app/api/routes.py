@@ -835,3 +835,79 @@ def put_economics(data: EconomicsIn, s: Session = Depends(get_session)):
 def demo_reset():
     from ..seed import reset_and_seed
     return reset_and_seed()
+
+
+# ---------------------------------------------------------------- центр уведомлений
+NOTIFY_CATEGORIES = {
+    "approaching": "Приближается срок ТО / ресурса",
+    "limit": "Достигнут предельный ресурс",
+    "overdue": "Просрочены регламентные работы",
+}
+
+
+@router.get("/notifications")
+def notifications(days: int = Query(90, ge=1, le=3650), s: Session = Depends(get_session)):
+    """Автоматические уведомления: три категории по расчёту регламентов + свежие события датчиков.
+
+    «Предельный ресурс» — порог регламента вида «назначенный ресурс» (life) или индивидуального ресурса
+    экземпляра достигнут: узел/борт подлежит замене или списанию. «Просрочено» — периодическая работа
+    не выполнена к сроку. «Приближается» — остаток меньше порога предупреждения.
+    """
+    from datetime import timedelta
+
+    from ..models import SensorEvent
+    from ..services import sensors
+    from ..timeutil import utcnow
+
+    groups = {k: [] for k in NOTIFY_CATEGORIES}
+    for it in due_items(s, statuses={"overdue", "due_soon"}):
+        if it["status"] == "due_soon":
+            cat = "approaching"
+        else:
+            cat = "limit" if it["rule"]["kind"] == "life" else "overdue"
+        groups[cat].append({**it, "category": cat})
+    since = utcnow() - timedelta(days=days)
+    evs = s.scalars(select(SensorEvent).where(SensorEvent.occurred_at >= since).order_by(SensorEvent.occurred_at.desc()))
+    events = []
+    for e in evs:
+        d = sensors.event_dict(e)
+        a = s.get(Aircraft, e.aircraft_id)
+        d["aircraft"] = {"id": a.id, "name": a.name, "serial": a.serial} if a else None
+        events.append(d)
+    counts = {k: len(v) for k, v in groups.items()}
+    counts["sensor_events"] = len(events)
+    counts["total"] = counts["approaching"] + counts["limit"] + counts["overdue"]
+    return {"generated_at": iso(utcnow()), "categories": NOTIFY_CATEGORIES, "counts": counts,
+            "items": groups, "sensor_events": events, "days": days}
+
+
+# ---------------------------------------------------------------- доска перестановки узлов (drag & drop)
+@router.get("/board")
+def board(s: Session = Depends(get_session)):
+    """Все борта с позициями и установленными узлами + резерв/ремонт — для интерактивной перестановки."""
+    ev = Evaluator(s)
+    items = due_items(s, evaluator=ev)
+    summ = _summary_by_aircraft(items)
+    worst = _worst_by_component(items)
+    residual = _residual_by_component(items)
+    aircraft = list(s.scalars(select(Aircraft).where(Aircraft.status != "retired").order_by(Aircraft.serial)))
+    cur = current_installations(s)
+    by_pos = {(i.aircraft_id, i.position): i for i in cur.values()}
+    comps = list(s.scalars(select(Component).where(Component.status != "retired")))
+    ctot = component_totals(s, comps)
+    tots = aircraft_totals(s, aircraft)
+    out = []
+    for a in aircraft:
+        slots, positions = [], set()
+        for slot in a.type.slots or []:
+            inst = by_pos.get((a.id, slot["position"]))
+            if inst:
+                positions.add(slot["position"])
+            c = inst.component if inst else None
+            slots.append({"position": slot["position"], "label": slot["label"], "component_type": slot["component_type"],
+                          "required": slot.get("required", True),
+                          "component": component_brief(c, ctot[c.id], inst, worst.get(c.id), residual.get(c.id)) if c else None})
+        out.append({**aircraft_brief(a, tots[a.id], summ[a.id], positions), "slots": slots})
+    spare = [component_brief(c, ctot[c.id], None, worst.get(c.id), residual.get(c.id))
+             for c in sorted(comps, key=lambda c: (c.type.name, c.serial)) if c.id not in cur]
+    return {"aircraft": out, "spare": spare}

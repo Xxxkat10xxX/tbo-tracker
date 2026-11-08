@@ -642,6 +642,150 @@ async function pageMission(id) {
 }
 const view_ = () => $("#view");
 
+// ------------------------------------------------------------------ Перестановка узлов: drag & drop
+async function pageBoard() {
+  let data = await GET("/api/board");
+  let picked = null;           // выбор щелчком (для тачскринов и без мыши)
+  let lastMove = null;
+  const chip = (c, from) => {
+    const st = c.maintenance && c.maintenance.status !== "ok" ? c.maintenance.status : "";
+    const movable = c.status === "installed" || c.status === "stock";
+    return `<div class="chip-c ${st} ${movable ? "" : "locked"} ${lastMove && lastMove.id === c.id ? "flash" : ""}" ${movable ? 'draggable="true"' : ""}
+      data-cid="${c.id}" data-type="${esc(c.type.code)}" data-from="${esc(from)}" title="${movable ? "Перетащите на позицию другого борта, в резерв или в ремонт" : "Узел в ремонте — установка недоступна"}">
+      <div class="cc-top"><b>${esc(c.serial)}</b>${st ? `<span class="cc-st ${st}">${st === "overdue" ? "ТО просрочено" : "скоро ТО"}</span>` : ""}</div>
+      <div class="cc-sub">${hrs(c.hours)} · ${num(c.cycles, 0)} цикл.</div>
+      ${c.residual ? `<div class="cc-res">ост. ${residualText(c.residual, true)}</div>${residualBar(c.residual)}` : ""}</div>`;
+  };
+  function render() {
+    const spareStock = data.spare.filter((c) => c.status === "stock"), spareRep = data.spare.filter((c) => c.status === "maintenance");
+    view().innerHTML = `<div class="page-head"><div><h1>Перестановка узлов</h1>
+        <div class="sub">Перетащите узел на позицию соседнего борта, в резерв или в ремонт. Совместимые позиции подсвечиваются; занятая позиция — обмен узлами.
+        После операции наработка и паспорт узла пересчитываются по истории установок (налёт до даты операции остаётся за прежним бортом).</div></div></div>
+      <div id="move-result"></div>
+      <div class="board">
+        <div class="board-side">
+          <div class="card bcol dz" data-drop="stock"><h3>Резерв (склад) <span class="muted">${spareStock.length}</span></h3>
+            <div class="chips-col">${spareStock.map((c) => `<div class="small muted">${esc(c.type.name)}</div>${chip(c, "stock")}`).join("") || '<div class="empty-state small">пусто</div>'}</div></div>
+          <div class="card bcol dz" data-drop="maintenance"><h3>Ремонт / обслуживание <span class="muted">${spareRep.length}</span></h3>
+            <div class="chips-col">${spareRep.map((c) => chip(c, "maintenance")).join("") || '<div class="empty-state small">пусто</div>'}</div></div>
+        </div>
+        <div class="board-fleet">${data.aircraft.map((a) => `<div class="card bac">
+          <div class="bac-head">${droneImg(a, "thumb")}<div><a href="#/aircraft/${a.id}"><b>${esc(a.name)}</b></a> <span class="small muted">${esc(a.serial)}</span>
+            <div class="small">${readiness(a)} · ${hrs(a.hours)} · ${a.slots_filled}/${a.slots_total}</div></div></div>
+          ${a.slots.map((sl) => `<div class="bslot dz" data-drop="slot" data-aid="${a.id}" data-pos="${esc(sl.position)}" data-type="${esc(sl.component_type)}">
+            <div class="bslot-l"><b>${esc(sl.position)}</b><span>${esc(sl.label)}</span></div>
+            ${sl.component ? chip(sl.component, `${a.id}|${sl.position}`) : `<div class="bslot-empty">${sl.required ? "не укомплектовано" : "пусто"}</div>`}</div>`).join("")}
+        </div>`).join("")}</div>
+      </div>`;
+    if (lastMove) {
+      $("#move-result").innerHTML = lastMove.html;
+      $("#mr-close").onclick = () => { lastMove = null; $("#move-result").innerHTML = ""; };
+    }
+    bind();
+  }
+  const find = (cid) => {
+    for (const a of data.aircraft) for (const sl of a.slots) if (sl.component && sl.component.id === cid) return { c: sl.component, a, sl };
+    const c = data.spare.find((x) => x.id === cid);
+    return c ? { c } : null;
+  };
+  const clearHi = () => $$(".dz").forEach((d) => d.classList.remove("ok-target", "no-target", "over"));
+  const highlight = (type, from) => $$(".dz").forEach((d) => {
+    const ok = d.dataset.drop === "slot" ? d.dataset.type === type && `${d.dataset.aid}|${d.dataset.pos}` !== from : d.dataset.drop !== from;
+    d.classList.add(ok ? "ok-target" : "no-target");
+  });
+  function bind() {
+    $$(".chip-c[draggable]").forEach((el) => {
+      el.addEventListener("dragstart", (e) => {
+        e.dataTransfer.setData("text/plain", el.dataset.cid); e.dataTransfer.effectAllowed = "move";
+        picked = null; el.classList.add("dragging"); highlight(el.dataset.type, el.dataset.from);
+      });
+      el.addEventListener("dragend", () => { el.classList.remove("dragging"); clearHi(); });
+      el.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const target = el.closest(".dz.ok-target");
+        if (picked && picked !== +el.dataset.cid && target) { const cid = picked; picked = null; clearHi(); askMove(cid, target); return; }
+        clearHi(); $$(".chip-c.picked").forEach((x) => x.classList.remove("picked"));
+        if (picked === +el.dataset.cid) { picked = null; return; }
+        picked = +el.dataset.cid; el.classList.add("picked"); highlight(el.dataset.type, el.dataset.from);
+      });
+    });
+    $$(".dz").forEach((d) => {
+      d.addEventListener("dragover", (e) => { if (d.classList.contains("ok-target")) { e.preventDefault(); d.classList.add("over"); } });
+      d.addEventListener("dragleave", () => d.classList.remove("over"));
+      d.addEventListener("drop", (e) => { e.preventDefault(); const cid = +e.dataTransfer.getData("text/plain"); clearHi(); askMove(cid, d); });
+      d.addEventListener("click", () => { if (picked && d.classList.contains("ok-target")) { const cid = picked; picked = null; clearHi(); askMove(cid, d); } });
+    });
+  }
+  function askMove(cid, d) {
+    const src = find(cid);
+    if (!src) return;
+    const c = src.c, kind = d.dataset.drop;
+    let plan = [], title = "";
+    if (kind === "slot") {
+      const ta = data.aircraft.find((a) => a.id === +d.dataset.aid), pos = d.dataset.pos;
+      const occ = ta.slots.find((x) => x.position === pos).component;
+      if (occ && !src.a) {          // из резерва на занятую позицию: снять установленный в резерв, поставить новый
+        plan = [{ op: "remove", c: occ, to: "stock" }, { op: "install", c, a: ta, pos }];
+        title = `Замена: ${occ.serial} → резерв, ${c.serial} → ${ta.name} · ${pos}`;
+      } else if (occ) {             // обмен местами между позициями
+        plan = [{ op: "remove", c: occ, to: "stock" }, { op: "transfer", c, a: ta, pos }, { op: "install", c: occ, a: src.a, pos: src.sl.position }];
+        title = `Обмен: ${c.serial} ⇄ ${occ.serial}`;
+      } else {
+        plan = [{ op: src.a ? "transfer" : "install", c, a: ta, pos }];
+        title = src.a ? `Перестановка ${c.serial}: ${src.a.name} · ${src.sl.position} → ${ta.name} · ${pos}` : `Установка ${c.serial} из резерва → ${ta.name} · ${pos}`;
+      }
+    } else {
+      if (!src.a && c.status === kind) return;
+      if (!src.a) { toast("Перевод между резервом и ремонтом выполняется в карточке узла", true); return; }
+      plan = [{ op: "remove", c, to: kind }];
+      title = `Снятие ${c.serial} с ${src.a.name} · ${src.sl.position} → ${kind === "stock" ? "резерв" : "ремонт"}`;
+    }
+    const OPL = { install: "Установка", remove: "Снятие", transfer: "Перестановка" };
+    modal("Подтверждение операции с узлом", `<p><b>${esc(title)}</b></p>
+      <ol class="small">${plan.map((p) => `<li>${OPL[p.op]} ${esc(p.c.serial)}${p.op === "remove" ? ` → ${p.to === "stock" ? "резерв" : "ремонт"}` : ` → ${esc(p.a.name)} · ${esc(p.pos)}`}</li>`).join("")}</ol>
+      <div class="row2"><div class="field"><label>Дата и время операции</label><input type="datetime-local" name="at" value="${toLocalInput(new Date())}"></div>
+      <div class="field"><label>Исполнитель</label><input name="by" placeholder="ФИО"></div></div>
+      <div class="field"><label>Основание</label><input name="reason" placeholder="напр. замена по результатам диагностики"></div>
+      <div class="hint">Если указать прошедшую дату, полёты после неё будут отнесены к новой установке, и наработка узлов пересчитается.</div>`, {
+      okText: "Выполнить", onOk: async (root) => {
+        const at = new Date(val(root, "at")), by = val(root, "by") || null, reason = val(root, "reason") || null;
+        const before = {};
+        for (const p of plan) before[p.c.id] = await GET(`/api/components/${p.c.id}`);
+        const msgs = [];
+        for (let i = 0; i < plan.length; i++) {
+          const p = plan[i], when = new Date(at.getTime() + i * 60000).toISOString();
+          try {
+            const r = p.op === "remove"
+              ? await POST(`/api/components/${p.c.id}/remove`, { at: when, to_status: p.to, reason, performed_by: by })
+              : await POST(`/api/components/${p.c.id}/${p.op}`, { aircraft_id: p.a.id, position: p.pos, at: when, reason, performed_by: by });
+            msgs.push(r.message);
+          } catch (e) {
+            if (i > 0) { data = await GET("/api/board"); render(); }      // часть шагов выполнена — показать фактическое состояние
+            throw new Error(`Шаг ${i + 1} не выполнен: ${e.message}`);
+          }
+        }
+        const ids = [...new Set(plan.map((p) => p.c.id))];
+        const after = await Promise.all(ids.map((id) => GET(`/api/components/${id}`)));
+        data = await GET("/api/board");
+        lastMove = { id: plan[plan.length - 1].c.id, html: moveResult(title, msgs, ids.map((id, k) => [before[id], after[k]])) };
+        AIRCRAFT_CACHE = null; refreshNavCount(); render(); toast("Операция выполнена, данные пересчитаны");
+      },
+    });
+  }
+  function moveResult(title, msgs, pairs) {
+    const loc = (c) => (c.location ? `${esc(c.location.aircraft_name)} · ${esc(c.location.position)}` : esc(c.status_label));
+    const delta = (a, b, d) => (Math.abs(b - a) > 0.005 ? ` <span class="${b < a ? "neg" : "pos"}">(${b > a ? "+" : ""}${num(b - a, d)})</span>` : "");
+    return `<div class="card move-res"><div class="card-head"><h2>✓ ${esc(title)}</h2><button class="sm" id="mr-close">Скрыть</button></div>
+      <div class="small muted" style="margin-bottom:8px">${msgs.map(esc).join(" · ")}</div>
+      <div class="table-wrap"><table><thead><tr><th>Узел (паспорт)</th><th>Местоположение: было → стало</th><th class="num">Наработка, ч</th><th class="num">Циклы</th><th>Остаточный ресурс</th><th>Регламент</th></tr></thead><tbody>
+      ${pairs.map(([b, a]) => `<tr><td><a href="#/components/${a.id}"><b>${esc(a.serial)}</b></a><div class="small muted mono">${fmtUid(a.uid)}</div></td>
+        <td>${loc(b)} → <b>${loc(a)}</b></td><td class="num">${num(a.hours, 2)}${delta(b.hours, a.hours, 2)}</td><td class="num">${num(a.cycles, 0)}${delta(b.cycles, a.cycles, 0)}</td>
+        <td>${residualText(a.residual, true)}${residualBar(a.residual)}</td><td>${dueBadge(a.maintenance ? a.maintenance.status : "ok")}</td></tr>`).join("")}</tbody></table></div>
+      <div class="hint">История установок в паспорте дополнена; наработка = исходная + налёт бортов за периоды установки + внебортовая. Если дата операции в прошлом, полёты после неё переотнесены.</div></div>`;
+  }
+  render();
+}
+
 // ------------------------------------------------------------------ навигация
 const routes = [
   [/^#?\/?$/, "dash", pageDashboard],
@@ -653,6 +797,8 @@ const routes = [
   [/^#\/types$/, "types", pageTypes],
   [/^#\/imports$/, "imports", pageImports],
   [/^#\/maintenance$/, "maintenance", pageMaintenance],
+  [/^#\/notifications$/, "notifications", pageNotifications],
+  [/^#\/board$/, "board", pageBoard],
   [/^#\/rules$/, "rules", pageRules],
   [/^#\/analytics$/, "analytics", pageAnalytics],
   [/^#\/scenarios$/, "scenarios", pageScenarios],
@@ -675,13 +821,68 @@ async function router() {
   view().innerHTML = '<div class="notice">Страница не найдена</div>';
 }
 const reload = () => router();
+// ------------------------------------------------------------------ автоматические уведомления
+const NOTIF_SEEN = "tbo-notif-seen";
+const NOTIF_CAT = {
+  limit: { icon: "⛔", cls: "bad", hint: "Регламент вида «назначенный ресурс» или индивидуальный ресурс экземпляра исчерпан — замена / списание / ремонт у изготовителя." },
+  overdue: { icon: "⚠", cls: "bad", hint: "Периодическая работа не выполнена к сроку: по часам, циклам, календарю или после падения/столкновения." },
+  approaching: { icon: "⏳", cls: "warn", hint: "Остаток до срока меньше порога предупреждения регламента (по умолчанию 10 % интервала)." },
+};
+const notifKey = (i) => `${i.category}|${i.key}`;
+function loadSeen() { try { return new Set(JSON.parse(localStorage.getItem(NOTIF_SEEN) || "[]")); } catch (_) { return null; } }
+function saveSeen(keys) { try { localStorage.setItem(NOTIF_SEEN, JSON.stringify(keys)); } catch (_) { /* приватный режим */ } }
+let NOTIF_FIRST = true;
 async function refreshNavCount() {
   try {
-    const d = await GET("/api/maintenance/due?status=overdue");
+    const d = await GET("/api/notifications");
+    const c = d.counts, bad = c.limit + c.overdue;
     const el = $("#nav-due");
-    el.hidden = !d.length;
-    el.textContent = d.length;
-  } catch (_) { /* не критично */ }
+    el.hidden = !bad; el.textContent = bad;
+    const nb = $("#nav-notif");
+    nb.hidden = !c.total; nb.textContent = c.total; nb.classList.toggle("warn", !bad);
+    // новые уведомления с прошлого раза — всплывающее сообщение и (если разрешено) уведомление браузера
+    const all = ["limit", "overdue", "approaching"].flatMap((k) => d.items[k]);
+    const seen = loadSeen();
+    if (seen) {
+      const fresh = all.filter((i) => !seen.has(notifKey(i)) && i.category !== "approaching");
+      if (fresh.length && !(NOTIF_FIRST && !seen.size)) {
+        const msg = fresh.slice(0, 3).map((i) => `${i.entity.name || i.entity.serial}: ${i.rule.name}`).join("; ") + (fresh.length > 3 ? ` и ещё ${fresh.length - 3}` : "");
+        toast(`🔔 Новые уведомления (${fresh.length}): ${msg}`, true);
+        if (window.Notification && Notification.permission === "granted") {
+          try { new Notification("tbo-tracker: требуется обслуживание", { body: msg }); } catch (_) { /* не поддерживается */ }
+        }
+      }
+      saveSeen(all.map(notifKey));
+    }
+    NOTIF_FIRST = false;
+    return d;
+  } catch (_) { return null; /* не критично */ }
+}
+setInterval(refreshNavCount, 60000);
+
+async function pageNotifications() {
+  const d = await refreshNavCount() || await GET("/api/notifications");
+  const c = d.counts;
+  const perm = window.Notification ? Notification.permission : "unsupported";
+  view().innerHTML = `<div class="page-head"><div><h1>Уведомления</h1>
+      <div class="sub">Формируются автоматически при каждом изменении наработки (импорт журнала, автономный полёт, ручная запись) и по календарю. Проверка — каждую минуту.</div></div>
+      <div class="actions">${perm === "default" ? '<button id="n-perm">🔔 Уведомления в браузере</button>' : perm === "granted" ? '<span class="badge ok">уведомления браузера включены</span>' : ""}
+      <a class="btn" href="#/maintenance">Все работы ТО →</a></div></div>
+    <div class="kpis">
+      ${["limit", "overdue", "approaching"].map((k) => `<div class="kpi clickable ${c[k] ? NOTIF_CAT[k].cls : "ok"}" data-scroll="n-${k}"><div class="v">${c[k]}</div><div class="l">${esc(d.categories[k])}</div></div>`).join("")}
+      <div class="kpi clickable ${c.sensor_events ? "warn" : "ok"}" data-scroll="n-sens"><div class="v">${c.sensor_events}</div><div class="l">Падений и столкновений за ${d.days} дн.</div></div>
+    </div>
+    ${["limit", "overdue", "approaching"].map((k) => `<div class="card notif-${NOTIF_CAT[k].cls}" id="n-${k}"><div class="card-head"><h2>${NOTIF_CAT[k].icon} ${esc(d.categories[k])} <span class="muted">(${c[k]})</span></h2></div>
+      <div class="small muted" style="margin:-6px 0 10px">${NOTIF_CAT[k].hint}</div><div data-cat="${k}">${dueTable(d.items[k], { empty: "Нет уведомлений" })}</div></div>`).join("")}
+    <div class="card" id="n-sens"><h2>Мониторинг датчиков: падения и столкновения</h2>
+      ${d.sensor_events.length ? `<div class="table-wrap"><table><thead><tr><th>Когда</th><th>Борт</th><th>Событие</th><th class="num">Перегрузка</th><th>Источник</th></tr></thead><tbody>
+        ${d.sensor_events.map((e) => `<tr><td class="nowrap">${fmtDT(e.occurred_at)}</td><td>${e.aircraft ? `<a href="#/aircraft/${e.aircraft.id}">${esc(e.aircraft.name)}</a> <span class="small muted">${esc(e.aircraft.serial)}</span>` : "—"}</td>
+          <td><span class="badge ${EV_BADGE[e.kind]}">${esc(e.kind_label)}</span></td><td class="num">${e.peak_g != null ? num(e.peak_g, 1) + " g" : "—"}</td><td class="small">${esc(e.details || e.source)}</td></tr>`).join("")}
+        </tbody></table></div>` : `<div class="empty-state">За ${d.days} дней падений и столкновений не зафиксировано</div>`}</div>`;
+  ["limit", "overdue", "approaching"].forEach((k) => bindDueActions($(`[data-cat="${k}"]`), d.items[k], () => { refreshNavCount(); reload(); }));
+  $$("[data-scroll]").forEach((k) => k.addEventListener("click", () => document.getElementById(k.dataset.scroll).scrollIntoView({ behavior: "smooth" })));
+  const pb = $("#n-perm");
+  if (pb) pb.onclick = async () => { await Notification.requestPermission(); reload(); };
 }
 
 // ------------------------------------------------------------------ Обзор
