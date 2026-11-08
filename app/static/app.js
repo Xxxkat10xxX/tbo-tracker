@@ -7,7 +7,12 @@ const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
 const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const view = () => $("#view");
 
-async function api(method, url, body, isForm) {
+// Номер перехода между страницами: ответ GET, пришедший после ухода со страницы, не должен её перерисовать
+let NAV_SEQ = 0;
+class StaleNav extends Error {}
+window.addEventListener("unhandledrejection", (e) => { if (e.reason instanceof StaleNav) e.preventDefault(); });
+async function api(method, url, body, isForm, global = false) {
+  const seq = NAV_SEQ;
   const opt = { method, headers: {} };
   if (body !== undefined) {
     if (isForm) opt.body = body;
@@ -16,6 +21,7 @@ async function api(method, url, body, isForm) {
   const r = await fetch(url, opt);
   let data = null;
   try { data = await r.json(); } catch (_) { /* пусто */ }
+  if (method === "GET" && !global && seq !== NAV_SEQ) throw new StaleNav("переход на другую страницу");
   if (!r.ok) {
     let msg = data && data.detail ? data.detail : `Ошибка ${r.status}`;
     if (Array.isArray(msg)) msg = msg.map((d) => `${(d.loc || []).slice(1).join(".")}: ${d.msg}`).join("; ");
@@ -908,14 +914,18 @@ const routes = [
 ];
 async function router() {
   $$(".modal-bg").forEach((m) => m.remove());     // окна не переживают переход на другую страницу
+  const my = ++NAV_SEQ;
   const hash = location.hash || "#/";
   for (const [re, key, fn] of routes) {
     const m = hash.match(re);
     if (m) {
       $$("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.r === key));
       view().innerHTML = '<div class="loading">Загрузка…</div>';
-      try { await fn(...m.slice(1)); } catch (e) { view().innerHTML = `<div class="notice bad">Ошибка: ${esc(e.message)}</div>`; }
-      window.scrollTo(0, 0);
+      try { await fn(...m.slice(1)); } catch (e) {
+        if (e instanceof StaleNav || my !== NAV_SEQ) return;       // пользователь уже на другой странице
+        view().innerHTML = `<div class="notice bad">Ошибка: ${esc(e.message)}</div>`;
+      }
+      if (my === NAV_SEQ) window.scrollTo(0, 0);
       return;
     }
   }
@@ -940,7 +950,7 @@ function refreshNavCount() {
 async function pollFeed() {
   try {
     const since = NOTIF_LAST;
-    const d = await GET(`/api/notifications/feed${since !== null ? `?after=${since}` : ""}`);
+    const d = await api("GET", `/api/notifications/feed${since !== null ? `?after=${since}` : ""}`, undefined, false, true);
     NOTIF_LAST = d.last_id;            // запросы идут по очереди; после сброса демо-данных счётчик начинается заново
     const c = d.counts, bad = c.limit + c.overdue;
     const nb = $("#nav-notif");
@@ -958,9 +968,11 @@ async function pollFeed() {
 }
 setInterval(refreshNavCount, 60000);
 
-async function renderNotifications(root) {
+async function renderNotifications(root, seqOf) {
+  const my = seqOf ? seqOf() : null;
   await refreshNavCount();
   const [d, hist] = await Promise.all([GET("/api/notifications"), GET("/api/notifications/history?limit=50")]);
+  if ((seqOf && seqOf() !== my) || !document.body.contains(root)) return;   // вкладку переключили, пока шёл запрос
   const c = d.counts;
   const perm = window.Notification ? Notification.permission : "unsupported";
   root.innerHTML = `<div class="toolbar"><div class="small muted">Формируются автоматически при каждом изменении наработки (импорт журнала, автономный полёт, ручная запись) и по календарю. Проверка выполняется сервером каждую минуту, даже когда браузер закрыт; доставка в Telegram / webhook — раздел <a href="#/server">«Сервер»</a>.</div>
@@ -1631,18 +1643,26 @@ async function pageMaintenance(tab) {
   view().innerHTML = `<div class="page-head"><div><h1>ТО и уведомления</h1><div class="sub">Уведомления и список работ формируются автоматически по текущей наработке, циклам, календарю и событиям датчиков согласно регламентам</div></div></div>
     <div class="card"><div class="tabs" id="tabs"><button data-t="notif">🔔 Уведомления</button><button data-t="due">Все сроки ТО</button><button data-t="rec">Журнал выполненных работ</button></div>
     <div id="tb"></div></div>`;
+  let tabSeq = 0;
+  const alive = (my) => my === tabSeq && $("#tb");       // вкладку не сменили и страница ещё открыта
   async function showDue() {
+    const my = tabSeq;
     $("#tb").innerHTML = `<div class="toolbar"><div class="chips" id="chips">${[["overdue,due_soon", "Требуют внимания"], ["overdue", "Требуется / просрочено"], ["due_soon", "Приближается"], ["", "Все регламенты"]]
       .map(([k, v]) => `<button data-f="${k}" class="${k === filter ? "active" : ""}">${v}</button>`).join("")}</div></div><div id="list"><div class="loading">Расчёт…</div></div>
       <div class="hint">«Приближается» — остаток по любому счётчику меньше порога предупреждения из регламента (по умолчанию 10 % интервала). «Требуется / просрочено» — порог достигнут. Прогноз даты — линейный, по средней интенсивности за 30 дней.</div>`;
     $$("#chips button").forEach((b) => b.addEventListener("click", () => { filter = b.dataset.f; showDue(); }));
     const items = await GET(`/api/maintenance/due?status=${filter}`);
+    if (!alive(my) || !$("#list")) return;
     $("#list").innerHTML = dueTable(items);
     bindDueActions($("#list"), items, showDue);
   }
-  async function showRec() { $("#tb").innerHTML = recordsTable(await GET("/api/maintenance/records?limit=300")); }
-  const show = { notif: () => renderNotifications($("#tb")), due: showDue, rec: showRec };
+  async function showRec() {
+    const my = tabSeq, rows = await GET("/api/maintenance/records?limit=300");
+    if (alive(my)) $("#tb").innerHTML = recordsTable(rows);
+  }
+  const show = { notif: () => renderNotifications($("#tb"), () => tabSeq), due: showDue, rec: showRec };
   const open = (k) => {
+    tabSeq++;
     $$("#tabs button").forEach((x) => x.classList.toggle("active", x.dataset.t === k));
     history.replaceState(null, "", k === "notif" ? "#/maintenance" : `#/maintenance?tab=${k}`);
     $("#tb").innerHTML = '<div class="loading">Расчёт…</div>';

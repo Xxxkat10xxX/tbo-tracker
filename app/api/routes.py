@@ -245,8 +245,19 @@ def create_aircraft(data: AircraftIn, s: Session = Depends(get_session)):
 @router.patch("/aircraft/{aid}")
 def patch_aircraft(aid: int, data: AircraftPatch, s: Session = Depends(get_session)):
     a = _get(s, Aircraft, aid, "Борт")
-    for k, v in data.model_dump(exclude_unset=True).items():
-        setattr(a, k, v)
+    upd = data.model_dump(exclude_unset=True)
+    if "name" in upd and not (upd["name"] or "").strip():
+        raise DomainError("Название борта не может быть пустым")
+    if "status" in upd and upd["status"] is None:
+        raise DomainError("Укажите статус борта")
+    if upd.get("status") == "retired" and a.status != "retired":
+        busy = [i.component.serial for i in s.scalars(select(Installation).where(
+            Installation.aircraft_id == aid, Installation.removed_at.is_(None)))]
+        if busy:
+            raise DomainError(f"На борту установлены узлы ({', '.join(busy)}) — снимите их перед списанием борта, "
+                              "иначе они пропадут из учёта резерва")
+    for k, v in upd.items():
+        setattr(a, k, v.strip() if k == "name" else v)
     _commit(s)
     return {"ok": True}
 

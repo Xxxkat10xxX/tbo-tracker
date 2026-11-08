@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, File, UploadFile
 from fastapi.responses import Response
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_session
 from ..errors import DomainError, NotFound
-from ..models import Aircraft, LogImport, Mission, MissionRun
+from ..models import AIRCRAFT_STATUSES, Aircraft, LogImport, Mission, MissionRun
 from ..schemas import MissionEstimateIn, MissionIn, MissionRunIn
 from ..services import autopilot, logs
 from ..services.maintenance import due_items
@@ -43,7 +44,7 @@ def preflight(s: Session, a: Aircraft) -> list[str]:
     """Предполётная проверка допуска: статус, комплектность обязательных позиций, просроченные работы."""
     problems = []
     if a.status != "active":
-        problems.append(f"борт в статусе «{a.status}», а не «В эксплуатации»")
+        problems.append(f"борт в статусе «{AIRCRAFT_STATUSES.get(a.status, a.status)}», а не «В эксплуатации»")
     filled = {i.position for i in current_installations(s).values() if i.aircraft_id == a.id}
     empty = [sl["label"] for sl in a.type.slots or [] if sl.get("required", True) and sl["position"] not in filled]
     if empty:
@@ -131,6 +132,8 @@ def run_mission(mid: int, data: MissionRunIn, s: Session = Depends(get_session))
     a = s.get(Aircraft, aid)
     if a is None:
         raise NotFound("Борт не найден")
+    if data.fault_at_wp and data.fault_at_wp > len(m.waypoints or []):
+        raise DomainError(f"В миссии {len(m.waypoints or [])} точек — отказ у точки {data.fault_at_wp} задать нельзя")
     problems = preflight(s, a)
     if problems:
         raise DomainError(f"Предполётная проверка не пройдена — борт {a.name} не допущен к полёту: " + "; ".join(problems))
@@ -180,7 +183,12 @@ def export_mission(mid: int, fmt: str = "plan", firmware: str = "ardupilot", s: 
 @router.post("/missions/import", status_code=201)
 async def import_mission(file: UploadFile = File(...), s: Session = Depends(get_session)):
     data = autopilot.parse_mission_file(await file.read(), file.filename or "mission")
-    payload = MissionIn(**data)
+    try:
+        payload = MissionIn(**data)
+    except ValidationError as e:
+        err = e.errors()[0]
+        where = ".".join(str(x) for x in err["loc"])
+        raise DomainError(f"Миссия из файла не прошла проверку: {where} — {err['msg']}") from e
     m = Mission()
     _apply(m, payload, s)
     s.add(m)

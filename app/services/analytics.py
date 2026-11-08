@@ -139,8 +139,13 @@ def analytics(s: Session, now: datetime | None = None) -> dict:
             flights_90 += 1
     months = sorted(monthly)
     ac_names = {a.id: a.name for a in aircraft}
-    monthly_series = [{"month": m, "by_aircraft": {ac_names[a]: round(h, 1) for a, h in monthly[m].items()},
-                       "total": round(sum(monthly[m].values()), 1)} for m in months]
+    monthly_series = []
+    for m in months:
+        by_name = defaultdict(float)          # одинаковые названия бортов не затирают друг друга, а суммируются
+        for a, h in monthly[m].items():
+            by_name[ac_names[a]] += h
+        monthly_series.append({"month": m, "by_aircraft": {n: round(h, 1) for n, h in by_name.items()},
+                               "total": round(sum(monthly[m].values()), 1)})
 
     # --- 5. Сводные показатели
     status_counts = {"overdue": 0, "due_soon": 0, "ok": 0}
@@ -175,7 +180,7 @@ def analytics(s: Session, now: datetime | None = None) -> dict:
         "hidden_hours": hidden_rows,
         "prevented": prevented,
         "monthly": monthly_series,
-        "aircraft_names": [a.name for a in aircraft],
+        "aircraft_names": list(dict.fromkeys(a.name for a in aircraft)),
         "economics": economics_settings(s),
     }
     out["estimate"] = estimate(out["kpi"], out["economics"])

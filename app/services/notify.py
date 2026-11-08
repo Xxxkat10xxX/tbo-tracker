@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import Aircraft, NotificationEvent, SensorEvent
+from ..models import Aircraft, NotificationEvent, SensorEvent, Setting
 from ..timeutil import iso, utcnow
 from . import serverconf
 from .maintenance import due_items
@@ -30,6 +30,7 @@ CATEGORY_LABELS = {
 }
 ICONS = {"limit": "⛔", "overdue": "⚠️", "approaching": "⏳", "sensor": "💥"}
 SENSOR_WINDOW_DAYS = 90
+BASELINE_KEY = "notify_baseline"
 lock = threading.RLock()          # общая блокировка: проверка, рассылка, восстановление копии
 
 
@@ -72,7 +73,12 @@ def scan(s: Session, now: datetime | None = None) -> list[NotificationEvent]:
     """Обновляет журнал уведомлений. Возвращает новые (не «тихие») записи."""
     now = now or utcnow()
     with lock:
-        baseline = (s.scalar(select(func.count(NotificationEvent.id))) or 0) == 0
+        # «Тихое» первое заполнение — только один раз после создания базы (метка в settings), а не
+        # «пока журнал пуст»: иначе на новой пустой установке первое настоящее уведомление не разослалось бы
+        marker = s.get(Setting, BASELINE_KEY)
+        baseline = marker is None
+        if baseline:
+            s.add(Setting(key=BASELINE_KEY, value={"at": iso(now)}))
         open_ = {e.key: e for e in s.scalars(select(NotificationEvent).where(NotificationEvent.resolved_at.is_(None)))}
         cur = current(s, now)
         new = []
@@ -151,9 +157,15 @@ def deliver_pending(s: Session, conf: dict | None = None) -> dict:
         now = utcnow()
         wanted = [e for e in pending if e.category in conf["categories"] and e.created_at >= now - timedelta(days=1)]
         res = send([event_dict(e) for e in wanted], conf) if wanted else {}
+        failed = bool(res) and not any(str(v).startswith("ok") for v in res.values())
         for e in pending:
+            if e in wanted:
+                e.delivery = res
+                if failed:          # нет связи / ошибка канала — повторим при следующей проверке (в течение суток)
+                    continue
+            else:
+                e.delivery = {}
             e.delivered_at = now
-            e.delivery = res if e in wanted else {}
         s.commit()
         return res
 

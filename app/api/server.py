@@ -6,12 +6,12 @@ from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Query, UploadFile
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import Field
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal, get_session
 from ..errors import DomainError
-from ..schemas import EconomicsIn
+from ..schemas import BaseModel, EconomicsIn
 from ..services import backup, board, notify, scenarios, scheduler, serverconf, sysinfo
 from ..services.analytics import analytics, estimate
 

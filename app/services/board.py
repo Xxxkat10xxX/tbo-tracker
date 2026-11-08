@@ -35,7 +35,7 @@ def plan(s: Session, component_id: int, target: dict) -> dict:
     kind = target.get("kind")
     steps: list[dict] = []
     if kind == "slot":
-        ta = s.get(Aircraft, target.get("aircraft_id"))
+        ta = s.get(Aircraft, target["aircraft_id"]) if target.get("aircraft_id") else None
         if ta is None:
             raise NotFound("Борт не найден")
         pos = str(target.get("position") or "")

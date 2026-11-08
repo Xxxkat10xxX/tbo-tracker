@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
@@ -70,6 +71,13 @@ async def basic_auth(request: Request, call_next):
                         headers={"WWW-Authenticate": 'Basic realm="tbo-tracker", charset="UTF-8"'},
                         media_type="text/plain; charset=utf-8")
     return await call_next(request)
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_error_handler(_req: Request, exc: RequestValidationError):
+    """422 без эха входных значений: NaN/Infinity во входе иначе ломают сериализацию ответа (500)."""
+    return JSONResponse(status_code=422, content={"detail": [
+        {"loc": list(e.get("loc", [])), "msg": e.get("msg", ""), "type": e.get("type", "")} for e in exc.errors()]})
 
 
 @app.exception_handler(DomainError)

@@ -111,30 +111,71 @@ def event_dict(e: SensorEvent) -> dict:
             "details": e.details}
 
 
-def events_for_flight(flight_start: datetime, raw: dict | None) -> list[dict]:
-    """Из записи полёта журнала: imu-выборка и/или готовые события бортового ПО."""
+def _num(v, what: str) -> float:
+    try:
+        x = float(v)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{what}: ожидается число, получено «{str(v)[:30]}»") from None
+    if math.isnan(x) or math.isinf(x):
+        raise ValueError(f"{what}: недопустимое значение {v}")
+    return x
+
+
+def events_for_flight(flight_start: datetime, raw: dict | None, flight_end: datetime | None = None) -> list[dict]:
+    """Из записи полёта журнала: imu-выборка и/или готовые события бортового ПО.
+
+    Некорректные данные датчиков → ValueError с понятным текстом (полёт при этом учитывается,
+    импорт выводит предупреждение). Время события ограничивается интервалом полёта.
+    """
     if not raw:
         return []
+    span = (flight_end - flight_start).total_seconds() if flight_end else None
+    clamp = (lambda sec: min(max(0.0, sec), span)) if span is not None else (lambda sec: max(0.0, sec))  # noqa: E731
     out = []
     imu = raw.get("imu")
+    if imu is not None and not isinstance(imu, dict):
+        raise ValueError("поле imu должно быть объектом {rate_hz, t0_s, accel_g}")
     if isinstance(imu, dict) and imu.get("accel_g"):
-        rate = float(imu.get("rate_hz") or 50)
-        t0 = float(imu.get("t0_s") or 0)          # выборка может покрывать окно внутри полёта
-        for ev in detect(imu["accel_g"], rate):
-            out.append({"at": flight_start + timedelta(seconds=t0 + ev["t"]), "kind": ev["kind"], "peak_g": ev["peak_g"],
+        rate = _num(imu.get("rate_hz") or 50, "imu.rate_hz")
+        if not 1 <= rate <= 10000:
+            raise ValueError("imu.rate_hz вне диапазона 1–10000 Гц")
+        t0 = _num(imu.get("t0_s") or 0, "imu.t0_s")
+        samples = imu["accel_g"]
+        if not isinstance(samples, list):
+            raise ValueError("imu.accel_g должно быть массивом")
+        if len(samples) > 2_000_000:
+            raise ValueError("imu.accel_g: слишком много отсчётов (более 2 млн)")
+        try:
+            found = detect(samples, rate)
+        except (TypeError, ValueError, OverflowError):
+            raise ValueError("imu.accel_g: отсчёты должны быть числами или тройками чисел [ax, ay, az]") from None
+        for ev in found:
+            out.append({"at": flight_start + timedelta(seconds=clamp(t0 + ev["t"])), "kind": ev["kind"], "peak_g": ev["peak_g"],
                         "source": "imu", "details": f"анализ акселерометра, {rate:g} Гц"})
-    for ev in raw.get("events") or []:
+    events = raw.get("events") or []
+    if not isinstance(events, list):
+        raise ValueError("поле events должно быть массивом")
+    for ev in events:
+        if not isinstance(ev, dict):
+            raise ValueError("элементы events должны быть объектами {type, t_s, peak_g}")
         kind = {"fall": "fall", "падение": "fall", "collision": "collision", "столкновение": "collision"}.get(str(ev.get("type", "")).lower())
         if not kind:
             continue
-        off = float(ev.get("t_s") or 0)
-        out.append({"at": flight_start + timedelta(seconds=off), "kind": kind, "peak_g": ev.get("peak_g"),
+        off = clamp(_num(ev.get("t_s") or 0, "events.t_s"))
+        peak = ev.get("peak_g")
+        peak = None if peak in (None, "") else round(_num(peak, "events.peak_g"), 2)
+        out.append({"at": flight_start + timedelta(seconds=off), "kind": kind, "peak_g": peak,
                     "source": "log", "details": "событие бортового журнала"})
     for key, kind in (("collisions", "collision"), ("falls", "fall")):   # счётчики из CSV/Excel
+        v = raw.get(key)
+        if v in (None, ""):
+            continue
         try:
-            n = int(float(raw.get(key) or 0))
-        except (TypeError, ValueError):
-            n = 0
-        for _ in range(max(0, min(n, 50))):
+            n = int(_num(v, key))
+        except ValueError:
+            raise ValueError(f"колонка «{'Столкновения' if key == 'collisions' else 'Падения'}»: ожидается число, получено «{str(v)[:30]}»") from None
+        if n < 0 or n > 50:
+            raise ValueError(f"{'столкновений' if key == 'collisions' else 'падений'} за полёт: {n} — допустимо 0–50")
+        for _ in range(n):
             out.append({"at": flight_start, "kind": kind, "peak_g": None, "source": "log", "details": "счётчик в журнале"})
     return out

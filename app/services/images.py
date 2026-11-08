@@ -85,7 +85,10 @@ def validate_url(url: str | None) -> str | None:
         return None
     if url in PRESET_URLS:
         return url
-    if url.startswith("/media/") and "/" not in url[7:] and (UPLOADS_DIR / url[7:]).is_file():
+    name = url[7:] if url.startswith("/media/") else ""
+    # только сами фото: служебный index.json и прочие файлы каталога картинкой быть не могут
+    if name and "/" not in name and "\\" not in name and Path(name).suffix in (".png", ".jpg", ".webp") \
+            and (UPLOADS_DIR / name).is_file():
         return url
     raise DomainError("Неизвестная картинка: выберите из набора или загрузите фото")
 

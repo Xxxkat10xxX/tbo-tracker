@@ -2,7 +2,13 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel as _PydanticModel
+from pydantic import ConfigDict, Field
+
+
+class BaseModel(_PydanticModel):
+    """Общая база входных схем: NaN и бесконечность в числах не принимаются (иначе ломают расчёты и JSON)."""
+    model_config = ConfigDict(allow_inf_nan=False)
 
 
 class AircraftIn(BaseModel):

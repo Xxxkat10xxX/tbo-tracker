@@ -157,11 +157,22 @@ def _validate(rows, aircraft_by_serial, now):
                 raise ValueError("полёт датирован будущим временем")
             if start < ac.in_service_at:
                 raise ValueError(f"полёт раньше ввода борта {ac.serial} в эксплуатацию")
-            cycles = 1 if r["cycles"] in (None, "") else int(float(r["cycles"]))
-            if cycles < 0 or cycles > 1000:
-                raise ValueError("некорректное число циклов")
+            try:
+                cyc = 1.0 if r["cycles"] in (None, "") else float(r["cycles"])
+            except (TypeError, ValueError, OverflowError):
+                raise ValueError(f"некорректное число циклов «{str(r['cycles'])[:20]}»") from None
+            if cyc != cyc or cyc < 0 or cyc > 1000 or cyc != int(cyc):
+                raise ValueError("число циклов должно быть целым от 0 до 1000")
+            cycles = int(cyc)
+            for fld, limit in (("mission", 300), ("pilot", 200)):
+                if r[fld] is not None and not isinstance(r[fld], (str, int, float)):
+                    raise ValueError(f"поле {fld} должно быть строкой")
+                r[fld] = None if r[fld] in (None, "") else str(r[fld])[:limit]
         except ValueError as e:
             errors.append(f"{where}: {e}")
+            continue
+        if r["flight_id"] and len(r["flight_id"]) > 200:
+            errors.append(f"{where}: flight_id длиннее 200 символов")
             continue
         ext = r["flight_id"] or "auto-" + hashlib.sha1(
             f"{ac.serial}|{start.isoformat()}|{end.isoformat()}".encode()).hexdigest()[:16]
@@ -174,8 +185,13 @@ def import_log(s: Session, content: bytes, filename: str, imported_by: str | Non
     """Импорт журнала в рамках текущей транзакции. При dry_run изменения откатываются вызывающим кодом."""
     now = utcnow()
     sha = hashlib.sha256(content).hexdigest()
-    prev = s.scalar(select(LogImport).where(LogImport.sha256 == sha, LogImport.status.in_(("imported", "partial")))
-                    .order_by(LogImport.id).limit(1))
+    # Файл целиком — повтор, только если в прошлый раз в нём не было отклонённых строк. Иначе (частичный
+    # импорт с ошибками) файл обрабатывается снова: после исправления данных (зарегистрировали борт или узел)
+    # применяются ранее отклонённые строки, а уже учтённые полёты и операции отсекает защита на уровне строк.
+    prev = s.scalar(select(LogImport).where(
+        LogImport.sha256 == sha,
+        (LogImport.status == "imported") | ((LogImport.status == "partial") & (LogImport.flights_rejected == 0)))
+        .order_by(LogImport.id).limit(1))
     if prev is not None:
         imp = LogImport(filename=filename, sha256=sha, format=prev.format, status="duplicate",
                         imported_at=now, imported_by=imported_by, duplicate_of_id=prev.id,
@@ -264,7 +280,12 @@ def import_log(s: Session, content: bytes, filename: str, imported_by: str | Non
                    mission=r["mission"], pilot=r["pilot"])
         s.add(f)
         s.flush()
-        for ev in sensors.events_for_flight(start, r.get("extra")):
+        try:
+            evs = sensors.events_for_flight(start, r.get("extra"), end)
+        except ValueError as e:
+            evs = []
+            messages.append(f"запись {r['line']}: данные датчиков не учтены — {e}")
+        for ev in evs:
             se = SensorEvent(flight_id=f.id, aircraft_id=ac.id, occurred_at=ev["at"], kind=ev["kind"],
                              peak_g=ev["peak_g"], source=ev["source"], details=ev["details"])
             s.add(se)

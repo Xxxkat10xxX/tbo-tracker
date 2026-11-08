@@ -251,6 +251,15 @@ def to_waypoints(m: dict) -> str:
 
 def parse_mission_file(content: bytes, filename: str) -> dict:
     """QGroundControl .plan или .waypoints (QGC WPL 110) → поля миссии."""
+    try:
+        return _parse_mission_file(content, filename)
+    except DomainError:
+        raise
+    except (TypeError, ValueError, IndexError, AttributeError, KeyError, OverflowError) as e:
+        raise DomainError(f"Файл миссии повреждён или заполнен неверно: {e}") from e
+
+
+def _parse_mission_file(content: bytes, filename: str) -> dict:
     text = content.decode("utf-8-sig", errors="replace").strip()
     wps, home, rtl, speed = [], None, False, None
     if text.startswith("{"):
@@ -259,7 +268,11 @@ def parse_mission_file(content: bytes, filename: str) -> dict:
             mi = plan["mission"]
         except (json.JSONDecodeError, KeyError, TypeError) as e:
             raise DomainError("Не похоже на файл QGroundControl .plan") from e
+        if not isinstance(mi, dict) or not isinstance(mi.get("items", []), list):
+            raise DomainError("Не похоже на файл QGroundControl .plan")
         hp = mi.get("plannedHomePosition") or [None, None]
+        if not isinstance(hp, list) or len(hp) < 2:
+            hp = [None, None]
         home = (hp[0], hp[1])
         speed = mi.get("cruiseSpeed")
         for it in mi.get("items", []):
@@ -267,7 +280,7 @@ def parse_mission_file(content: bytes, filename: str) -> dict:
                 continue
             cmd, p = it.get("command"), it.get("params") or []
             if cmd == CMD_WAYPOINT and len(p) >= 7:
-                wps.append({"lat": p[4], "lon": p[5], "alt": p[6], "hold_s": p[0] or 0})
+                wps.append({"lat": float(p[4]), "lon": float(p[5]), "alt": float(p[6]), "hold_s": float(p[0] or 0)})
             elif cmd == CMD_RTL:
                 rtl = True
     elif text.startswith("QGC WPL"):
@@ -275,7 +288,7 @@ def parse_mission_file(content: bytes, filename: str) -> dict:
             c = line.split("\t") if "\t" in line else line.split()
             if len(c) < 12:
                 continue
-            cmd, p1, lat, lon, alt = int(c[3]), float(c[4]), float(c[8]), float(c[9]), float(c[10])
+            cmd, p1, lat, lon, alt = int(float(c[3])), float(c[4]), float(c[8]), float(c[9]), float(c[10])
             if i == 0:
                 home = (lat, lon)
             elif cmd == CMD_WAYPOINT:
