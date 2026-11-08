@@ -741,19 +741,36 @@ async function pageBoard() {
       title = `Снятие ${c.serial} с ${src.a.name} · ${src.sl.position} → ${kind === "stock" ? "резерв" : "ремонт"}`;
     }
     const OPL = { install: "Установка", remove: "Снятие", transfer: "Перестановка" };
+    const defaultAt = toLocalInput(new Date());
     modal("Подтверждение операции с узлом", `<p><b>${esc(title)}</b></p>
       <ol class="small">${plan.map((p) => `<li>${OPL[p.op]} ${esc(p.c.serial)}${p.op === "remove" ? ` → ${p.to === "stock" ? "резерв" : "ремонт"}` : ` → ${esc(p.a.name)} · ${esc(p.pos)}`}</li>`).join("")}</ol>
-      <div class="row2"><div class="field"><label>Дата и время операции</label><input type="datetime-local" name="at" value="${toLocalInput(new Date())}"></div>
+      <div class="row2"><div class="field"><label>Дата и время операции</label><input type="datetime-local" name="at" value="${defaultAt}"></div>
       <div class="field"><label>Исполнитель</label><input name="by" placeholder="ФИО"></div></div>
       <div class="field"><label>Основание</label><input name="reason" placeholder="напр. замена по результатам диагностики"></div>
       <div class="hint">Если указать прошедшую дату, полёты после неё будут отнесены к новой установке, и наработка узлов пересчитается.</div>`, {
       okText: "Выполнить", onOk: async (root) => {
-        const at = new Date(val(root, "at")), by = val(root, "by") || null, reason = val(root, "reason") || null;
+        const raw = val(root, "at"), by = val(root, "by") || null, reason = val(root, "reason") || null;
+        if (!raw) throw new Error("Укажите дату и время операции");
         const before = {};
         for (const p of plan) before[p.c.id] = await GET(`/api/components/${p.c.id}`);
+        // Операция не может быть раньше последней установки/снятия задействованных узлов
+        let last = 0, lastSerial = "";
+        for (const c of Object.values(before)) for (const st of c.stints || []) for (const d of [st.installed_at, st.removed_at]) {
+          const ms = d ? Date.parse(d) : 0;
+          if (ms > last) { last = ms; lastSerial = c.serial; }
+        }
+        const minAt = Math.floor(last / 1000) * 1000 + 1000;
+        let at;
+        if (raw === defaultAt) {
+          // дата не менялась — «сейчас» с точностью до секунды, но не раньше предыдущей операции
+          at = Math.max(Math.floor(Date.now() / 1000) * 1000, minAt);
+        } else {
+          at = new Date(raw).getTime();
+          if (at < minAt) throw new Error(`Дата операции раньше последней операции с узлом ${lastSerial} (${fmtDT(new Date(last).toISOString())}). Укажите более позднюю дату.`);
+        }
         const msgs = [];
         for (let i = 0; i < plan.length; i++) {
-          const p = plan[i], when = new Date(at.getTime() + i * 60000).toISOString();
+          const p = plan[i], when = new Date(at + i * 1000).toISOString();
           try {
             const r = p.op === "remove"
               ? await POST(`/api/components/${p.c.id}/remove`, { at: when, to_status: p.to, reason, performed_by: by })
@@ -1905,7 +1922,7 @@ async function runS9() {
   const c1 = a1.slots.find((s) => s.position === "ESC1").component, c2 = a2.slots.find((s) => s.position === "ESC1").component;
   if (!c1 || !c2) throw new Error("Позиции ESC1 не укомплектованы — сбросьте демо-данные");
   const before = await Promise.all([c1, c2].map((c) => GET(`/api/components/${c.id}`)));
-  const t0 = Date.now(), at = (k) => new Date(t0 + k * 60000).toISOString(), why = "Демо-сценарий 9: обмен ESC1 между бортами";
+  const t0 = Math.floor(Date.now() / 1000) * 1000, at = (k) => new Date(t0 + k * 1000).toISOString(), why = "Демо-сценарий 9: обмен ESC1 между бортами";
   await POST(`/api/components/${c2.id}/remove`, { at: at(0), to_status: "stock", reason: why });
   await POST(`/api/components/${c1.id}/transfer`, { aircraft_id: a2.id, position: "ESC1", at: at(1), reason: why });
   await POST(`/api/components/${c2.id}/install`, { aircraft_id: a1.id, position: "ESC1", at: at(2), reason: why });
