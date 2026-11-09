@@ -26,6 +26,7 @@ FRAME_REL_ALT = 3          # MAV_FRAME_GLOBAL_RELATIVE_ALT
 DT = 0.2                   # шаг интегрирования, с
 IMU_HZ = 25
 CLIMB, DESCENT, ACCEL = 2.5, 1.5, 2.0     # м/с, м/с, м/с²
+TILT_ACC = 5.0             # предел горизонтального ускорения по крену (~27°), м/с²: ведение + компенсация ветра
 ACCEPT_R = 3.0             # радиус принятия точки, м
 PHASES = {"preflight": "Предполётная проверка", "takeoff": "Взлёт", "mission": "Полёт по маршруту",
           "hold": "Удержание", "rtl": "Возврат домой", "land": "Посадка", "crash": "Аварийное завершение"}
@@ -141,8 +142,14 @@ def simulate(m: dict, wind_ms: float = 3.0, wind_from_deg: float = 250.0, fault_
             if a_mag > ACCEL:
                 ax_, ay_ = ax_ * ACCEL / a_mag, ay_ * ACCEL / a_mag
             gust = 0.35 * math.sin(t * 0.7) + 0.2 * math.sin(t * 1.9)
-            vx += ax_ * DT + (wx * 0.04 + gust * 0.05) * DT * 5
-            vy += ay_ * DT + (wy * 0.04 - gust * 0.04) * DT * 5
+            px, py = wx * 0.2 + gust * 0.25, wy * 0.2 - gust * 0.2      # снос ветром, м/с²
+            # автопилот знает оценку постоянного ветра и парирует её креном; порывы отрабатывает ведение
+            cx_, cy_ = ax_ - wx * 0.2, ay_ - wy * 0.2
+            c_mag = math.hypot(cx_, cy_)
+            if c_mag > TILT_ACC:
+                cx_, cy_ = cx_ * TILT_ACC / c_mag, cy_ * TILT_ACC / c_mag
+            vx += (cx_ + px) * DT
+            vy += (cy_ + py) * DT
             x += vx * DT
             y += vy * DT
             z += max(-CLIMB * DT, min(CLIMB * DT, talt - z))
