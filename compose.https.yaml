@@ -1,0 +1,41 @@
+# HTTPS через Caddy: сертификат Let's Encrypt для домена (TBO_TLS=acme) или собственный УЦ Caddy для
+# локальной сети (TBO_TLS=internal). В .env: TBO_DOMAIN=tbo.example.com
+#   docker compose -f compose.yaml [-f compose.postgres.yaml] -f compose.https.yaml up -d --build
+services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      app: { condition: service_healthy }
+    environment:
+      TBO_DOMAIN: ${TBO_DOMAIN:?Задайте TBO_DOMAIN в .env (например tbo.example.com)}
+      TBO_TLS: ${TBO_TLS:-acme}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./deploy/docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+    networks:
+      tbo:
+        ipv4_address: ${TBO_PROXY_IP:-172.31.250.10}
+
+  app:
+    environment:
+      TBO_PUBLIC_URL: https://${TBO_DOMAIN}
+      TBO_TRUSTED_PROXIES: ${TBO_PROXY_IP:-172.31.250.10}
+
+volumes:
+  caddy-data:
+  caddy-config:

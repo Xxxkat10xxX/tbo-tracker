@@ -1,0 +1,13 @@
+/* tbo-tracker · служебные классы вместо inline-стилей (строгая Content-Security-Policy: style-src 'self') */
+.w-auto { width: auto; } .w-40 { width: 40px; } .w-84 { width: 84px; }
+.minw-150 { min-width: 150px; } .minw-220 { min-width: 220px; } .maxw-220 { max-width: 220px; }
+.c-bad { color: var(--bad); } .c-warn { color: var(--warn); } .c-ok { color: var(--ok); } .c-white { color: #fff; }
+.m-0 { margin: 0; } .mb-0 { margin-bottom: 0; } .my-8 { margin: 8px 0; } .ml-auto { margin-left: auto; }
+.mt-4 { margin-top: 4px; } .mt-6 { margin-top: 6px; } .mt-8 { margin-top: 8px; } .mt-10 { margin-top: 10px; }
+.mt-12 { margin-top: 12px; } .mt-14 { margin-top: 14px; } .mt-18 { margin-top: 18px; } .mtn-6 { margin-top: -6px; }
+.mb-8 { margin-bottom: 8px; } .mb-10 { margin-bottom: 10px; }
+.m-section { margin: 22px 0 10px; } .m-hint { margin: -6px 0 10px; }
+.fs-15 { font-size: 15px; } .fs-16 { font-size: 16px; } .fs-26 { font-size: 26px; } .pt-4 { padding-top: 4px; }
+.ta-c { text-align: center; } .p-12 { padding: 12px; }
+.scroll-box { max-height: 360px; overflow: auto; background: #f7f9fc; padding: 10px; border-radius: 8px; }
+[hidden] { display: none !important; }

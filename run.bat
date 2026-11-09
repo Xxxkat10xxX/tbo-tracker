@@ -21,9 +21,13 @@ echo Устанавливаю зависимости...
 ".venv\Scripts\python.exe" -m pip install -q --disable-pip-version-check -r requirements.txt || (pause & exit /b 1)
 
 if "%PORT%"=="" set "PORT=8000"
+if "%TBO_DEMO_MODE%"=="" set "TBO_DEMO_MODE=1"
+set "TBO_HOST=127.0.0.1"
+set "TBO_PORT=%PORT%"
 echo.
 echo Сервер запускается: http://localhost:%PORT%   (остановить: Ctrl+C)
+echo При первом запуске ниже появится одноразовый КОД НАСТРОЙКИ - введите его в браузере и создайте администратора.
 echo.
 start "" "http://localhost:%PORT%"
-".venv\Scripts\python.exe" -m uvicorn app.main:app --port %PORT%
+".venv\Scripts\python.exe" -m app.serve
 pause

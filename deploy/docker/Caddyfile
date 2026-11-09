@@ -1,0 +1,30 @@
+# Caddy — HTTPS для tbo-tracker. Домен и способ выпуска сертификата — из переменных TBO_DOMAIN и TBO_TLS (acme | internal).
+{
+	# в контейнере системного хранилища сертификатов нет; корневой сертификат internal — в томе caddy-data
+	skip_install_trust
+}
+
+(tls_acme) {
+	# сертификат Let's Encrypt выпускается автоматически (порты 80 и 443 должны быть доступны из интернета)
+}
+
+(tls_internal) {
+	# собственный удостоверяющий центр Caddy — для локальной сети без публичного домена
+	tls internal
+}
+
+{$TBO_DOMAIN} {
+	import tls_{$TBO_TLS}
+	encode zstd gzip
+	request_body {
+		max_size 600MB
+	}
+	reverse_proxy app:8000
+	header {
+		-Server
+	}
+	log {
+		output stdout
+		format console
+	}
+}

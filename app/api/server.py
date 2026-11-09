@@ -10,7 +10,7 @@ from pydantic import Field
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal, get_session
-from ..errors import DomainError
+from ..errors import DomainError, require_demo_mode
 from ..schemas import BaseModel, EconomicsIn
 from ..services import backup, board, notify, scenarios, scheduler, serverconf, sysinfo
 from ..services.analytics import analytics, estimate
@@ -54,11 +54,13 @@ def board_move(data: MoveIn, s: Session = Depends(get_session)):
 # ---------------------------------------------------------------- демо-сценарии
 @router.get("/scenarios")
 def scenario_list():
+    require_demo_mode()
     return [{"n": n, "title": t} for n, t in scenarios.TITLES.items()]
 
 
 @router.post("/scenarios/{n}/run")
 def scenario_run(n: int, s: Session = Depends(get_session)):
+    require_demo_mode()
     return scenarios.run(s, n)
 
 
@@ -130,12 +132,16 @@ def server_settings():
 
 @router.put("/server/settings")
 def server_settings_put(data: ServerSettingsIn):
+    # всё проверяем до записи: отклонённый запрос не должен менять сохранённые настройки
     if data.webhook.enabled and not data.webhook.url.startswith(("http://", "https://")):
         raise DomainError("Адрес webhook должен начинаться с http:// или https://")
-    conf = serverconf.save(data.model_dump())
-    if data.telegram.enabled and not (conf["telegram"]["token"] and conf["telegram"]["chat_id"]):
-        raise DomainError("Для Telegram нужны токен бота и chat_id")
-    return serverconf.masked(conf)
+    if data.public_url and not data.public_url.startswith(("http://", "https://")):
+        raise DomainError("Адрес сайта должен начинаться с http:// или https://")
+    if data.telegram.enabled:
+        new_token = data.telegram.token if data.telegram.token and not data.telegram.token.startswith("•") else ""
+        if not ((new_token or serverconf.load()["telegram"]["token"]) and data.telegram.chat_id):
+            raise DomainError("Для Telegram нужны токен бота и chat_id")
+    return serverconf.masked(serverconf.save(data.model_dump()))
 
 
 @router.post("/server/notify/test")

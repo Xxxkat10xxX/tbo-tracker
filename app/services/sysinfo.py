@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from ..config import DATA_DIR, VERSION
+from ..config import DATA_DIR, DEMO_MODE, PUBLIC_URL, VERSION
 
 _STARTED = time.time()
 THROTTLE_BITS = {
@@ -98,11 +98,12 @@ def status() -> dict:
     up = _read("/proc/uptime")
     model = _read("/proc/device-tree/model")
     mem = _meminfo()
-    port = os.environ.get("TBO_PORT", "8000")
+    from ..config import PORT
+    port = str(PORT)
     host = socket.gethostname()
     suffix = "" if port in ("80", "") else f":{port}"
-    from ..config import DATABASE_URL
-    db = Path(DATABASE_URL.removeprefix("sqlite:///")) if DATABASE_URL.startswith("sqlite:///") else None
+    from ..db import engine
+    db = Path(engine.url.database) if engine.url.get_backend_name() == "sqlite" and engine.url.database else None
     db_files = [Path(f"{db}{suf}") for suf in ("", "-wal", "-shm")] if db else []
     backups = list_backups()
     warnings = []
@@ -117,12 +118,16 @@ def status() -> dict:
         warnings.append("Данные на microSD-карте. Для круглосуточной работы рекомендуется SSD (M.2 HAT+ или USB 3) и регулярные резервные копии.")
     if stg["free"] < 1 << 30:
         warnings.append("На диске меньше 1 ГБ свободного места")
+    if not PUBLIC_URL.startswith("https://"):
+        warnings.append("Доступ без HTTPS: пароли и данные передаются по сети открыто. Для сервера настройте HTTPS "
+                        "(Caddy — docs/DEPLOY.md) и задайте TBO_PUBLIC_URL=https://…")
     if mem.get("MemAvailable") and mem["MemAvailable"] < 200 << 20:
         warnings.append("Мало свободной оперативной памяти")
     return {
         "app": {"version": VERSION, "python": sys.version.split()[0], "pid": os.getpid(),
                 "uptime_s": int(time.time() - _started()), "data_dir": str(DATA_DIR),
-                "auth": bool(os.environ.get("TBO_AUTH_PASSWORD")), "auth_user": os.environ.get("TBO_AUTH_USER", "admin")},
+                "database": _db_kind(), "demo_mode": DEMO_MODE, "public_url": PUBLIC_URL or None,
+                "https": PUBLIC_URL.startswith("https://")},
         "host": {"model": model or platform.machine(), "hostname": host, "os": _os_name(), "kernel": platform.release(),
                  "arch": platform.machine(), "cpus": os.cpu_count(), "load": [round(x, 2) for x in os.getloadavg()] if hasattr(os, "getloadavg") else None,
                  "uptime_s": int(float(up.split()[0])) if up else None, "cpu_temp_c": t, "throttled": thr,
@@ -132,10 +137,15 @@ def status() -> dict:
         "storage": stg,
         "data": {"db_bytes": sum(f.stat().st_size for f in db_files if f.exists()), "uploads_bytes": _dir_size(DATA_DIR / "uploads"),
                  "backups_bytes": _dir_size(BACKUP_DIR), "backups": len(backups), "last_backup": backups[0] if backups else None},
-        "urls": [f"http://{host}.local{suffix}"] + [f"http://{a}{suffix}" for a in _addresses()],
+        "urls": [PUBLIC_URL] if PUBLIC_URL else [f"http://{host}.local{suffix}"] + [f"http://{a}{suffix}" for a in _addresses()],
         "warnings": warnings,
     }
 
 
 def _started() -> float:
     return _STARTED
+
+
+def _db_kind() -> str:
+    from ..db import engine
+    return {"sqlite": "SQLite", "postgresql": "PostgreSQL"}.get(engine.url.get_backend_name(), engine.url.get_backend_name())

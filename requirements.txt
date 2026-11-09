@@ -1,7 +1,10 @@
-fastapi>=0.110
-uvicorn>=0.29
-sqlalchemy>=2.0
-python-multipart>=0.0.9
-openpyxl>=3.1
-pdfplumber>=0.11
-reportlab>=4.0
+# Зависимости приложения (диапазоны). Точные версии для развёртывания — requirements.lock
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+sqlalchemy>=2.0.30,<2.2
+python-multipart>=0.0.18
+openpyxl>=3.1,<4
+pdfplumber>=0.11,<1
+reportlab>=4.0,<5
+argon2-cffi>=23.1,<26
+psycopg[binary]>=3.2,<4

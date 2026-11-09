@@ -352,3 +352,56 @@ class NotificationEvent(Base):
     silent: Mapped[bool] = mapped_column(Boolean, default=False)     # первичное заполнение — без рассылки
     delivered_at: Mapped[datetime | None] = mapped_column(DateTime)
     delivery: Mapped[dict | None] = mapped_column(JSON)
+
+
+# ---------------------------------------------------------------- доступ: пользователи, сессии, аудит
+ROLES = {"admin": "Администратор", "engineer": "Инженер", "viewer": "Наблюдатель"}
+
+
+class User(Base):
+    """Учётная запись. Пароль хранится только как хеш Argon2id (с солью и параметрами внутри строки)."""
+
+    __tablename__ = "users"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)     # в нижнем регистре
+    display_name: Mapped[str] = mapped_column(String(200))
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(20), default="viewer")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False)
+    failed_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime)
+    lock_count: Mapped[int] = mapped_column(Integer, default=0)      # для удваивания срока блокировки
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
+    password_changed_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class AuthSession(Base):
+    """Сессия входа. В базе хранится только SHA-256 от токена cookie — утечка базы не даёт войти."""
+
+    __tablename__ = "auth_sessions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), index=True)
+    csrf_token: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    ip: Mapped[str | None] = mapped_column(String(64))
+    user_agent: Mapped[str | None] = mapped_column(String(300))
+    user: Mapped[User] = relationship(lazy="joined")
+
+
+class AuditLog(Base):
+    """Журнал безопасности и изменений: входы, учётные записи, все изменяющие запросы к API."""
+
+    __tablename__ = "audit_log"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    username: Mapped[str | None] = mapped_column(String(64), index=True)
+    ip: Mapped[str | None] = mapped_column(String(64))
+    action: Mapped[str] = mapped_column(String(64), index=True)
+    target: Mapped[str | None] = mapped_column(String(300))
+    status: Mapped[int | None] = mapped_column(Integer)
+    details: Mapped[str | None] = mapped_column(Text)

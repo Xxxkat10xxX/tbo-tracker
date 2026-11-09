@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# tbo-ctl — управление сервисом tbo-tracker на Raspberry Pi. Справка: sudo tbo-ctl help
 # shellcheck disable=SC1090  # источник настроек — /etc/tbo-tracker/tbo.env
+# tbo-ctl — управление сервисом tbo-tracker на Raspberry Pi. Справка: sudo tbo-ctl help
 set -euo pipefail
 
 APP_DIR=/opt/tbo-tracker
@@ -16,19 +16,26 @@ help() {
   cat <<'EOF'
 tbo-ctl — управление tbo-tracker
 
-  status               состояние сервиса и Raspberry Pi (температура, питание, память, диск, адреса)
-  logs                 журнал сервиса в реальном времени (Ctrl+C — выход)
+  status                     состояние сервиса и Raspberry Pi (температура, питание, память, диск, адреса)
+  logs                       журнал сервиса в реальном времени (Ctrl+C — выход)
   start | stop | restart
-  backup               резервная копия сейчас (база + фото)
-  backups              список копий
-  restore ИМЯ|ПУТЬ.zip восстановление из копии (сервис останавливается на время операции)
-  update               обновить из git (перед обновлением — резервная копия)
-  password [ПАРОЛЬ]    задать/сменить пароль входа (без аргумента — спросит)
-  nopassword           отключить вход по паролю
-  port N               сменить порт веб-интерфейса
-  reset-demo           пересоздать демо-данные (все изменения будут потеряны)
-  notify-test          тестовое сообщение в Telegram / webhook
-  uninstall [--purge]  удалить сервис (--purge — вместе с данными и настройками)
+
+  user list                  учётные записи
+  user add ИМЯ [РОЛЬ]        создать пользователя (роль: admin | engineer | viewer, по умолчанию engineer);
+                             пароль вводится скрыто, пользователь сменит его при первом входе
+  user passwd ИМЯ            задать новый пароль (если забыт); --temporary — сменить при входе
+  user unlock ИМЯ            снять блокировку после неудачных попыток входа
+  user disable ИМЯ | enable ИМЯ
+  setup-code                 одноразовый код первичной настройки (если учётных записей ещё нет)
+
+  backup | backups           резервная копия сейчас / список копий
+  restore ИМЯ|ПУТЬ.zip       восстановление из копии (сервис останавливается на время операции)
+  update                     обновить из git (перед обновлением — резервная копия)
+  port N                     сменить порт веб-интерфейса (без HTTPS)
+  https-ca                   корневой сертификат HTTPS (Caddy) — установить на компьютеры и телефоны
+  reset-demo                 пересоздать демо-данные (только в демо-режиме)
+  notify-test                тестовое сообщение в Telegram / webhook
+  uninstall [--purge]        удалить сервис (--purge — вместе с данными и настройками)
 EOF
 }
 
@@ -38,7 +45,8 @@ EOF
 
 envget() { (set -a; . "$ENV_FILE"; eval "echo \"\${$1:-}\""); }
 admin() {
-  runuser -u "$SVC_USER" -- bash -c 'set -a; . "$0"; set +a; cd /opt/tbo-tracker; exec .venv/bin/python -m app.admin "$@"' "$ENV_FILE" "$@"
+  # shellcheck disable=SC2016  # переменные раскрывает внутренний bash
+  runuser -u "$SVC_USER" -- bash -c 'umask 077; set -a; . "$0"; set +a; cd /opt/tbo-tracker; exec .venv/bin/python -m app.admin "$@"' "$ENV_FILE" "$@"
 }
 setenv() {   # setenv КЛЮЧ ЗНАЧЕНИЕ — значение без одинарных кавычек
   local key=$1 val=$2
@@ -49,13 +57,23 @@ setenv() {   # setenv КЛЮЧ ЗНАЧЕНИЕ — значение без од
   fi
 }
 url() {
-  local p; p=$(envget TBO_PORT)
+  local pub p
+  pub=$(envget TBO_PUBLIC_URL)
+  if [[ -n $pub ]]; then echo "$pub"; return; fi
+  p=$(envget TBO_PORT)
   [[ $p == 80 ]] && echo "http://$(hostname).local" || echo "http://$(hostname).local:$p"
 }
 wait_up() {
   local p; p=$(envget TBO_PORT)
   for _ in $(seq 1 40); do curl -fsS "http://127.0.0.1:$p/health" >/dev/null 2>&1 && return 0; sleep 1; done
   die "Сервис не ответил: sudo tbo-ctl logs"
+}
+ask_password() {   # пароль — скрытый ввод дважды, наружу только через stdin
+  local p1 p2
+  read -rsp "Пароль: " p1; echo >&2
+  read -rsp "Ещё раз: " p2; echo >&2
+  [[ "$p1" == "$p2" ]] || die "Пароли не совпадают"
+  printf '%s\n' "$p1"
 }
 
 cmd=$1; shift || true
@@ -70,18 +88,43 @@ case "$cmd" in
     systemctl "$cmd" "$SVC"
     [[ $cmd == stop ]] || { wait_up; say "Работает: $(url)"; }
     ;;
+  user)
+    sub=${1:-list}; name=${2:-}
+    case "$sub" in
+      list) admin users ;;
+      add)
+        [[ -n $name ]] || die "Укажите имя: sudo tbo-ctl user add ИМЯ [admin|engineer|viewer]"
+        role=${3:-engineer}
+        ask_password | admin create-user "$name" --role "$role" --password-stdin --temporary
+        say "Передайте пароль сотруднику лично — при первом входе он задаст свой"
+        ;;
+      passwd)
+        [[ -n $name ]] || die "Укажите имя: sudo tbo-ctl user passwd ИМЯ"
+        extra=(); [[ ${3:-} == --temporary ]] && extra=(--temporary)
+        ask_password | admin passwd "$name" --password-stdin "${extra[@]}"
+        ;;
+      unlock|disable|enable)
+        [[ -n $name ]] || die "Укажите имя пользователя"
+        admin "$sub" "$name"
+        ;;
+      *) die "Неизвестная команда user $sub (list | add | passwd | unlock | disable | enable)" ;;
+    esac
+    ;;
+  setup-code) admin setup-code ;;
+  password|nopassword)
+    die "Общий пароль заменён учётными записями: sudo tbo-ctl user passwd ИМЯ (см. sudo tbo-ctl help)" ;;
   backup) admin backup ;;
   backups) admin backups ;;
   restore)
     [[ -n ${1:-} ]] || die "Укажите имя копии (sudo tbo-ctl backups) или путь к .zip"
-    src=$1
+    src=$1; tmp=""
     if [[ -f $src ]]; then                    # файл вне каталога копий — сделать читаемым для сервиса
-      tmp=$(mktemp /tmp/tbo-restore-XXXXXX.zip); cp "$src" "$tmp"; chown "$SVC_USER" "$tmp"; src=$tmp
+      tmp=$(mktemp /tmp/tbo-restore-XXXXXX.zip); cp "$src" "$tmp"; chown "$SVC_USER" "$tmp"; chmod 600 "$tmp"; src=$tmp
     fi
     say "Остановка сервиса"; systemctl stop "$SVC"
-    admin restore "$src" || { systemctl start "$SVC"; die "Восстановление не выполнено"; }
-    [[ ${tmp:-} ]] && rm -f "$tmp"
-    systemctl start "$SVC"; wait_up; say "Готово: $(url)"
+    if ! admin restore "$src"; then [[ -n $tmp ]] && rm -f "$tmp"; systemctl start "$SVC"; die "Восстановление не выполнено"; fi
+    [[ -n $tmp ]] && rm -f "$tmp"
+    systemctl start "$SVC"; wait_up; say "Готово: $(url). Все пользователи вышли из системы — войдите снова"
     ;;
   update)
     . "$ETC_DIR/install.conf"
@@ -91,29 +134,23 @@ case "$cmd" in
     say "git pull в $SRC_DIR"; runuser -u "$owner" -- git -C "$SRC_DIR" pull --ff-only
     "$SRC_DIR/deploy/raspberry-pi/install.sh" --upgrade --skip-apt
     ;;
-  password)
-    pw=${1:-}
-    if [[ -z $pw ]]; then
-      read -rsp "Новый пароль: " pw; echo
-      read -rsp "Ещё раз: " pw2; echo
-      [[ $pw == "$pw2" ]] || die "Пароли не совпадают"
-    fi
-    [[ $pw =~ ^[A-Za-z0-9._@+=:,%/!?#-]{6,64}$ ]] || die "Пароль: 6–64 символа, латиница, цифры и ._-@+=:,%/!?# (без пробелов и кавычек)"
-    setenv TBO_AUTH_PASSWORD "$pw"
-    systemctl restart "$SVC"; wait_up
-    say "Пароль изменён. Пользователь: $(envget TBO_AUTH_USER). Браузер спросит его при следующем входе."
-    ;;
-  nopassword)
-    setenv TBO_AUTH_PASSWORD ""
-    systemctl restart "$SVC"; wait_up; say "Вход без пароля (любой в сети может вносить изменения)"
-    ;;
   port)
     p=${1:-}; [[ $p =~ ^[0-9]+$ && $p -ge 1 && $p -le 65535 ]] || die "Укажите порт 1–65535"
+    [[ -z $(envget TBO_PUBLIC_URL) ]] || die "Включён HTTPS (Caddy): порт приложения внутренний, внешний — 443"
     setenv TBO_PORT "$p"
     systemctl restart "$SVC"; wait_up; say "Адрес: $(url)"
     ;;
+  https-ca)
+    ca=/var/lib/caddy/.local/share/caddy/pki/authorities/local/root.crt
+    [[ -f $ca ]] || die "Корневого сертификата Caddy нет (HTTPS не включён: install.sh --https)"
+    out=/home/${SUDO_USER:-root}/tbo-tracker-root-ca.crt
+    [[ ${SUDO_USER:-root} == root ]] && out=/root/tbo-tracker-root-ca.crt
+    cp "$ca" "$out"; chmod 644 "$out"; [[ -n ${SUDO_USER:-} ]] && chown "$SUDO_USER" "$out"
+    say "Скопирован в $out. Перенесите на компьютер (scp) и установите как доверенный корневой сертификат."
+    openssl x509 -in "$ca" -noout -fingerprint -sha256 2>/dev/null || true
+    ;;
   reset-demo)
-    read -rp "Пересоздать демо-данные? Все изменения будут потеряны [y/N] " a
+    read -rp "Пересоздать демо-данные? Все изменения данных будут потеряны [y/N] " a
     [[ $a == [yYдД]* ]] || exit 0
     admin backup; admin reset-demo
     ;;

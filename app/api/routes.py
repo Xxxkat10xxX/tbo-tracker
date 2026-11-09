@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, object_session
 
 from ..config import DEMO_LOGS_DIR
 from ..db import get_session
-from ..errors import DomainError, NotFound
+from ..errors import DomainError, NotFound, require_demo_mode
 from ..models import (
     AIRCRAFT_STATUSES,
     COMPONENT_STATUSES,
@@ -630,6 +630,7 @@ def movements_template():
 
 @router.get("/demo-logs")
 def demo_logs():
+    require_demo_mode()
     import json
     idx = DEMO_LOGS_DIR / "index.json"
     return json.loads(idx.read_text("utf-8")) if idx.exists() else []
@@ -637,11 +638,13 @@ def demo_logs():
 
 @router.get("/demo-logs/{name}")
 def demo_log_download(name: str):
+    require_demo_mode()
     return FileResponse(_demo_file(name), filename=name)
 
 
 @router.post("/demo-logs/{name}/import")
 def demo_log_import(name: str, dry_run: bool = False, s: Session = Depends(get_session)):
+    require_demo_mode()
     path = _demo_file(name)
     return _run_import(s, path.read_bytes(), name, "демо", dry_run)
 
@@ -841,6 +844,11 @@ def log_generator(data: GeneratorIn, s: Session = Depends(get_session)):
                   data.fly_probability, data.flights_min, data.flights_max, data.duration_min, data.duration_max,
                   data.first_takeoff_hour, data.touch_and_go_probability, data.with_ids, data.avoid_overlap,
                   data.duplicates, data.errors, data.seed)
+    if data.import_now and not data.dry_run:
+        from .. import config
+        if not config.DEMO_MODE:
+            raise DomainError("Запись сгенерированных (вымышленных) полётов в базу доступна только в демо-режиме. "
+                              "В рабочей эксплуатации скачайте файл или используйте «Проверить импорт (без записи)»", 403)
     res = generate(s, p)
     if data.import_now:
         res["import"] = _run_import(s, res["content"].encode(), res["filename"], "генератор журналов", data.dry_run)
@@ -867,6 +875,7 @@ def put_economics(data: EconomicsIn, s: Session = Depends(get_session)):
 # ---------------------------------------------------------------- демо
 @router.post("/demo/reset")
 def demo_reset():
+    require_demo_mode()
     from ..seed import reset_and_seed
     return reset_and_seed()
 

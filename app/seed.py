@@ -691,8 +691,13 @@ def seed_if_empty():
         write_demo_logs(datetime.fromisoformat(anchor.value["day0"][:-1]))
 
 
+# Учётные записи, сессии и журнал аудита сбросом демо-данных не затрагиваются
+KEEP_TABLES = {"users", "auth_sessions", "audit_log"}
+
+
 def reset_and_seed(now: datetime | None = None) -> dict:
-    Base.metadata.drop_all(engine)
+    data_tables = [tb for tb in Base.metadata.sorted_tables if tb.name not in KEEP_TABLES]
+    Base.metadata.drop_all(engine, tables=data_tables)
     Base.metadata.create_all(engine)
     seed(now)
     return {"message": "Демо-данные пересозданы"}

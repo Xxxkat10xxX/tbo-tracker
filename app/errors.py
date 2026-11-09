@@ -10,3 +10,10 @@ class DomainError(Exception):
 class NotFound(DomainError):
     def __init__(self, message: str = "Объект не найден"):
         super().__init__(message, 404)
+
+
+def require_demo_mode():
+    """Сброс базы, сценарии и демо-журналы — только в демонстрационном режиме (TBO_DEMO_MODE=1)."""
+    from .config import DEMO_MODE
+    if not DEMO_MODE:
+        raise NotFound("Демонстрационный режим выключен (TBO_DEMO_MODE=0)")

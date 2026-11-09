@@ -1,11 +1,10 @@
 """Серверная логика: перестановка одной транзакцией, сценарии, журнал и рассылка уведомлений,
 резервные копии, состояние сервера, вход по паролю, расчёты для интерфейса."""
-import base64
-import importlib
 import json
 import os
+import re
 
-from tests.conftest import by_serial
+from tests.conftest import by_serial, login
 
 
 def _slot(board, serial, pos):
@@ -121,6 +120,10 @@ def test_server_settings_and_test_message(client, monkeypatch):
     assert r.status_code == 200 and r.json()["telegram"]["token"].startswith("••••") and "SECRET" not in r.text
     r = client.put("/api/server/settings", json={"telegram": {"enabled": True, "token": "", "chat_id": "7"}})   # пустой токен не стирает
     assert r.json()["telegram"]["has_token"] is True
+    r = client.put("/api/server/settings", json={"telegram": {"enabled": True, "chat_id": ""}})
+    assert r.status_code == 400
+    assert client.get("/api/server/settings").json()["telegram"]["chat_id"] == "7"     # отказ ничего не сохранил
+    assert client.put("/api/server/settings", json={"public_url": "javascript:alert(1)"}).status_code == 400
     assert client.put("/api/server/settings", json={"webhook": {"enabled": True, "url": "ftp://x"}}).status_code == 400
     assert client.put("/api/server/settings", json={"scan_interval_s": 5}).status_code == 422
     monkeypatch.setattr(notify, "_http_post", lambda url, payload, timeout=10: "ok (200)")
@@ -139,6 +142,8 @@ def test_backup_create_download_restore(client):
     client.patch(f"/api/aircraft/{a['id']}", json={"name": "Изменённый"})
     r = client.post(f"/api/server/backups/{b['name']}/restore").json()
     assert r["pre_restore"].endswith("-pre-restore.zip")
+    assert client.get("/api/aircraft").status_code == 401          # после восстановления все сессии завершены
+    login(client)
     assert by_serial(client, "TBT-M4-001")["name"] == "Борт 01"
     up = client.post("/api/server/backups/upload", files={"file": ("x.zip", dl.content)}).json()
     assert up["name"].endswith("-upload.zip")
@@ -148,6 +153,37 @@ def test_backup_create_download_restore(client):
     names = [x["name"] for x in client.get("/api/server/backups").json()]
     assert b["name"] in names and up["name"] not in names
 
+
+
+def test_restore_and_media_only_photos(client):
+    """Из копии восстанавливаются только фото; /media отдаёт только фото (HTML/JS с этого же сайта = XSS)."""
+    import io
+    import zipfile
+
+    from app.config import UPLOADS_DIR
+    png = b"\x89PNG\r\n\x1a\n" + bytes(64)
+    url = client.post("/api/drone-images", files={"files": ("Мой борт.png", png, "image/png")}).json()["added"][0]
+    assert client.get(url).status_code == 200
+    assert client.get("/media/index.json").status_code == 404           # служебный файл подписей не отдаётся
+    b = client.post("/api/server/backups").json()
+    src = zipfile.ZipFile(io.BytesIO(client.get(f"/api/server/backups/{b['name']}").content))
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for n in src.namelist():
+            z.writestr(n, src.read(n))
+        z.writestr("uploads/evil.html", "<script src=/media/evil.js></script>")
+        z.writestr("uploads/evil.js", "alert(1)")
+        z.writestr("uploads/sub/" + "a" * 32 + ".png", png)
+    (UPLOADS_DIR / "planted.html").write_text("<b>x</b>")              # посторонний файл в каталоге (не через сервер)
+    assert client.get("/media/planted.html").status_code == 404
+    up = client.post("/api/server/backups/upload", files={"file": ("x.zip", buf.getvalue())}).json()
+    client.post(f"/api/server/backups/{up['name']}/restore")
+    login(client)
+    names = sorted(f.name for f in UPLOADS_DIR.iterdir())      # фото из копии (в т.ч. от других тестов) + подписи
+    assert url.rsplit("/", 1)[1] in names and "index.json" in names, names
+    assert all(re.fullmatch(r"[0-9a-f]{32}\.(png|jpg|webp)|index\.json", n) for n in names), names   # ни HTML/JS, ни sub/
+    assert client.get(url).status_code == 200
+    assert client.get("/media/evil.html").status_code == 404 and client.get("/media/evil.js").status_code == 404
 
 def test_backup_prune_keeps_manual(client):
     from app.services import backup
@@ -188,29 +224,6 @@ def test_estimates_computed_on_server(client):
 
 
 # ------------------------------------------------------------------ вход по паролю и CLI
-def test_basic_auth_when_password_set(monkeypatch):
-    from fastapi.testclient import TestClient
-    import app.config
-    import app.main
-    monkeypatch.setenv("TBO_AUTH_PASSWORD", "s3cret")
-    monkeypatch.setenv("TBO_AUTH_USER", "admin")
-    importlib.reload(app.config)
-    m = importlib.reload(app.main)
-    try:
-        c = TestClient(m.app)
-        assert c.get("/health").status_code == 200
-        r = c.get("/api/aircraft")
-        assert r.status_code == 401 and "Basic" in r.headers["www-authenticate"]
-        bad = base64.b64encode(b"admin:wrong").decode()
-        assert c.get("/api/aircraft", headers={"Authorization": f"Basic {bad}"}).status_code == 401
-        ok = base64.b64encode(b"admin:s3cret").decode()
-        assert c.get("/api/meta", headers={"Authorization": f"Basic {ok}"}).status_code == 200
-    finally:
-        monkeypatch.delenv("TBO_AUTH_PASSWORD")
-        importlib.reload(app.config)
-        importlib.reload(app.main)
-
-
 def test_admin_cli(client, capsys):
     from app.admin import main
     assert main(["backup"]) == 0

@@ -1,38 +1,77 @@
-"""Точка входа: FastAPI-приложение, раздающее REST API и одностраничный веб-интерфейс.
+"""Точка входа: FastAPI-приложение — REST API и одностраничный веб-интерфейс.
 
-Вся бизнес-логика выполняется на сервере (app/services): расчёт наработки и ресурса, регламенты,
-уведомления и их рассылка, перестановки узлов, сценарии проверки, резервные копии.
-Браузер только отображает данные и отправляет действия пользователя.
+Вся бизнес-логика выполняется на сервере (app/services). Доступ — только после входа (сессия + роль),
+изменяющие запросы — с CSRF-токеном; правила доступа — app/security.py.
 """
 import asyncio
-import base64
-import binascii
-import secrets
+import logging
+import os
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy.exc import DataError, IntegrityError
 
+from . import security
+from .api.auth import router as auth_router
 from .api.missions import router as missions_router
 from .api.routes import router
 from .api.server import router as server_router
-from .config import AUTH_PASSWORD, AUTH_USER, AUTO_SEED, SCHEDULER, UPLOADS_DIR, VERSION
-from .db import Base, engine, migrate
+from .config import API_DOCS, DATA_DIR, DATABASE_URL, DEMO_MODE, SCHEDULER, UPLOADS_DIR, VERSION
+from .db import Base, SessionLocal, engine, migrate, wait_for_database
 from .errors import DomainError
+from .services.auth import csrf_ok
 
 STATIC = Path(__file__).parent / "static"
+log = logging.getLogger("tbo")
+
+
+class MediaFiles(StaticFiles):
+    """Загруженные фото: только .png/.jpg/.webp из корня каталога (служебный index.json и любые другие файлы не отдаются)."""
+
+    async def get_response(self, path: str, scope):
+        if os.sep in path or "/" in path or Path(path).suffix.lower() not in (".png", ".jpg", ".webp"):
+            raise HTTPException(status_code=404)
+        return await super().get_response(path, scope)
+
+
+def _check_data_dir():
+    """Понятная ошибка вместо «unable to open database file», если каталог данных недоступен на запись."""
+    try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        probe = DATA_DIR / ".write-test"
+        probe.write_text("ok")
+        probe.unlink()
+    except OSError as e:
+        raise SystemExit(f"Каталог данных {DATA_DIR} недоступен на запись ({e}). "
+                         "В Docker используйте именованный том или выдайте права пользователю uid 10001.") from e
+
+
+def _startup():
+    _check_data_dir()
+    UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+    wait_for_database()
+    Base.metadata.create_all(engine)
+    migrate()
+    if DEMO_MODE:
+        from .seed import seed_if_empty
+        seed_if_empty()
+    from .services import auth
+    with SessionLocal() as s:
+        auth.bootstrap_admin_from_file(s)
+        auth.ensure_setup_code(s)
+        auth.cleanup(s)
+    log.info("tbo-tracker %s: база %s, демо-режим %s", VERSION, DATABASE_URL.split("://")[0],
+             "включён" if DEMO_MODE else "выключен")
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    Base.metadata.create_all(engine)
-    migrate()
-    if AUTO_SEED:
-        from .seed import seed_if_empty
-        seed_if_empty()
+    await run_in_threadpool(_startup)
     stop, task = asyncio.Event(), None
     if SCHEDULER:
         from .services.scheduler import run_forever
@@ -43,34 +82,66 @@ async def lifespan(_app: FastAPI):
         task.cancel()
         with suppress(asyncio.CancelledError, Exception):
             await task
+    from .services import auth
+    await run_in_threadpool(auth.flush_audit, 5)      # записать журнал аудита до остановки процесса
 
 
 app = FastAPI(
     title="tbo-tracker · Обслуживание БПЛА по фактической наработке",
-    description="Прототип модуля «Виртуального гаража автономных систем»: поэкземплярный учёт ресурса бортов и узлов.",
+    description="Поэкземплярный учёт ресурса бортов и узлов. Все методы требуют входа; изменения — заголовок X-CSRF-Token.",
     version=VERSION,
     lifespan=lifespan,
+    docs_url="/docs" if API_DOCS else None,
+    redoc_url=None,
+    openapi_url="/openapi.json" if API_DOCS else None,
 )
 
 
-def _authorized(header: str) -> bool:
-    if not header.startswith("Basic "):
-        return False
-    try:
-        user, _, pwd = base64.b64decode(header[6:]).decode("utf-8").partition(":")
-    except (binascii.Error, UnicodeDecodeError):
-        return False
-    return secrets.compare_digest(user.encode(), AUTH_USER.encode()) & secrets.compare_digest(pwd.encode(), AUTH_PASSWORD.encode())
+def _resolve(token: str | None):
+    from .services import auth
+    with SessionLocal() as s:
+        return auth.resolve_session(s, token)
+
+
+def _audit_write(method: str, path: str, username: str, ip: str, status: int):
+    from .services import auth
+    auth.audit("api_write", username, ip, target=f"{method} {path}", status=status)
 
 
 @app.middleware("http")
-async def basic_auth(request: Request, call_next):
-    """Вход по паролю для всего сервиса (кроме /health), если задан TBO_AUTH_PASSWORD."""
-    if AUTH_PASSWORD and request.url.path != "/health" and not _authorized(request.headers.get("authorization", "")):
-        return Response("Требуется вход: имя пользователя и пароль tbo-tracker", status_code=401,
-                        headers={"WWW-Authenticate": 'Basic realm="tbo-tracker", charset="UTF-8"'},
-                        media_type="text/plain; charset=utf-8")
-    return await call_next(request)
+async def access_control(request: Request, call_next):
+    path, method = request.scope["path"], request.method
+    request.state.auth = None
+    need = security.required_role(method, path)
+    unsafe = method not in security.SAFE_METHODS
+
+    def done(resp):
+        security.apply_headers(request, resp)
+        return resp
+
+    if not security.host_ok(request):
+        return done(security.deny(400, "Неизвестное имя сайта в запросе (TBO_ALLOWED_HOSTS)", "host"))
+    if unsafe and not security.origin_ok(request):
+        return done(security.deny(403, "Запрос с другого сайта отклонён", "origin"))
+    if need is None:
+        if unsafe and request.headers.get("x-requested-with") != "tbo":
+            return done(security.deny(403, "Запрос должен отправляться из интерфейса tbo-tracker", "csrf"))
+        return done(await call_next(request))
+    row = await run_in_threadpool(_resolve, security.session_token(request))
+    if row is None:
+        return done(security.deny(401, "Требуется вход", "auth_required"))
+    request.state.auth = row
+    user = row.user
+    if user.must_change_password and path not in security.PASSWORD_CHANGE_ONLY:
+        return done(security.deny(403, "Смените временный пароль, чтобы продолжить", "password_change_required"))
+    if security.ROLE_RANK.get(user.role, -1) < security.ROLE_RANK[need]:
+        return done(security.deny(403, "Недостаточно прав для этого действия", "forbidden"))
+    if unsafe and not csrf_ok(row, request.headers.get("x-csrf-token")):
+        return done(security.deny(403, "Сессия устарела — обновите страницу", "csrf"))
+    resp = await call_next(request)
+    if unsafe and path.startswith("/api/") and not path.startswith("/api/auth/"):
+        await run_in_threadpool(_audit_write, method, path, user.username, security.client_ip(request), resp.status_code)
+    return done(resp)
 
 
 @app.exception_handler(RequestValidationError)
@@ -85,12 +156,31 @@ async def domain_error_handler(_req: Request, exc: DomainError):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.message})
 
 
+@app.exception_handler(DataError)
+async def data_error_handler(_req: Request, exc: DataError):
+    log.warning("DataError: %s", str(exc.orig)[:300])
+    return JSONResponse(status_code=400, content={"detail": "Значение не подходит для хранения (слишком длинное или неверного формата)"})
+
+
+@app.exception_handler(IntegrityError)
+async def integrity_error_handler(_req: Request, exc: IntegrityError):
+    log.warning("IntegrityError: %s", str(exc.orig)[:300])
+    return JSONResponse(status_code=409, content={"detail": "Нарушение целостности данных (повтор или ссылка на несуществующий объект)"})
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(_req: Request, exc: Exception):
+    log.exception("Необработанная ошибка")
+    return JSONResponse(status_code=500, content={"detail": "Внутренняя ошибка сервера. Подробности — в журнале сервиса"})
+
+
+app.include_router(auth_router)
 app.include_router(router)
 app.include_router(missions_router)
 app.include_router(server_router)
+app.add_middleware(security.BodyLimitMiddleware)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
-UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-app.mount("/media", StaticFiles(directory=UPLOADS_DIR), name="media")
+app.mount("/media", MediaFiles(directory=UPLOADS_DIR, check_dir=False), name="media")   # каталог создаётся при запуске
 
 
 @app.get("/", include_in_schema=False)
@@ -98,6 +188,15 @@ def index():
     return FileResponse(STATIC / "index.html")
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon():
+    return FileResponse(STATIC / "favicon.svg", media_type="image/svg+xml")
+
+
 @app.get("/health", include_in_schema=False)
 def health():
-    return {"status": "ok", "version": VERSION}
+    return {"status": "ok"}
+
+
+if os.environ.get("TBO_LOG_LEVEL"):
+    logging.getLogger("tbo").setLevel(os.environ["TBO_LOG_LEVEL"].upper())

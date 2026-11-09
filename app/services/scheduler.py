@@ -31,13 +31,15 @@ def tick() -> dict:
     out = {}
     STATE["last_error"] = None
     with SessionLocal() as s:
+        from . import auth
+        auth.cleanup(s)                       # просроченные сессии и старые записи аудита
         out["new"] = len(notify.scan(s))
         res = notify.deliver_pending(s, conf)
         if res:
             STATE["last_delivery"] = {"at": iso(utcnow()), "result": res}
             out["delivery"] = res
     try:
-        if backup.DATABASE_URL.startswith("sqlite") and _auto_backup_due(conf, datetime.now()):
+        if _auto_backup_due(conf, datetime.now()):
             b = backup.create("auto")
             backup.prune(int(conf["backup"].get("keep", 14)))
             STATE["last_auto_backup"] = b["name"]

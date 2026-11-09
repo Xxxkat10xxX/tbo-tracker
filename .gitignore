@@ -11,3 +11,6 @@ Thumbs.db
 .idea/
 .vscode/
 node_modules/
+secrets/
+*.zip
+setup-code.txt

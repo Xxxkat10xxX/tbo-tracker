@@ -148,3 +148,15 @@ def test_partial_import_can_be_reapplied_after_fixing_data(client):
     # полностью успешный файл по-прежнему распознаётся как повтор целиком
     client.post("/api/demo-logs/01_TBT-M4-001_smena.json/import")
     assert client.post("/api/demo-logs/01_TBT-M4-001_smena.json/import").json()["status"] == "duplicate"
+
+
+def test_seed_cli_on_fresh_data_dir(tmp_path):
+    """python -m app.seed на пустом каталоге данных (каталог базы создаётся сам)."""
+    import os
+    import subprocess
+    import sys
+    env = {**os.environ, "TBO_DATA_DIR": str(tmp_path / "fresh"), "TBO_DATABASE_URL": ""}
+    r = subprocess.run([sys.executable, "-m", "app.seed"], env=env, capture_output=True, text=True, timeout=300,
+                       cwd=os.path.dirname(os.path.dirname(__file__)))
+    assert r.returncode == 0, r.stderr[-2000:]
+    assert (tmp_path / "fresh" / "tbo.db").exists()

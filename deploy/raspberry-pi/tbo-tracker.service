@@ -11,9 +11,11 @@ Group=tbo
 SupplementaryGroups=video
 EnvironmentFile=/etc/tbo-tracker/tbo.env
 Environment=PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+UMask=0077
 WorkingDirectory=/opt/tbo-tracker
-# Один процесс: SQLite и фоновые задачи (уведомления, резервные копии) живут внутри него
-ExecStart=/opt/tbo-tracker/.venv/bin/python -m uvicorn app.main:app --host ${TBO_HOST} --port ${TBO_PORT} --no-access-log --log-level warning --timeout-graceful-shutdown 10
+# Один процесс: SQLite и фоновые задачи (уведомления, резервные копии) живут внутри него.
+# Адрес, порт, прокси — из /etc/tbo-tracker/tbo.env (app/serve.py)
+ExecStart=/opt/tbo-tracker/.venv/bin/python -m app.serve
 Restart=always
 RestartSec=3
 TimeoutStopSec=20
@@ -29,6 +31,13 @@ ProtectHome=yes
 PrivateTmp=yes
 ReadWritePaths=/var/lib/tbo-tracker
 ProtectKernelTunables=yes
+ProtectKernelLogs=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes

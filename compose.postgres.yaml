@@ -1,0 +1,42 @@
+# PostgreSQL вместо SQLite: docker compose -f compose.yaml -f compose.postgres.yaml up -d --build
+# Перед первым запуском: sh deploy/docker/init.sh  (создаст secrets/db_password.txt со случайным паролем)
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tbo
+      POSTGRES_USER: tbo
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    secrets: [db_password]
+    volumes:
+      - tbo-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tbo -d tbo -h 127.0.0.1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    security_opt:
+      - no-new-privileges:true
+    shm_size: 256m
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+    networks: [tbo]           # порт базы наружу не публикуется
+
+  app:
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      TBO_DATABASE_URL: postgresql+psycopg://tbo@db:5432/tbo
+      TBO_DATABASE_PASSWORD_FILE: /run/secrets/db_password
+    secrets: [db_password]
+
+secrets:
+  db_password:
+    file: ./secrets/db_password.txt
+
+volumes:
+  tbo-pg:

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# Установка tbo-tracker на Raspberry Pi 5 (Raspberry Pi OS Lite 64-bit) как системного сервиса.
 # shellcheck disable=SC1090  # источник настроек — /etc/tbo-tracker/tbo.env
+# Установка tbo-tracker на Raspberry Pi 5 (Raspberry Pi OS Lite 64-bit) как системного сервиса.
 #
-#   sudo ./deploy/raspberry-pi/install.sh                 порт 80, демо-данные, пароль генерируется
-#   sudo ./deploy/raspberry-pi/install.sh --no-demo       пустая база (рабочая эксплуатация)
-#   sudo ./deploy/raspberry-pi/install.sh --port 8080 --password 'МойПароль1'
+#   sudo ./deploy/raspberry-pi/install.sh                 рабочая установка (пустая база, порт 80)
+#   sudo ./deploy/raspberry-pi/install.sh --https         + HTTPS через Caddy (собственный УЦ, адрес https://<имя>.local)
+#   sudo ./deploy/raspberry-pi/install.sh --demo          + демо-данные и сценарии проверки
 #
-# Повторный запуск безопасен: обновляет код и зависимости, сохраняет данные и настройки.
-# Подробно: docs/RASPBERRY_PI.md
+# Паролей в параметрах нет: пароль администратора вводится скрыто (или задаётся в браузере по одноразовому коду).
+# Повторный запуск безопасен: обновляет код и зависимости, сохраняет данные и настройки. Подробно: docs/RASPBERRY_PI.md
 set -euo pipefail
 
 APP_DIR=/opt/tbo-tracker
@@ -19,10 +19,9 @@ SVC_USER=tbo
 SRC_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
 PORT=80
-DEMO=1
-PASSWORD=""
-NO_PASSWORD=0
-AUTH_USER='admin'
+DEMO=0
+HTTPS=0
+ADMIN='admin'
 UPGRADE=0
 SKIP_APT=0
 
@@ -31,14 +30,13 @@ warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
 die()  { printf '\033[1;31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 
 usage() {
-  sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '3,10p' "$0" | sed 's/^# \{0,1\}//'
   cat <<'EOF'
 Параметры:
-  --port N           порт веб-интерфейса (по умолчанию 80)
-  --no-demo          не заполнять базу демо-данными
-  --password ПАРОЛЬ  пароль входа (по умолчанию генерируется); буквы, цифры и ._-@+=:,%/!?#
-  --user ИМЯ         имя пользователя для входа (по умолчанию admin)
-  --no-password      без пароля (только для изолированной сети)
+  --https            HTTPS через Caddy: https://<имя-хоста>.local (сертификат собственного УЦ Caddy)
+  --port N           порт веб-интерфейса без HTTPS (по умолчанию 80)
+  --demo             демо-данные, сценарии проверки и кнопка «Сбросить демо-данные»
+  --admin ИМЯ        имя первого администратора (по умолчанию admin)
   --upgrade          обновление: не трогать настройки в /etc/tbo-tracker/tbo.env
   --skip-apt         не устанавливать системные пакеты (они уже есть)
 EOF
@@ -48,24 +46,21 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --https) HTTPS=1; shift ;;
     --port) PORT=${2:?}; shift 2 ;;
-    --no-demo) DEMO=0; shift ;;
-    --password) PASSWORD=${2:?}; shift 2 ;;
-    --user) AUTH_USER=${2:?}; shift 2 ;;
-    --no-password) NO_PASSWORD=1; shift ;;
+    --demo) DEMO=1; shift ;;
+    --admin) ADMIN=${2:?}; shift 2 ;;
     --upgrade) UPGRADE=1; shift ;;
     --skip-apt) SKIP_APT=1; shift ;;
+    --password|--user|--no-password) die "Параметр $1 удалён: пароли не передаются в командной строке. Администратор создаётся при установке (скрытый ввод)" ;;
     -h|--help) usage; exit 0 ;;
     *) die "Неизвестный параметр: $1 (см. --help)" ;;
   esac
 done
 
-[[ -f $SRC_DIR/app/main.py && -f $SRC_DIR/requirements.txt ]] || die "Запускайте из каталога с исходниками tbo-tracker (нет $SRC_DIR/app/main.py)"
+[[ -f $SRC_DIR/app/main.py && -f $SRC_DIR/requirements.lock ]] || die "Запускайте из каталога с исходниками tbo-tracker (нет $SRC_DIR/app/main.py)"
 [[ $PORT =~ ^[0-9]+$ && $PORT -ge 1 && $PORT -le 65535 ]] || die "Неверный порт: $PORT"
-[[ $AUTH_USER =~ ^[A-Za-z0-9._-]{1,32}$ ]] || die "Имя пользователя: латиница, цифры, . _ - (до 32 символов)"
-if [[ -n $PASSWORD && ! $PASSWORD =~ ^[A-Za-z0-9._@+=:,%/!?#-]{6,64}$ ]]; then
-  die "Пароль: 6–64 символа, латиница, цифры и ._-@+=:,%/!?# (без пробелов и кавычек)"
-fi
+[[ $ADMIN =~ ^[a-z0-9][a-z0-9._-]{1,63}$ ]] || die "Имя администратора: строчная латиница, цифры, . _ - (2–64 символа)"
 
 ARCH=$(uname -m)
 MODEL=$(tr -d '\0' </proc/device-tree/model 2>/dev/null || true)
@@ -74,11 +69,13 @@ say "Устройство: ${MODEL:-$ARCH} · $(. /etc/os-release 2>/dev/null &&
 
 # ---------------------------------------------------------------- системные пакеты
 if [[ $SKIP_APT -eq 0 ]]; then
-  command -v apt-get >/dev/null || die "Нужен Debian / Raspberry Pi OS (apt-get). Для других систем см. docs/RASPBERRY_PI.md → Docker."
-  say "Системные пакеты (python3-venv, avahi для адреса <имя>.local, rsync, sqlite3)"
+  command -v apt-get >/dev/null || die "Нужен Debian / Raspberry Pi OS (apt-get). Для других систем см. docs/DEPLOY.md → Docker."
+  say "Системные пакеты (python3-venv, avahi для адреса <имя>.local, rsync)"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -qq
-  apt-get install -y -qq --no-install-recommends python3 python3-venv python3-pip avahi-daemon rsync curl sqlite3 ca-certificates >/dev/null
+  PKGS=(python3 python3-venv python3-pip avahi-daemon rsync curl ca-certificates)
+  [[ $HTTPS -eq 1 ]] && PKGS+=(caddy)
+  apt-get install -y -qq --no-install-recommends "${PKGS[@]}" >/dev/null
 fi
 python3 - <<'PY' || die "Нужен Python 3.10 или новее"
 import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)
@@ -89,52 +86,50 @@ if ! id "$SVC_USER" &>/dev/null; then
   say "Системный пользователь $SVC_USER"
   useradd --system --home-dir "$DATA_DIR" --no-create-home --shell /usr/sbin/nologin --user-group "$SVC_USER"
 fi
-getent group video >/dev/null && usermod -aG video "$SVC_USER"      # vcgencmd: напряжение и троттлинг
+if getent group video >/dev/null; then usermod -aG video "$SVC_USER"; fi      # vcgencmd: напряжение и троттлинг
 install -d -m 0755 -o root -g root "$APP_DIR"
-install -d -m 0750 -o "$SVC_USER" -g "$SVC_USER" "$DATA_DIR"
+install -d -m 0700 -o "$SVC_USER" -g "$SVC_USER" "$DATA_DIR"
 install -d -m 0750 -o root -g "$SVC_USER" "$ETC_DIR"
 
 # ---------------------------------------------------------------- код и зависимости
 say "Копирование приложения в $APP_DIR"
-if command -v rsync >/dev/null; then
-  rsync -a --delete --exclude '.git' --exclude '.venv' --exclude 'data/' --exclude 'promo/' \
-        --exclude '__pycache__' --exclude '.pytest_cache' --exclude 'tests/' "$SRC_DIR/" "$APP_DIR/"
-else
-  find "$APP_DIR" -mindepth 1 -maxdepth 1 ! -name .venv -exec rm -rf {} +
-  (cd "$SRC_DIR" && tar --exclude=.git --exclude=.venv --exclude=./data --exclude=./promo --exclude=__pycache__ --exclude=./tests -cf - .) | tar -C "$APP_DIR" -xf -
-fi
+rsync -a --delete --exclude '.git' --exclude '.venv' --exclude 'data/' --exclude 'promo/' --exclude 'secrets/' \
+      --exclude '.env' --exclude '__pycache__' --exclude '.pytest_cache' --exclude 'tests/' "$SRC_DIR/" "$APP_DIR/"
 chown -R root:root "$APP_DIR"
 
-say "Виртуальное окружение Python и зависимости (первый раз — несколько минут)"
+say "Виртуальное окружение Python и зависимости (точные версии из requirements.lock)"
 [[ -x $APP_DIR/.venv/bin/python ]] || python3 -m venv "$APP_DIR/.venv"
 "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
-"$APP_DIR/.venv/bin/pip" install -q --retries 5 -r "$APP_DIR/requirements.txt"
+"$APP_DIR/.venv/bin/pip" install -q --retries 5 --no-deps -r "$APP_DIR/requirements.lock"
+"$APP_DIR/.venv/bin/pip" check >/dev/null || die "Конфликт зависимостей (pip check)"
 "$APP_DIR/.venv/bin/python" -m compileall -q "$APP_DIR/app" >/dev/null || true
 
-# ---------------------------------------------------------------- настройки
-GENERATED=""
+# ---------------------------------------------------------------- настройки (без паролей)
+HOSTN=$(hostname)
 if [[ $UPGRADE -eq 1 && -f $ENV_FILE ]]; then
   say "Настройки сохранены: $ENV_FILE"
+  # старые версии: вход по общему паролю из файла настроек заменён учётными записями
+  sed -i '/^TBO_AUTH_USER=/d; /^TBO_AUTH_PASSWORD=/d' "$ENV_FILE"
+  sed -i 's/^TBO_AUTO_SEED=/TBO_DEMO_MODE=/' "$ENV_FILE"
 else
-  if [[ -f $ENV_FILE ]]; then
-    cp -a "$ENV_FILE" "$ENV_FILE.bak.$(date +%Y%m%d%H%M%S)"
+  if [[ -f $ENV_FILE ]]; then cp -a "$ENV_FILE" "$ENV_FILE.bak.$(date +%Y%m%d%H%M%S)"; fi
+  if [[ $HTTPS -eq 1 ]]; then
+    BIND=127.0.0.1; PORT=8000; PUBLIC="https://$HOSTN.local"; TRUSTED=127.0.0.1
+  else
+    BIND=0.0.0.0; PUBLIC=""; TRUSTED=""
   fi
-  if [[ $NO_PASSWORD -eq 0 && -z $PASSWORD ]]; then
-    PASSWORD=$(tr -dc 'A-HJ-NP-Za-km-z2-9' </dev/urandom | head -c 12 || true)
-    GENERATED=1
-  fi
-  [[ $NO_PASSWORD -eq 1 ]] && PASSWORD=""
   umask 027
   cat >"$ENV_FILE" <<EOF
 # tbo-tracker — настройки сервиса. После изменения: sudo systemctl restart $SVC
-# (пароль и порт удобнее менять командами: sudo tbo-ctl password / sudo tbo-ctl port N)
-TBO_HOST='0.0.0.0'
+# Паролей здесь нет: учётные записи — в базе (хеш Argon2id), управление — sudo tbo-ctl user …
+TBO_HOST='$BIND'
 TBO_PORT='$PORT'
 TBO_DATA_DIR='$DATA_DIR'
-TBO_AUTO_SEED='$DEMO'
-TBO_AUTH_USER='$AUTH_USER'
-TBO_AUTH_PASSWORD='$PASSWORD'
+TBO_DEMO_MODE='$DEMO'
+TBO_PUBLIC_URL='$PUBLIC'
+TBO_TRUSTED_PROXIES='$TRUSTED'
 TBO_SCHEDULER='1'
+TBO_LOG_LEVEL='warning'
 EOF
   chown root:"$SVC_USER" "$ENV_FILE"
   chmod 0640 "$ENV_FILE"
@@ -142,12 +137,55 @@ EOF
 fi
 printf 'SRC_DIR=%q\n' "$SRC_DIR" >"$ETC_DIR/install.conf"
 
-# ---------------------------------------------------------------- утилита и сервис
+# ---------------------------------------------------------------- утилита, база, администратор
 install -m 0755 "$SRC_DIR/deploy/raspberry-pi/tbo-ctl" /usr/local/bin/tbo-ctl
 install -m 0644 "$SRC_DIR/deploy/raspberry-pi/tbo-tracker.service" "/etc/systemd/system/$SVC.service"
 
+admin_cli() {
+  # shellcheck disable=SC2016  # переменные раскрывает внутренний bash
+  runuser -u "$SVC_USER" -- bash -c 'umask 077; set -a; . "$0"; set +a; cd /opt/tbo-tracker; exec .venv/bin/python -m app.admin "$@"' "$ENV_FILE" "$@"
+}
 say "Инициализация базы данных"
-runuser -u "$SVC_USER" -- bash -c 'set -a; . "$0"; set +a; cd /opt/tbo-tracker; exec .venv/bin/python -m app.admin init' "$ENV_FILE"
+admin_cli init >/dev/null
+
+USERS=$(admin_cli users --json 2>/dev/null | python3 -c 'import json,sys; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+CREATED=""
+if [[ $USERS -eq 0 && -t 0 ]]; then
+  say "Создание администратора «$ADMIN» (пароль не отображается; не короче 10 символов, удобно — фраза из нескольких слов)"
+  for _ in 1 2 3; do
+    read -rsp "Пароль администратора: " P1; echo
+    read -rsp "Ещё раз: " P2; echo
+    if [[ "$P1" != "$P2" ]]; then warn "Пароли не совпадают"; continue; fi
+    if printf '%s\n' "$P1" | admin_cli create-user "$ADMIN" --role admin --name "Администратор" --password-stdin; then
+      CREATED=1; break
+    fi
+  done
+  unset P1 P2
+  [[ -n $CREATED ]] || warn "Администратор не создан — создайте его в браузере по коду настройки (sudo tbo-ctl setup-code)"
+fi
+
+# ---------------------------------------------------------------- HTTPS (Caddy)
+if [[ $HTTPS -eq 1 ]]; then
+  command -v caddy >/dev/null || die "Caddy не установлен (apt-get install caddy)"
+  IP=$(hostname -I 2>/dev/null | awk '{print $1}')
+  say "HTTPS: Caddy, адреса https://$HOSTN.local${IP:+ и https://$IP}"
+  if [[ -f /etc/caddy/Caddyfile ]]; then cp -a /etc/caddy/Caddyfile "/etc/caddy/Caddyfile.bak.$(date +%Y%m%d%H%M%S)"; fi
+  cat >/etc/caddy/Caddyfile <<EOF
+# tbo-tracker: HTTPS с сертификатом собственного УЦ Caddy (локальная сеть). Создан install.sh.
+https://$HOSTN.local${IP:+, https://$IP} {
+	tls internal
+	encode zstd gzip
+	request_body {
+		max_size 600MB
+	}
+	reverse_proxy 127.0.0.1:8000
+	header -Server
+}
+EOF
+  caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null || die "Ошибка в /etc/caddy/Caddyfile"
+  systemctl enable caddy >/dev/null 2>&1 || true
+  systemctl restart caddy
+fi
 
 say "Запуск сервиса $SVC (автозапуск при включении)"
 systemctl daemon-reload
@@ -161,16 +199,22 @@ for _ in $(seq 1 60); do
 done
 curl -fsS "http://127.0.0.1:$PORT_NOW/health" >/dev/null 2>&1 || die "Сервис не ответил. Журнал: sudo journalctl -u $SVC -n 50"
 
-SUFFIX=""; [[ $PORT_NOW == 80 ]] || SUFFIX=":$PORT_NOW"
 echo
 say "tbo-tracker работает"
-echo "   Откройте в браузере на любом устройстве в этой сети:"
-echo "     http://$(hostname).local$SUFFIX"
-for ip in $(hostname -I 2>/dev/null); do [[ $ip == *:* ]] || echo "     http://$ip$SUFFIX"; done
-AUTH_NOW=$(. "$ENV_FILE"; echo "${TBO_AUTH_PASSWORD:-}")
-if [[ -n $AUTH_NOW ]]; then
-  echo "   Вход: пользователь $(. "$ENV_FILE"; echo "$TBO_AUTH_USER")${GENERATED:+, пароль $AUTH_NOW (сгенерирован — сохраните; сменить: sudo tbo-ctl password)}"
+PUB=$(. "$ENV_FILE"; echo "${TBO_PUBLIC_URL:-}")
+if [[ -n $PUB ]]; then
+  echo "   Откройте: $PUB  (браузер предупредит о сертификате, пока на устройство не установлен корневой"
+  echo "   сертификат Caddy: sudo tbo-ctl https-ca — см. docs/RASPBERRY_PI.md)"
 else
-  warn "Вход без пароля. Включить: sudo tbo-ctl password"
+  SUFFIX=""; [[ $PORT_NOW == 80 ]] || SUFFIX=":$PORT_NOW"
+  echo "   Откройте в браузере на любом устройстве в этой сети:"
+  echo "     http://$HOSTN.local$SUFFIX"
+  for ip in $(hostname -I 2>/dev/null); do [[ $ip == *:* ]] || echo "     http://$ip$SUFFIX"; done
+  warn "Без HTTPS пароли передаются по сети открыто. Для защищённого доступа: sudo ./deploy/raspberry-pi/install.sh --https"
 fi
-echo "   Управление: sudo tbo-ctl help   ·   Настройки и резервные копии: страница «Сервер» в веб-интерфейсе"
+if [[ -n $CREATED ]]; then
+  echo "   Вход: $ADMIN и заданный вами пароль. Сотрудников добавьте в разделе «Пользователи»."
+elif [[ $USERS -eq 0 ]]; then
+  echo "   Первичная настройка в браузере — одноразовый код: sudo tbo-ctl setup-code"
+fi
+echo "   Управление: sudo tbo-ctl help"

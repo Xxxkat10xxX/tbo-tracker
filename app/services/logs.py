@@ -207,7 +207,12 @@ def import_log(s: Session, content: bytes, filename: str, imported_by: str | Non
     if content[:2] == b"PK" or content[:5] == b"%PDF-":
         fmt = "xlsx" if content[:2] == b"PK" else "pdf"
         try:
-            tables = movements.tables_from_xlsx(content) if fmt == "xlsx" else movements.tables_from_pdf(content)
+            try:
+                tables = movements.tables_from_xlsx(content) if fmt == "xlsx" else movements.tables_from_pdf(content)
+            except DomainError:
+                raise
+            except Exception as e:  # noqa: BLE001 — повреждённый файл не должен давать 500
+                raise DomainError(f"Не удалось разобрать файл {fmt.upper()}: {type(e).__name__}") from e
             kinds = {movements.classify(h) for h, _ in tables}
             if not tables or kinds == {"unknown"}:
                 raise DomainError("Не найдена таблица журнала: нужны колонки «Дата, Операция, Узел, Борт, Позиция» "

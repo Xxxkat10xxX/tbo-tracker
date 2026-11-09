@@ -57,15 +57,32 @@ def _is_header(cells) -> bool:
     return len(names & known) >= 2
 
 
+MAX_XLSX_UNPACKED = 200 * 1024 * 1024      # защита от «zip-бомб» (xlsx — это zip-архив с XML)
+MAX_PDF_PAGES = 300
+MAX_TABLE_ROWS = 50000
+
+
 def tables_from_xlsx(content: bytes) -> list[tuple[list, list[list]]]:
+    import zipfile
+
     from openpyxl import load_workbook
+    try:
+        total = sum(i.file_size for i in zipfile.ZipFile(io.BytesIO(content)).infolist())
+    except zipfile.BadZipFile as e:
+        raise DomainError("Не удалось прочитать Excel: файл повреждён") from e
+    if total > MAX_XLSX_UNPACKED:
+        raise DomainError("Файл Excel слишком большой после распаковки (более 200 МБ)")
     try:
         wb = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
     except Exception as e:  # noqa: BLE001 — openpyxl бросает разные исключения на битых файлах
         raise DomainError(f"Не удалось прочитать Excel: {e}") from e
     out = []
     for ws in wb.worksheets:
-        rows = [list(r) for r in ws.iter_rows(values_only=True)]
+        rows = []
+        for r in ws.iter_rows(values_only=True):
+            rows.append(list(r))
+            if len(rows) > MAX_TABLE_ROWS:
+                raise DomainError(f"На листе «{ws.title}» больше {MAX_TABLE_ROWS} строк — разбейте журнал на части")
         out += _split_tables(rows)
     return out
 
@@ -78,6 +95,8 @@ def tables_from_pdf(content: bytes) -> list[tuple[list, list[list]]]:
         raise DomainError(f"Не удалось прочитать PDF: {e}") from e
     rows: list[list] = []
     with pdf:
+        if len(pdf.pages) > MAX_PDF_PAGES:
+            raise DomainError(f"В PDF больше {MAX_PDF_PAGES} страниц — разбейте журнал на части")
         for page in pdf.pages:
             tables = page.extract_tables()
             if tables:
