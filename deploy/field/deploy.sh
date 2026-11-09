@@ -23,7 +23,13 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SERVER="" DRONE="" SERIAL="" NAME="Technic 6S" HTTPS=0 DEMO=0 URL="" PART="all" PORT=""
 say()  { printf '\033[1;32m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m!!\033[0m %s\n' "$*" >&2; }
-die()  { printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2; exit 1; }
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) WIN=1 ;; *) WIN=0 ;; esac   # Git Bash на Windows
+die()  {
+  printf '\033[1;31mОшибка:\033[0m %s\n' "$*" >&2
+  # на Windows окно Git Bash / git-cmd закрывается сразу — даём прочитать сообщение
+  if [[ $WIN -eq 1 && -t 0 ]]; then read -rp "Нажмите Enter для выхода " _ || true; fi
+  exit 1
+}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -46,6 +52,11 @@ done
 [[ "$PART" == server || -n "$DRONE" ]] || die "укажите борт: --drone orangepi@10.255.37.62"
 [[ -f "$ROOT/app/main.py" && -f "$ROOT/agent/tbo_agent/__init__.py" ]] || die "запускайте из репозитория tbo-tracker"
 for cmd in ssh tar; do command -v "$cmd" >/dev/null || die "нужна программа $cmd"; done
+# клон на Windows с core.autocrlf=true: скрипты с CRLF на Linux-платах не запускаются
+if grep -lq $'\r' "$ROOT/deploy/raspberry-pi/install.sh" "$ROOT/deploy/raspberry-pi/tbo-ctl" "$ROOT/agent/install.sh" \
+    "$ROOT/agent/run-agent.sh" 2>/dev/null; then
+  die "скрипты в репозитории с переводами строк Windows (CRLF). Выполните: git config core.autocrlf false && git rm -rq --cached . && git reset -q --hard"
+fi
 # имя попадает в команду на сервере в одинарных кавычках: без кавычек и управляющих символов (кириллица — можно)
 [[ -n "$NAME" && ${#NAME} -le 200 && "$NAME" != *[\'\"\\\`\$]* && "$NAME" != *[[:cntrl:]]* ]] \
   || die "название борта: до 200 символов, без кавычек, \\, \`, \$ и управляющих символов"
@@ -64,12 +75,22 @@ export COPYFILE_DISABLE=1                          # macOS: без служеб�
 # одно SSH-соединение на плату: пароль вводится один раз за запуск. Каталог в /tmp, а не в $TMPDIR: путь сокета
 # ограничен ~104 байтами, а $TMPDIR на macOS длинный
 CTL="$(mktemp -d /tmp/tbo-deploy.XXXXXX)"
-SSHO=(-o ControlMaster=auto -o "ControlPath=$CTL/%C" -o ControlPersist=900 -o ServerAliveInterval=10 -o ConnectTimeout=15)
+# ssh на Windows (Git для Windows, OpenSSH Windows) не поддерживает общее соединение (ControlMaster): без него пароль
+# спрашивается при каждом обращении к плате — лучше заранее настроить вход по ключу (docs/DRONE.md, раздел 1а)
+MUX="${TBO_SSH_MUX:-$((1 - WIN))}"
+SSHO=(-o ServerAliveInterval=10 -o ConnectTimeout=15)
+if [[ $MUX -eq 1 ]]; then
+  SSHO+=(-o ControlMaster=auto -o "ControlPath=$CTL/%C" -o ControlPersist=900)
+else
+  warn "общее SSH-соединение отключено: пароль платы будет спрашиваться несколько раз (лучше — вход по ключу)"
+fi
 SRV_TMP=0 DRN_TMP=0          # 1 — на сервере / борте могут лежать временные файлы с токеном или сертификатом
 cleanup() {                  # при любом выходе, в том числе по ошибке и Ctrl+C
   if [[ $SRV_TMP -eq 1 ]]; then on "$SERVER" 'rm -f ~/.tbo-drone-token.tmp ~/.tbo-ca.crt' >/dev/null 2>&1 || true; fi
   if [[ $DRN_TMP -eq 1 ]]; then on "$DRONE" 'rm -f ~/.tbo-token ~/.tbo-ca.crt' >/dev/null 2>&1 || true; fi
-  for h in "$SERVER" "$DRONE"; do [[ -n "$h" ]] && ssh "${SSHO[@]}" -O exit "$h" >/dev/null 2>&1 || true; done
+  if [[ $MUX -eq 1 ]]; then
+    for h in "$SERVER" "$DRONE"; do [[ -n "$h" ]] && ssh "${SSHO[@]}" -O exit "$h" >/dev/null 2>&1 || true; done
+  fi
   rm -f "$CTL/ca.crt"
   rmdir "$CTL" 2>/dev/null || true
 }
@@ -93,7 +114,7 @@ take_ca() {
 
 if [[ "$PART" != drone ]]; then
   say "Сервер $SERVER: подключение (пароль пользователя сервера)"
-  on "$SERVER" 'uname -m; . /etc/os-release && echo "$PRETTY_NAME"' || die "нет SSH-доступа к $SERVER"
+  on "$SERVER" 'uname -m; . /etc/os-release && echo "$PRETTY_NAME"' || die "нет SSH-доступа к $SERVER. Если обычный ssh $SERVER работает — запустите с TBO_SSH_MUX=0 (без общего соединения)"
   if [[ -z "$SERIAL" && -n "$DRONE" ]]; then
     say "Борт $DRONE: подключение (пароль пользователя orangepi)"
     SERIAL="$(on "$DRONE" hostname | tr -cd 'A-Za-z0-9._-')"
