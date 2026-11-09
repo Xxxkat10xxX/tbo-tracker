@@ -276,3 +276,42 @@ def test_admin_cli_drone_add(client, capsys):
     with SessionLocal() as s:
         ac = s.query(Aircraft).filter_by(serial="technic-2306").one()
         assert ac.status == "active" and s.get(AircraftType, ac.type_id).code == "SKYRIS-T6S"
+
+
+def test_flight_lost_in_air_can_be_closed_and_late_log_counts(client):
+    """Борт замолчал в полёте и не вернулся: полёт можно закрыть через 10 мин тишины, иначе борт заблокирован навсегда."""
+    from datetime import timedelta
+
+    from app.models import DroneLink, MissionRun
+    from app.timeutil import utcnow
+    a, lid, token = link_for(client)
+    mid = mission(client, a["id"])
+    with TestClient(app) as dev:
+        dev.headers["Authorization"] = "Bearer " + token
+        dev.post("/api/agent/state", json={"state": "idle"})
+        assert client.post(f"/api/drones/{lid}/prepare", json={"mission_id": mid}).status_code == 200
+        run0 = get(client, lid)["run"]
+        rid = run0["id"]
+        dev.post("/api/agent/state", json={"state": "ready", "run_id": rid, "plan_hash": run0["plan_hash"]})
+        dev.post("/api/agent/state", json={"state": "in_flight", "run_id": rid})            # «старт» ушёл, борт в воздухе
+        assert get(client, lid)["run"]["status"] == "in_flight"
+        early = client.post(f"/api/drones/{lid}/cancel")
+        assert early.status_code == 400 and "10 мин" in early.json()["detail"]             # связь есть — закрыть нельзя
+        with SessionLocal() as s:                                                          # 11 минут тишины
+            s.get(DroneLink, lid).last_seen_at = utcnow() - timedelta(minutes=11)
+            s.commit()
+        r = client.post(f"/api/drones/{lid}/cancel")
+        assert r.status_code == 200 and "не выполнен" in r.json()["message"], r.text
+        d = get(client, lid)
+        assert d["run"] is None
+        with SessionLocal() as s:
+            assert s.get(MissionRun, rid).status == "failed"
+        # агент вернулся и передал журнал с борта — полёт учтён
+        now = utcnow()
+        log = {"status": "completed", "reason": "", "track": [], "summary": {"duration_s": 120},
+               "flight": {"start": (now - timedelta(minutes=30)).isoformat() + "Z", "end": (now - timedelta(minutes=28)).isoformat() + "Z"}}
+        res = dev.post(f"/api/agent/runs/{rid}/log", json=log)
+        assert res.status_code == 200, res.text
+        with SessionLocal() as s:
+            run = s.get(MissionRun, rid)
+            assert run.status == "completed" and run.import_id

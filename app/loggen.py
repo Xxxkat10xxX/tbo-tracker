@@ -105,6 +105,8 @@ def generate(s: Session, p: GenParams) -> dict:
                         if p.with_ids:
                             r = {"flight_id": f"{serial}-{t:%Y%m%d-%H%M}-G{k + 1}", **r}
                         rows.append(r)
+                        if p.avoid_overlap:     # и со своими полётами: длинные полёты дня заходят в следующий день
+                            existing.append((t, end))
                     t = end + timedelta(minutes=rng.randint(20, 90))
             day += timedelta(days=1)
     if skipped_overlap:
@@ -128,10 +130,11 @@ def generate(s: Session, p: GenParams) -> dict:
     if p.errors:
         base = d_from + timedelta(hours=12)
         serial = p.aircraft_serials[0]
+        future = _day_start(now) + timedelta(days=3, hours=12)   # не от секунд «сейчас»: тот же seed — тот же журнал
         rows += [
             {"flight_id": "ERR-UNKNOWN", "aircraft_serial": "UNKNOWN-000", "start": iso(base), "end": iso(base + timedelta(minutes=30)), "cycles": 1},
             {"flight_id": "ERR-REVERSED", "aircraft_serial": serial, "start": iso(base + timedelta(hours=2)), "end": iso(base + timedelta(hours=1)), "cycles": 1},
-            {"flight_id": "ERR-FUTURE", "aircraft_serial": serial, "start": iso(now + timedelta(days=3)), "end": iso(now + timedelta(days=3, hours=1)), "cycles": 1},
+            {"flight_id": "ERR-FUTURE", "aircraft_serial": serial, "start": iso(future), "end": iso(future + timedelta(hours=1)), "cycles": 1},
             {"flight_id": "ERR-DATE", "aircraft_serial": serial, "start": "не дата", "end": "2026-13-45T25:00", "cycles": 1},
         ]
         err_count = 4

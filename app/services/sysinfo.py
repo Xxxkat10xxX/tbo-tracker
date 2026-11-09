@@ -89,7 +89,15 @@ def _storage(path: Path) -> dict:
 
 
 def _dir_size(p: Path) -> int:
-    return sum(f.stat().st_size for f in p.rglob("*") if f.is_file()) if p.exists() else 0
+    total = 0
+    if p.exists():
+        for f in p.rglob("*"):
+            try:            # файл может исчезнуть между перечислением и stat (временный файл копии, удаление фото)
+                if f.is_file():
+                    total += f.stat().st_size
+            except OSError:
+                pass
+    return total
 
 
 def status() -> dict:

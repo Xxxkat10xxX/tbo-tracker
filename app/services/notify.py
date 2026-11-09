@@ -119,14 +119,26 @@ def _http_post(url: str, payload: dict, timeout: float = 10) -> str:
         return f"ошибка: {getattr(e, 'reason', e)}"
 
 
+MESSAGE_MAX = 3800      # Telegram отклоняет сообщения длиннее 4096 символов (HTTP 400) — пакет не дошёл бы никогда
+
+
 def format_message(events: list[dict], conf: dict) -> str:
-    lines = [f"tbo-tracker: {'новое уведомление' if len(events) == 1 else f'новых уведомлений: {len(events)}'}"]
-    for e in events[:20]:
-        lines.append(f"{ICONS.get(e['category'], '•')} {e['title']}" + (f" ({e['text']})" if e.get("text") else ""))
-    if len(events) > 20:
-        lines.append(f"… и ещё {len(events) - 20}")
-    if conf.get("public_url"):
-        lines.append(conf["public_url"].rstrip("/") + "/#/maintenance")
+    head = f"tbo-tracker: {'новое уведомление' if len(events) == 1 else f'новых уведомлений: {len(events)}'}"
+    tail = conf["public_url"].rstrip("/") + "/#/maintenance" if conf.get("public_url") else ""
+    lines, size = [head], len(head) + len(tail) + 40
+    for i, e in enumerate(events[:20]):
+        line = f"{ICONS.get(e['category'], '•')} {e['title']}" + (f" ({e['text']})" if e.get("text") else "")
+        line = line[:600]
+        if size + len(line) + 1 > MESSAGE_MAX:
+            lines.append(f"… и ещё {len(events) - i}")
+            break
+        lines.append(line)
+        size += len(line) + 1
+    else:
+        if len(events) > 20:
+            lines.append(f"… и ещё {len(events) - 20}")
+    if tail:
+        lines.append(tail)
     return "\n".join(lines)
 
 

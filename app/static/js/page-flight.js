@@ -74,8 +74,10 @@ async function flightPanel(root, ctx) {
     const run = d.run, mine = run && run.mission_id === ctx.missionId, eng = can("engineer");
     if (!d.enabled) return '<div class="notice warn">Подключение борта отключено администратором</div>';
     if (!d.online) {
+      const lost = eng && mine && ["in_flight", "landed"].includes(run.status);
       return `<div class="notice warn">Борт не на связи${d.last_seen_at ? ` с ${fmtDT(d.last_seen_at)}` : ""} — проверьте питание, Wi-Fi и службу tbo-agent на борту.</div>
-        ${eng && DRONE_FLYING.includes(d.last_state) ? '<button class="danger-solid" data-fl="rtl">⌂ Вернуть домой</button> <span class="small muted">команда будет доставлена при восстановлении связи (до 2 мин)</span>' : ""}`;
+        ${eng && DRONE_FLYING.includes(d.last_state) ? '<button class="danger-solid" data-fl="rtl">⌂ Вернуть домой</button> <span class="small muted">команда будет доставлена при восстановлении связи (до 2 мин)</span>' : ""}
+        ${lost ? '<button data-fl="close">Закрыть полёт без журнала</button> <span class="small muted">если связи нет дольше 10 мин</span>' : ""}`;
     }
     if (run && !mine && ["preparing", "ready", "in_flight", "landed"].includes(run.status)) return `<div class="notice">Борт занят миссией «${esc(run.mission_name || "")}» (${esc(run.status_label)}).</div>`;
     if (!eng) return '<div class="small muted">Команды борту отдают инженер и администратор.</div>';
@@ -139,6 +141,10 @@ async function flightPanel(root, ctx) {
         return;
       } else if (kind === "cancel") {
         toast((await POST(`/api/drones/${lid}/cancel`)).message);
+      } else if (kind === "close") {
+        modal("Закрыть полёт без журнала", "<p>Связь с бортом потеряна в полёте. Полёт будет закрыт как <b>«не выполнен»</b>, борт освободится для новых полётов.</p><p>Найдите борт и осмотрите его. Если агент на борту позже передаст журнал, наработка будет учтена автоматически.</p>",
+          { okText: "Закрыть полёт", onOk: async () => { toast((await POST(`/api/drones/${lid}/cancel`)).message); refresh(); } });
+        return;
       }
       refresh();
     } catch (e) { toast(e.message, true); }

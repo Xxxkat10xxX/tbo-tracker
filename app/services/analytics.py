@@ -18,6 +18,7 @@ from ..models import (
     Setting,
 )
 from ..timeutil import iso, parse_dt, utcnow
+from . import sensors
 from .maintenance import STATUS_ORDER, Evaluator, due_items, resource_rule
 from .usage import component_totals, component_usage, current_installations, installation_usage
 
@@ -107,8 +108,13 @@ def analytics(s: Session, now: datetime | None = None) -> dict:
         u = component_usage(s, [inst.component_id], since=naive_base, aircraft_id=inst.aircraft_id).get(inst.component_id)
         nh, nc = (u.hours, u.cycles) if u else (0.0, 0)
         nd = (now - naive_base).total_seconds() / 86400
+        # «по борту» тоже видны удары этого борта с установки узла: без них каждый осмотр после удара
+        # засчитывался бы как предотвращённый пропуск (раздувая KPI и оценку эффекта)
+        ne = sensors.count_events(s, "aircraft", inst.aircraft_id, since=naive_base, before=now + timedelta(seconds=1)) \
+            if getattr(rule, "interval_events", None) else 0
         naive = _status([(rule.interval_hours, rule.warn_hours, nh), (rule.interval_cycles, rule.warn_cycles, nc),
-                         (rule.interval_days, rule.warn_days, nd)])
+                         (rule.interval_days, rule.warn_days, nd),
+                         (getattr(rule, "interval_events", None), getattr(rule, "warn_events", None) or 0, ne)])
         if STATUS_ORDER[naive] > STATUS_ORDER[it["status"]]:
             prevented.append({"entity": it["entity"], "rule": it["rule"], "real_status": it["status"],
                               "naive_status": naive, "driver": it["driver"],

@@ -22,6 +22,7 @@ from datetime import datetime
 from pathlib import Path
 
 from sqlalchemy import DateTime, create_engine, event, inspect, select, text
+from sqlalchemy.exc import DataError, IntegrityError
 
 from ..config import DATA_DIR, UPLOADS_DIR, VERSION
 from ..errors import DomainError, NotFound
@@ -187,7 +188,10 @@ def _payload_v2(z: zipfile.ZipFile) -> dict[str, list[dict]]:
         m = re.fullmatch(r"tables/([a-z_]+)\.json", n)
         if not m or m.group(1) not in known:
             continue
-        rows = json.loads(z.read(n))
+        try:
+            rows = json.loads(z.read(n))
+        except ValueError as e:                  # обрезанный или испорченный файл в архиве — не 500
+            raise DomainError(f"Повреждена таблица {m.group(1)} в копии") from e
         if not isinstance(rows, list) or not all(isinstance(r, dict) for r in rows):
             raise DomainError(f"Повреждена таблица {m.group(1)} в копии")
         out[m.group(1)] = rows
@@ -295,7 +299,11 @@ def restore(name: str) -> dict:
             snap.write_bytes(z.read("tbo.db"))
             payload = _payload_sqlite(snap)
         before = create("pre-restore")
-        res = _apply(payload)
+        try:
+            res = _apply(payload)
+        except (IntegrityError, DataError) as e:   # транзакция откатилась целиком — база прежняя
+            raise DomainError(f"Копия {name} не восстановлена: данные в ней нарушают правила целостности "
+                              f"({str(e.orig).splitlines()[0][:200]}). Текущая база не изменена.") from e
         ups = [n for n in z.namelist() if n.startswith("uploads/") and not n.endswith("/")]
         skipped = [n for n in ups if not _upload_name_ok(n)]
         if skipped:

@@ -175,6 +175,10 @@ router.post("/drones/{lid}/land")(_abort("land"))
 def cancel(lid: int, request: Request, s: Session = Depends(get_session)):
     link = drones.get_link(s, lid)
     with drones.guard(s, link):
-        drones.cancel(s, link, _who(request))
+        cmd = drones.cancel(s, link, _who(request))
+    if cmd is None:
+        _done(request, "drone_flight_closed", link, "нет связи с бортом в полёте")
+        return {**drones.link_dict(s, link), "message": "Полёт закрыт как «не выполнен»: журнал не получен. "
+                                                         "Если борт передаст журнал позже, наработка будет учтена"}
     _done(request, "drone_cancel", link)
     return {**drones.link_dict(s, link), "message": "Подготовка отменена; план на борту будет удалён"}

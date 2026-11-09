@@ -60,6 +60,7 @@ PRIORITY = {"rtl": 0, "land": 0, "cancel": 1, "start": 2, "prepare": 3}
 KIND_LABELS = {"prepare": "Отправить план", "start": "Старт", "rtl": "Вернуть домой", "land": "Посадить", "cancel": "Отменить подготовку"}
 TELEMETRY_FRESH_S = 5
 READY_MAX_MIN = 30          # «готов» дольше — подготовка снимается (агент сбрасывает свой план раньше, по своей настройке)
+LOST_FLIGHT_MIN = 10        # борт молчит в полёте дольше — полёт можно закрыть (иначе он «висел» бы вечно и блокировал борт)
 TOKEN_PREFIX = "tbo_"
 
 auth_limiter = RateLimiter(30, 15 * 60)       # неверные токены устройств с одного адреса
@@ -321,9 +322,24 @@ def abort(s: Session, link: DroneLink, kind: str, actor: str) -> DroneCommand:
     return cmd
 
 
-def cancel(s: Session, link: DroneLink, actor: str) -> DroneCommand:
+def cancel(s: Session, link: DroneLink, actor: str) -> DroneCommand | None:
+    """Отмена подготовки. Полёт, связь с которым потеряна дольше LOST_FLIGHT_MIN, закрывается как «не выполнен»:
+    без этого он навсегда оставался бы текущим, и борт нельзя было бы ни подготовить, ни отключить. Если агент
+    позже передаст журнал (он хранится на борту), полёт будет учтён — импорт не зависит от этого статуса."""
     now = utcnow()
     run = active_run(s, link)
+    if run is not None and run.status in ("in_flight", "landed"):
+        silent = (now - link.last_seen_at).total_seconds() / 60 if link.last_seen_at else None
+        if online(link, now) or (silent is not None and silent < LOST_FLIGHT_MIN):
+            raise DomainError(f"Борт в полёте — «Вернуть домой» или «Посадить». Закрыть полёт без журнала можно, "
+                              f"если связи с бортом нет дольше {LOST_FLIGHT_MIN} мин")
+        _supersede(s, link, tuple(TTL_S), "полёт закрыт: нет связи с бортом", now)
+        run.status, run.ended_at = "failed", now
+        _run_update(run, error=f"связь с бортом потеряна в полёте (последний обмен {iso(link.last_seen_at) or '—'}), "
+                               "журнал не получен; полёт закрыт оператором — если агент передаст журнал позже, он будет учтён",
+                    closed_by=actor)
+        link.run_id = None
+        return None
     if run is None or run.status not in ("preparing", "ready"):
         raise DomainError("Отменить можно только подготовку. В полёте — «Вернуть домой» или «Посадить»")
     _supersede(s, link, ("start", "prepare"), "подготовка отменена", now)

@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import threading
 import uuid
 from pathlib import Path
 
@@ -31,6 +33,7 @@ def preset_list() -> list[dict]:
 
 
 INDEX = "index.json"   # подписи фото пула: {имя файла: подпись}
+_index_lock = threading.Lock()   # чтение-изменение-запись подписей: параллельные загрузки не теряют чужие подписи
 
 
 def _index() -> dict:
@@ -42,8 +45,18 @@ def _index() -> dict:
 
 
 def _save_index(data: dict):
+    """Атомарно: сбой посреди записи не оставляет испорченный файл (иначе пропали бы все подписи)."""
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
-    (UPLOADS_DIR / INDEX).write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+    tmp = UPLOADS_DIR / f".{INDEX}.{os.getpid()}.{threading.get_ident()}.tmp"
+    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), "utf-8")
+    tmp.replace(UPLOADS_DIR / INDEX)
+
+
+def _update_index(fn):
+    with _index_lock:
+        idx = _index()
+        fn(idx)
+        _save_index(idx)
 
 
 def uploaded_list(used: dict[str, list[str]] | None = None) -> list[dict]:
@@ -70,14 +83,14 @@ def delete_upload(url: str, used_by: list[str]):
         raise DomainError(f"Фото назначено бортам: {', '.join(used_by)} — сначала смените им фото", 409)
     name = url[7:]
     (UPLOADS_DIR / name).unlink(missing_ok=True)
-    idx = _index(); idx.pop(name, None); _save_index(idx)
+    _update_index(lambda idx: idx.pop(name, None))
 
 
 def rename_upload(url: str, title: str):
     validate_url(url)
     if not url.startswith("/media/"):
         raise DomainError("Подпись можно менять только у своих фото")
-    idx = _index(); idx[url[7:]] = title.strip()[:80] or "Своё фото"; _save_index(idx)
+    _update_index(lambda idx: idx.__setitem__(url[7:], title.strip()[:80] or "Своё фото"))
 
 
 def validate_url(url: str | None) -> str | None:
@@ -104,5 +117,5 @@ def save_upload(content: bytes, title: str | None = None) -> str:
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     name = f"{uuid.uuid4().hex}.{ext}"
     (UPLOADS_DIR / name).write_bytes(content)
-    idx = _index(); idx[name] = (title or "Своё фото")[:80]; _save_index(idx)
+    _update_index(lambda idx: idx.__setitem__(name, (title or "Своё фото")[:80]))
     return f"/media/{name}"

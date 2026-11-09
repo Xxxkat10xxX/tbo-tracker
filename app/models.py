@@ -26,6 +26,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -143,6 +144,13 @@ class Installation(Base):
     __table_args__ = (
         CheckConstraint("removed_at IS NULL OR removed_at > installed_at", name="ck_install_interval"),
         Index("ix_install_aircraft_time", "aircraft_id", "installed_at", "removed_at"),
+        # Гарантия БД: узел установлен не более чем в одном месте, позиция занята не более чем одним узлом.
+        # Проверки в коде («прочитал — записал») не защищают от двух одновременных запросов (двойной щелчок):
+        # иначе появились бы два открытых интервала, и полёты начислялись бы узлу дважды.
+        Index("ux_install_open_component", "component_id", unique=True,
+              sqlite_where=text("removed_at IS NULL"), postgresql_where=text("removed_at IS NULL")),
+        Index("ux_install_open_position", "aircraft_id", "position", unique=True,
+              sqlite_where=text("removed_at IS NULL"), postgresql_where=text("removed_at IS NULL")),
     )
 
 
