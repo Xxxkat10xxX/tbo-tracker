@@ -22,7 +22,7 @@
 ## 0. Автотесты (3 минуты)
 
 - [ ] Выполните `python -m pytest -q` (Windows: `.venv\Scripts\python -m pytest -q`, предварительно установив
-      `requirements-dev.txt`) → **127 passed** (около 6 минут).
+      `requirements-dev.txt`) → **128 passed** (около 6 минут).
 - [ ] Тесты бортового агента (модель PX4/MAVROS, заводские параметры Technic, локальные миссии, симулятор):
       `python3 -m pytest agent/agent_tests` → **21 passed**; проходят и под Python 3.8, как на борту.
 - [ ] Тот же набор на PostgreSQL: `TBO_TEST_DATABASE_URL=postgresql+psycopg://user:pass@127.0.0.1/db python -m pytest -q`.

@@ -81,6 +81,9 @@ sudo ./deploy/raspberry-pi/install.sh --https
 - создаёт системного пользователя `tbo` без входа в систему;
 - копирует приложение в `/opt/tbo-tracker`;
 - создаёт виртуальное окружение Python и ставит зависимости точных версий из `requirements.lock`;
+- **без интернета на Pi** ставит зависимости из готовых пакетов `~/tbo-tracker/wheels`: их скачивает и привозит
+  `deploy/field/deploy.sh` с компьютера (списки с SHA-256 — `deploy/raspberry-pi/offline/`, для Python 3.11 и 3.13;
+  после изменения `requirements.lock` их обновляет `python3 deploy/raspberry-pi/offline/make_lists.py`);
 - записывает настройки в `/etc/tbo-tracker/tbo.env` — **паролей там нет**;
 - создаёт базу в `/var/lib/tbo-tracker` (каталог доступен только сервису);
 - **спрашивает пароль администратора** — ввод скрыт, пароль нигде не сохраняется в открытом виде;

@@ -91,8 +91,8 @@ cleanup() {                  # при любом выходе, в том чис�
   if [[ $MUX -eq 1 ]]; then
     for h in "$SERVER" "$DRONE"; do [[ -n "$h" ]] && ssh "${SSHO[@]}" -O exit "$h" >/dev/null 2>&1 || true; done
   fi
-  rm -f "$CTL/ca.crt"
-  rmdir "$CTL" 2>/dev/null || true
+  rm -f "$CTL/ca.crt" "$CTL"/wheels/*.whl
+  rmdir "$CTL/wheels" "$CTL" 2>/dev/null || true
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM HUP
@@ -124,7 +124,26 @@ if [[ "$PART" != drone ]]; then
   say "Сервер: копирование исходников в ~/tbo-tracker"
   tar czf - -C "$ROOT" --exclude=./.git --exclude=./data --exclude=./.venv --exclude=./promo --exclude=./secrets \
       --exclude=./tests --exclude=./agent/agent_tests --exclude='*/__pycache__' --exclude=./.env . \
-    | on "$SERVER" 'mkdir -p ~/tbo-tracker && tar xzf - -C ~/tbo-tracker'
+    | on "$SERVER" 'mkdir -p ~/tbo-tracker && tar xzf - -C ~/tbo-tracker && rm -f ~/tbo-tracker/wheels/*.whl'
+
+  # Сервер без интернета (часто в полевой сети): пакеты Python скачиваются здесь, сверяются по SHA-256 и везутся на Pi
+  # TBO_OFFLINE=1 — везти пакеты в любом случае
+  if [[ "${TBO_OFFLINE:-0}" == 1 ]] || ! on "$SERVER" 'python3 -c "import socket; socket.create_connection((\"pypi.org\", 443), 6).close()"' >/dev/null 2>&1; then
+    pyv="$(on "$SERVER" 'python3 -c "import sys, platform; print(\"cp%d%d-%s\" % (sys.version_info[0], sys.version_info[1], platform.machine()))"' | tr -d '\r')"
+    list="$ROOT/deploy/raspberry-pi/offline/wheels-$pyv.txt"
+    [[ -f "$list" ]] || die "у сервера нет интернета, а готового набора пакетов для $pyv нет — подключите сервер к интернету на время установки"
+    command -v curl >/dev/null && command -v sha256sum >/dev/null || die "нужны curl и sha256sum (есть в Git Bash и Linux)"
+    say "У сервера нет интернета: скачиваю пакеты Python ($pyv) на этот компьютер и везу на сервер"
+    mkdir -p "$CTL/wheels"
+    while read -r sum file url; do
+      [[ -z "$sum" || "$sum" == \#* ]] && continue
+      [[ "$file" =~ ^[A-Za-z0-9._+-]+\.whl$ && "$url" == https://files.pythonhosted.org/* ]] || die "неверная строка в $list: $file"
+      curl -fsSL --retry 3 -o "$CTL/wheels/$file" "$url" || die "не удалось скачать $file (есть ли интернет на этом компьютере?)"
+      printf '%s  %s\n' "$sum" "$CTL/wheels/$file" | sha256sum -c --quiet - || die "контрольная сумма $file не совпала"
+    done < <(tr -d '\r' < "$list")
+    tar czf - -C "$CTL" wheels | on "$SERVER" 'tar xzf - -C ~/tbo-tracker'
+    rm -f "$CTL"/wheels/*.whl
+  fi
 
   flags=""; [[ $HTTPS -eq 1 ]] && flags+=" --https"; [[ $DEMO -eq 1 ]] && flags+=" --demo"; [[ -n "$PORT" ]] && flags+=" --port $PORT"
   register=":"

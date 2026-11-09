@@ -72,10 +72,11 @@ if [[ $SKIP_APT -eq 0 ]]; then
   command -v apt-get >/dev/null || die "Нужен Debian / Raspberry Pi OS (apt-get). Для других систем см. docs/DEPLOY.md → Docker."
   say "Системные пакеты (python3-venv, avahi для адреса <имя>.local, rsync)"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
+  apt-get update -qq || warn "Список пакетов apt не обновлён (нет интернета?) — ставим из уже известных"
   PKGS=(python3 python3-venv python3-pip avahi-daemon rsync curl ca-certificates)
   [[ $HTTPS -eq 1 ]] && PKGS+=(caddy)
-  apt-get install -y -qq --no-install-recommends "${PKGS[@]}" >/dev/null
+  apt-get install -y -qq --no-install-recommends "${PKGS[@]}" >/dev/null \
+    || die "Не удалось установить системные пакеты (${PKGS[*]}): нет доступа к репозиториям apt. Подключите Pi к интернету на время установки или установите эти пакеты заранее"
 fi
 python3 - <<'PY' || die "Нужен Python 3.10 или новее"
 import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)
@@ -94,13 +95,22 @@ install -d -m 0750 -o root -g "$SVC_USER" "$ETC_DIR"
 # ---------------------------------------------------------------- код и зависимости
 say "Копирование приложения в $APP_DIR"
 rsync -a --delete --exclude '.git' --exclude '.venv' --exclude 'data/' --exclude 'promo/' --exclude 'secrets/' \
-      --exclude '.env' --exclude '__pycache__' --exclude '.pytest_cache' --exclude 'tests/' --exclude 'agent_tests/' "$SRC_DIR/" "$APP_DIR/"
+      --exclude '.env' --exclude '__pycache__' --exclude '.pytest_cache' --exclude 'tests/' --exclude 'agent_tests/' \
+      --exclude 'wheels/' "$SRC_DIR/" "$APP_DIR/"
 chown -R root:root "$APP_DIR"
 
 say "Виртуальное окружение Python и зависимости (точные версии из requirements.lock)"
 [[ -x $APP_DIR/.venv/bin/python ]] || python3 -m venv "$APP_DIR/.venv"
-"$APP_DIR/.venv/bin/pip" install -q --upgrade pip
-"$APP_DIR/.venv/bin/pip" install -q --retries 5 --no-deps -r "$APP_DIR/requirements.lock"
+if compgen -G "$SRC_DIR/wheels/*.whl" >/dev/null; then
+  # без интернета: пакеты привёз deploy/field/deploy.sh (скачаны на компьютере, SHA-256 сверены)
+  say "Зависимости — из локальных пакетов $SRC_DIR/wheels (без интернета)"
+  PIP_SRC=(--no-index --find-links "$SRC_DIR/wheels")
+else
+  "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
+  PIP_SRC=(--retries 5)
+fi
+"$APP_DIR/.venv/bin/pip" install -q "${PIP_SRC[@]}" --no-deps -r "$APP_DIR/requirements.lock" \
+  || die "Не удалось установить зависимости Python. Нет интернета на Pi? Запустите установку через deploy/field/deploy.sh — он привезёт пакеты с компьютера"
 "$APP_DIR/.venv/bin/pip" check >/dev/null || die "Конфликт зависимостей (pip check)"
 "$APP_DIR/.venv/bin/python" -m compileall -q "$APP_DIR/app" >/dev/null || true
 
