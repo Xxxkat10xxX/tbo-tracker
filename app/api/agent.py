@@ -86,16 +86,19 @@ class ResultIn(BaseModel):
     message: str = Field("", max_length=500)
 
 
+# Данные датчиков проверяет анализ (services/sensors.py): ошибка в них — предупреждение в итогах импорта, а не 422.
+# Иначе один сбойный отсчёт отклонил бы журнал целиком: агент отложил бы его в rejected/, и полёт с наработкой
+# не попал бы в учёт (правило «некорректные данные датчиков не отменяют учёт полёта», LOG_FORMAT.md).
 class ImuIn(BaseModel):
-    rate_hz: float = Field(ge=1, le=1000)
-    t0_s: float = Field(0, ge=-60, le=86400)
-    accel_g: list[float] = Field(max_length=2_000_000)
+    rate_hz: float | None = None
+    t0_s: float | None = 0
+    accel_g: list[float | None] = Field(max_length=2_000_000)
 
 
 class EventIn(BaseModel):
-    type: str = Field(max_length=20)
-    t_s: float = Field(ge=0, le=86400)
-    peak_g: float | None = Field(None, ge=0, le=200)
+    type: str = Field(max_length=100)
+    t_s: float | None = None
+    peak_g: float | None = None
 
 
 class FlightIn(BaseModel):

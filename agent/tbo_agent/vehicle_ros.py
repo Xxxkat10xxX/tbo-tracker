@@ -83,6 +83,8 @@ class RosVehicle(OffboardMixin, Vehicle):
         self._lock = threading.Lock()
         self._s = {}
         self._imu = deque(maxlen=20000)
+        self._imu_t = 0.0                       # время последнего отсчёта (отсчёты не идут назад)
+        self._acc_last = None                   # (время, |a| в g) — для проверки потока акселерометра
         self._texts = deque(maxlen=10)
         self._modes = deque(maxlen=50)          # (время, режим) — для ожидания смены режима
         self._wp_list, self._wp_version = [], 0
@@ -264,7 +266,22 @@ class RosVehicle(OffboardMixin, Vehicle):
 
     def _on_imu(self, m):
         a = m.linear_acceleration
-        self._imu.append((time.monotonic(), math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z) / G))
+        v = (a.x, a.y, a.z)
+        if v == (0.0, 0.0, 0.0) or not all(math.isfinite(c) for c in v):
+            return          # нет данных: MAVROS отдаёт нули, пока контроллер не передаёт HIGHRES_IMU / RAW_IMU
+        g = math.sqrt(a.x * a.x + a.y * a.y + a.z * a.z) / G
+        now = time.monotonic()
+        t = now
+        try:                # время измерения по метке сообщения: пачка сообщений, пришедших разом, не сжимает время
+            lag = self.rospy.get_time() - m.header.stamp.to_sec()
+            if 0.0 < lag <= 0.5:
+                t = now - lag
+        except Exception:   # noqa: BLE001 — нет метки: время прихода
+            pass
+        t = max(t, self._imu_t)
+        self._imu_t = t
+        self._acc_last = (now, g)
+        self._imu.append((t, g))
 
     def _last_text(self, within: float = 30.0):
         if self._texts and time.monotonic() - self._texts[-1][0] <= within:
@@ -321,6 +338,13 @@ class RosVehicle(OffboardMixin, Vehicle):
             if p.get("SYS_HAS_MAG") is not None and int(p["SYS_HAS_MAG"]) == 0:
                 out.append({"name": "Магнитометр", "ok": False,
                             "detail": "SYS_HAS_MAG=0 — для полёта по GPS нужен компас модуля GPS (I2C) и его калибровка"})
+        acc = self._acc_last
+        if acc is None or time.monotonic() - acc[0] > 3 or not 0.5 <= acc[1] <= 1.5:
+            out.append({"name": "Акселерометр (падения и столкновения)", "ok": True, "warn": True,
+                        "detail": ("нет данных /mavros/imu/data" if acc is None or time.monotonic() - acc[0] > 3 else
+                                   "на земле %.2f g вместо ~1 g" % acc[1]) +
+                                  " — падения и столкновения в полёте не будут обнаружены. Проверьте поток HIGHRES_IMU "
+                                  "от PX4 к MAVROS (режим MAVLink Onboard на порту Orange Pi)"})
         d = p.get("COM_DISARM_LAND")
         if d is not None and float(d) <= 0:
             out.append({"name": "Выключение моторов после посадки", "ok": True, "warn": True,

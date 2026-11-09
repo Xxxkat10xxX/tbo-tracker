@@ -16,7 +16,7 @@ from . import VERSION
 from .checks import failed, preflight, summary
 from .client import ApiError
 from .plan import PlanError, dist_m, effective_limits, frame_of, validate
-from .recorder import Recorder
+from .recorder import GROUND_HIT_G, Recorder
 from .vehicle import VehicleError
 
 log = logging.getLogger("tbo_agent")
@@ -333,6 +333,8 @@ class Agent:
         end_wall = self.api.now() - (v.now() - land_t) / v.time_scale()
         if not rec.took_off:
             status, reason = "aborted", "моторы выключились без взлёта%s" % (": " + snap["status_text"] if snap.get("status_text") else "")
+            if rec.ground_peak >= GROUND_HIT_G:      # полёта нет — события на сервере не будет, поэтому сообщаем здесь
+                reason += "; удар %.1f g на земле (опрокидывание?) — осмотрите винты, лучи и подвес" % rec.ground_peak
         elif self.abort_kind or rec.manual_override:
             status = "aborted"
             reason = {"rtl": "прервана: возврат домой по команде оператора", "land": "прервана: посадка по команде оператора"}.get(

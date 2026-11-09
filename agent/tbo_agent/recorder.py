@@ -10,6 +10,8 @@ import math
 from .plan import to_xy
 
 IMU_HZ = 25
+IMU_MAX_G = 200.0             # выше не бывает и у ударных датчиков: значение — сбой, не перегрузка
+GROUND_HIT_G = 4.0            # удар на земле до взлёта (опрокидывание при запуске) — как порог столкновения на сервере
 TRACK_MAX = 40000             # сервер принимает до 50 000 точек трека: длинный полёт прореживается, а не теряется
 MODE_PHASE = {"AUTO.TAKEOFF": "takeoff", "AUTO.MISSION": "mission", "AUTO.LOITER": "hold", "AUTO.RTL": "rtl",
               "AUTO.LAND": "land", "AUTO.PRECLAND": "land", "OFFBOARD": "mission"}
@@ -25,6 +27,7 @@ class Recorder:
         self.track = []
         self.imu = []                 # 25 Гц: |a| в g с момента взлёта
         self._bucket = None           # (номер интервала, значение с наибольшим отклонением от 1 g)
+        self.ground_peak = 0.0        # наибольшая перегрузка от арминга до взлёта
         self.status_texts = []
         self.mode_changes = []
         self.max_alt = 0.0
@@ -74,9 +77,12 @@ class Recorder:
             v = float(snap["battery_v"])
             self.min_voltage = v if self.min_voltage is None else min(self.min_voltage, v)
         self.wp_reached = max(self.wp_reached, int(snap.get("wp_reached") or 0))
-        if self.took_off:
-            for ti, g in imu:
+        for ti, g in imu:
+            if self.took_off:
                 self._imu(ti, g)
+            elif ti >= self.armed_at and math.isfinite(g):   # опрокидывание при запуске: полёта нет, удар показать
+                # (отсчёты до арминга — например, толчок, пока борт несли, — накопленные в очереди, не в счёт)
+                self.ground_peak = max(self.ground_peak, min(g, IMU_MAX_G))
         if t - self._last_track_t >= 1.0 and snap.get("lat") is not None:
             self._last_track_t = t
             self.track.append([round(t - self.armed_at, 1), round(float(snap["lat"]), 7), round(float(snap["lon"]), 7),
@@ -88,6 +94,7 @@ class Recorder:
     def _imu(self, t: float, g: float):
         if t < self.takeoff_t or not math.isfinite(g):
             return
+        g = min(g, IMU_MAX_G)
         k = int((t - self.takeoff_t) * IMU_HZ)
         if self._bucket is None or self._bucket[0] != k:
             self._flush_bucket()
@@ -100,8 +107,11 @@ class Recorder:
             return
         k, g = self._bucket
         self._bucket = None
-        while len(self.imu) < k:              # пропуски потока — заполняем последним значением
-            self.imu.append(self.imu[-1] if self.imu else 1.0)
+        # Пропуск потока — нейтральный 1 g. Не «последним значением»: повтор одного провала до 0,3 g за время
+        # пропуска дорисовал бы невесомость, и обычный толчок 3,5 g после него стал бы «падением» (а повтор пика —
+        # затянул бы удар). Нейтральное значение не создаёт и не продлевает событий.
+        while len(self.imu) < k:
+            self.imu.append(1.0)
         if len(self.imu) == k:
             self.imu.append(round(g, 3))
 
