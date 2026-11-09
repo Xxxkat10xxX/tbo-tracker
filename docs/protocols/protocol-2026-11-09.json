@@ -1,0 +1,457 @@
+{
+ "date": "2026-11-09T17:35:10+00:00",
+ "commit": "7c0c48b",
+ "environment": {
+  "python": "3.13.18",
+  "os": "Linux-6.18.44-fc-v310-x86_64-with-glibc2.39",
+  "cpu": "x86_64"
+ },
+ "items": {
+  "1": {
+   "title": "Автономный полёт по заданному маршруту",
+   "passed": 3,
+   "failed": 0,
+   "ok": true,
+   "seconds": 11.6,
+   "summary": "3 passed, 97 deselected in 10.19s"
+  },
+  "2": {
+   "title": "Электронные паспорта заменяемых компонентов",
+   "passed": 2,
+   "failed": 0,
+   "ok": true,
+   "seconds": 9.7,
+   "summary": "2 passed, 98 deselected in 8.36s"
+  },
+  "3": {
+   "title": "Мониторинг падений и столкновений по датчикам",
+   "passed": 3,
+   "failed": 0,
+   "ok": true,
+   "seconds": 10.1,
+   "summary": "3 passed, 97 deselected in 8.78s"
+  },
+  "4": {
+   "title": "Учёт фактической наработки: часы налёта и циклы",
+   "passed": 3,
+   "failed": 0,
+   "ok": true,
+   "seconds": 16.5,
+   "summary": "3 passed, 97 deselected in 15.01s"
+  },
+  "5": {
+   "title": "Загрузка журналов Excel/PDF: установка, демонтаж, перестановка",
+   "passed": 4,
+   "failed": 0,
+   "ok": true,
+   "seconds": 16.2,
+   "summary": "4 passed, 96 deselected in 14.86s"
+  },
+  "6": {
+   "title": "Расчёт наработки и остаточного ресурса с учётом истории",
+   "passed": 2,
+   "failed": 0,
+   "ok": true,
+   "seconds": 10.5,
+   "summary": "2 passed, 98 deselected in 9.03s"
+  },
+  "7": {
+   "title": "Регламентное ТО и автоматические уведомления",
+   "passed": 3,
+   "failed": 0,
+   "ok": true,
+   "seconds": 13.9,
+   "summary": "3 passed, 97 deselected in 12.64s"
+  },
+  "8": {
+   "title": "Веб-интерфейс: карточки, история замен, состояние, предстоящие работы",
+   "passed": 47,
+   "failed": 0,
+   "ok": true,
+   "seconds": 126.8,
+   "summary": "47 passed, 53 deselected in 125.11s (0:02:05)"
+  },
+  "9": {
+   "title": "Демонстрация на тестовых данных",
+   "passed": 12,
+   "failed": 0,
+   "ok": true,
+   "seconds": 55.5,
+   "summary": "12 passed, 88 deselected in 53.87s"
+  },
+  "10": {
+   "title": "Перемещение узлов между карточками с пересчётом паспорта",
+   "passed": 1,
+   "failed": 0,
+   "ok": true,
+   "seconds": 5.2,
+   "summary": "1 passed, 99 deselected in 3.91s"
+  }
+ },
+ "missions": {
+  "missions": 50,
+  "completed": 50,
+  "max_xte_m": 8.31,
+  "mean_xte_m": 4.18,
+  "max_landing_offset_m": 2.25
+ },
+ "detector": {
+  "records": 300,
+  "recall": 1.0,
+  "false_alarm_rate": 0.0,
+  "misclassified": 0,
+  "missed": 0,
+  "false_alarms": 0
+ },
+ "benchmark_runs": [
+  {
+   "seed": 1,
+   "flights": 1184,
+   "fleet_hours": 661.2,
+   "operations": 25,
+   "components": 56,
+   "tracker_max_err_h": 0.0033,
+   "ref_overdue": 20,
+   "ref_items": 95,
+   "tracker_missed_overdue": 0,
+   "tracker_status_mismatch": 0,
+   "logbook_lost_hours": 1734.9,
+   "logbook_parts_with_lost_hours": 26,
+   "logbook_parts_installed": 42,
+   "logbook_max_lost_h": 160.8,
+   "missed_overdue": 8,
+   "missed_due_soon": 4,
+   "import_s": 2.3,
+   "operation_ms_max": 29.2
+  },
+  {
+   "seed": 2,
+   "flights": 1142,
+   "fleet_hours": 643.1,
+   "operations": 15,
+   "components": 56,
+   "tracker_max_err_h": 0.0033,
+   "ref_overdue": 19,
+   "ref_items": 95,
+   "tracker_missed_overdue": 0,
+   "tracker_status_mismatch": 0,
+   "logbook_lost_hours": 1282.9,
+   "logbook_parts_with_lost_hours": 16,
+   "logbook_parts_installed": 42,
+   "logbook_max_lost_h": 168.8,
+   "missed_overdue": 3,
+   "missed_due_soon": 2,
+   "import_s": 2.2,
+   "operation_ms_max": 28.2
+  },
+  {
+   "seed": 3,
+   "flights": 1125,
+   "fleet_hours": 626.6,
+   "operations": 20,
+   "components": 56,
+   "tracker_max_err_h": 0.0033,
+   "ref_overdue": 17,
+   "ref_items": 95,
+   "tracker_missed_overdue": 0,
+   "tracker_status_mismatch": 0,
+   "logbook_lost_hours": 1583.9,
+   "logbook_parts_with_lost_hours": 21,
+   "logbook_parts_installed": 42,
+   "logbook_max_lost_h": 206.8,
+   "missed_overdue": 6,
+   "missed_due_soon": 1,
+   "import_s": 2.4,
+   "operation_ms_max": 30.3
+  },
+  {
+   "seed": 4,
+   "flights": 1165,
+   "fleet_hours": 661.0,
+   "operations": 24,
+   "components": 56,
+   "tracker_max_err_h": 0.0033,
+   "ref_overdue": 18,
+   "ref_items": 95,
+   "tracker_missed_overdue": 0,
+   "tracker_status_mismatch": 0,
+   "logbook_lost_hours": 1549.9,
+   "logbook_parts_with_lost_hours": 26,
+   "logbook_parts_installed": 42,
+   "logbook_max_lost_h": 170.3,
+   "missed_overdue": 8,
+   "missed_due_soon": 4,
+   "import_s": 2.78,
+   "operation_ms_max": 34.5
+  },
+  {
+   "seed": 5,
+   "flights": 1143,
+   "fleet_hours": 632.7,
+   "operations": 15,
+   "components": 56,
+   "tracker_max_err_h": 0.0033,
+   "ref_overdue": 18,
+   "ref_items": 95,
+   "tracker_missed_overdue": 0,
+   "tracker_status_mismatch": 0,
+   "logbook_lost_hours": 1860.2,
+   "logbook_parts_with_lost_hours": 21,
+   "logbook_parts_installed": 42,
+   "logbook_max_lost_h": 170.9,
+   "missed_overdue": 4,
+   "missed_due_soon": 3,
+   "import_s": 2.14,
+   "operation_ms_max": 28.6
+  },
+  {
+   "seed": 6,
+   "flights": 1186,
+   "fleet_hours": 655.2,
+   "operations": 20,
+   "components": 56,
+   "tracker_max_err_h": 0.0033,
+   "ref_overdue": 26,
+   "ref_items": 95,
+   "tracker_missed_overdue": 0,
+   "tracker_status_mismatch": 0,
+   "logbook_lost_hours": 1861.5,
+   "logbook_parts_with_lost_hours": 22,
+   "logbook_parts_installed": 42,
+   "logbook_max_lost_h": 204.7,
+   "missed_overdue": 8,
+   "missed_due_soon": 0,
+   "import_s": 2.7,
+   "operation_ms_max": 32.3
+  },
+  {
+   "seed": 7,
+   "flights": 1128,
+   "fleet_hours": 628.0,
+   "operations": 29,
+   "components": 56,
+   "tracker_max_err_h": 0.0033,
+   "ref_overdue": 18,
+   "ref_items": 95,
+   "tracker_missed_overdue": 0,
+   "tracker_status_mismatch": 0,
+   "logbook_lost_hours": 1765.1,
+   "logbook_parts_with_lost_hours": 26,
+   "logbook_parts_installed": 42,
+   "logbook_max_lost_h": 152.3,
+   "missed_overdue": 5,
+   "missed_due_soon": 2,
+   "import_s": 1.91,
+   "operation_ms_max": 31.1
+  },
+  {
+   "seed": 8,
+   "flights": 1150,
+   "fleet_hours": 642.9,
+   "operations": 25,
+   "components": 56,
+   "tracker_max_err_h": 0.0033,
+   "ref_overdue": 19,
+   "ref_items": 95,
+   "tracker_missed_overdue": 0,
+   "tracker_status_mismatch": 0,
+   "logbook_lost_hours": 1908.9,
+   "logbook_parts_with_lost_hours": 29,
+   "logbook_parts_installed": 42,
+   "logbook_max_lost_h": 179.9,
+   "missed_overdue": 7,
+   "missed_due_soon": 1,
+   "import_s": 2.22,
+   "operation_ms_max": 31.7
+  },
+  {
+   "seed": 9,
+   "flights": 1157,
+   "fleet_hours": 653.9,
+   "operations": 24,
+   "components": 56,
+   "tracker_max_err_h": 0.0033,
+   "ref_overdue": 19,
+   "ref_items": 95,
+   "tracker_missed_overdue": 0,
+   "tracker_status_mismatch": 0,
+   "logbook_lost_hours": 1961.5,
+   "logbook_parts_with_lost_hours": 31,
+   "logbook_parts_installed": 42,
+   "logbook_max_lost_h": 183.6,
+   "missed_overdue": 9,
+   "missed_due_soon": 0,
+   "import_s": 2.48,
+   "operation_ms_max": 27.6
+  },
+  {
+   "seed": 10,
+   "flights": 1209,
+   "fleet_hours": 670.3,
+   "operations": 25,
+   "components": 56,
+   "tracker_max_err_h": 0.0033,
+   "ref_overdue": 23,
+   "ref_items": 95,
+   "tracker_missed_overdue": 0,
+   "tracker_status_mismatch": 0,
+   "logbook_lost_hours": 1431.3,
+   "logbook_parts_with_lost_hours": 23,
+   "logbook_parts_installed": 42,
+   "logbook_max_lost_h": 223.9,
+   "missed_overdue": 5,
+   "missed_due_soon": 5,
+   "import_s": 2.91,
+   "operation_ms_max": 32.4
+  }
+ ],
+ "benchmark_summary": {
+  "flights": {
+   "min": 1125,
+   "mean": 1158.9,
+   "max": 1209
+  },
+  "fleet_hours": {
+   "min": 626.6,
+   "mean": 647.49,
+   "max": 670.3
+  },
+  "operations": {
+   "min": 15,
+   "mean": 22.2,
+   "max": 29
+  },
+  "tracker_max_err_h": {
+   "min": 0.0033,
+   "mean": 0.0033,
+   "max": 0.0033
+  },
+  "ref_items": {
+   "min": 95,
+   "mean": 95,
+   "max": 95
+  },
+  "ref_overdue": {
+   "min": 17,
+   "mean": 19.7,
+   "max": 26
+  },
+  "tracker_missed_overdue": {
+   "min": 0,
+   "mean": 0,
+   "max": 0
+  },
+  "tracker_status_mismatch": {
+   "min": 0,
+   "mean": 0,
+   "max": 0
+  },
+  "logbook_lost_hours": {
+   "min": 1282.9,
+   "mean": 1694.01,
+   "max": 1961.5
+  },
+  "logbook_parts_with_lost_hours": {
+   "min": 16,
+   "mean": 24.1,
+   "max": 31
+  },
+  "logbook_max_lost_h": {
+   "min": 152.3,
+   "mean": 182.2,
+   "max": 223.9
+  },
+  "missed_overdue": {
+   "min": 3,
+   "mean": 6.3,
+   "max": 9
+  },
+  "missed_due_soon": {
+   "min": 0,
+   "mean": 2.2,
+   "max": 5
+  },
+  "import_s": {
+   "min": 1.91,
+   "mean": 2.404,
+   "max": 2.91
+  },
+  "operation_ms_max": {
+   "min": 27.6,
+   "mean": 30.59,
+   "max": 34.5
+  }
+ },
+ "full_suite": {
+  "passed": 100,
+  "failed": 0,
+  "ok": true,
+  "seconds": 321.9,
+  "summary": "100 passed in 320.13s (0:05:20)"
+ },
+ "characteristics": [
+  {
+   "id": "Х1",
+   "item": 4,
+   "name": "Точность начисления наработки узлу (отклонение от эталона)",
+   "unit": "ч",
+   "threshold": "≤ 0,01",
+   "value": 0.0033,
+   "ok": true
+  },
+  {
+   "id": "Х2",
+   "item": 6,
+   "name": "Потеря наработки узлов при перестановках между бортами",
+   "unit": "ч",
+   "threshold": "0 (сверх округления 0,01)",
+   "value": 0.0033,
+   "ok": true
+  },
+  {
+   "id": "Х3",
+   "item": 7,
+   "name": "Расхождения статуса ТО с эталоном (узел × работа, все повторы)",
+   "unit": "шт.",
+   "threshold": "0",
+   "value": 0,
+   "ok": true
+  },
+  {
+   "id": "Х4",
+   "item": 3,
+   "name": "Доля обнаруженных падений и столкновений",
+   "unit": "%",
+   "threshold": "≥ 95",
+   "value": 100.0,
+   "ok": true
+  },
+  {
+   "id": "Х5",
+   "item": 3,
+   "name": "Ложные срабатывания детектора на штатных полётах",
+   "unit": "%",
+   "threshold": "≤ 2",
+   "value": 0.0,
+   "ok": true
+  },
+  {
+   "id": "Х6",
+   "item": 1,
+   "name": "Отклонение от линии пути в симуляторе при ветре до 8 м/с",
+   "unit": "м",
+   "threshold": "≤ 10",
+   "value": 8.31,
+   "ok": true
+  },
+  {
+   "id": "Х7",
+   "item": 5,
+   "name": "Время импорта журнала за 90 дней парка (≈1 150 полётов)",
+   "unit": "с",
+   "threshold": "≤ 10",
+   "value": 2.91,
+   "ok": true
+  }
+ ]
+}
