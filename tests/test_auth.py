@@ -344,5 +344,8 @@ def test_allowed_hosts(anon, monkeypatch):
     assert st("127.0.0.1:8000") == 200 and st("localhost") == 200 and st("[::1]:8000") == 200
     r = anon.get("/health", headers={"Host": "rebind.attacker.example"})
     assert r.status_code == 400 and r.json()["code"] == "host"
+    # за HTTPS-прокси (Caddy передаёт исходный Host): имя из TBO_PUBLIC_URL разрешено без перечисления
+    monkeypatch.setattr(security, "PUBLIC_URL", "https://tbo.example.com")
+    assert st("tbo.example.com") == 200 and st("tbo.example.com:443") == 200 and st("evil.example") == 400
     monkeypatch.setattr(security, "ALLOWED_HOSTS", set())
     assert st("anything.example") == 200
