@@ -328,9 +328,54 @@ class MissionRun(Base):
     import_id: Mapped[int | None] = mapped_column(ForeignKey("log_imports.id"))
     started_at: Mapped[datetime] = mapped_column(DateTime)
     ended_at: Mapped[datetime] = mapped_column(DateTime)
-    status: Mapped[str] = mapped_column(String(20))           # completed | aborted
+    # симулятор: completed | aborted; реальный борт: preparing → ready → in_flight → landed → completed | aborted,
+    # а также failed (план не принят / сбой) и cancelled (подготовка отменена)
+    status: Mapped[str] = mapped_column(String(20))
     summary: Mapped[dict] = mapped_column(JSON, default=dict)
     track: Mapped[list] = mapped_column(JSON, default=list)   # [[t, lat, lon, alt, v, фаза], …]
+    source: Mapped[str | None] = mapped_column(String(20), default="sim")   # sim — симулятор, drone — реальный борт
+
+
+class DroneLink(Base):
+    """Связь с бортовым компьютером (агент tbo-agent): токен устройства, состояние, проверки и телеметрия борта."""
+
+    __tablename__ = "drone_links"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    aircraft_id: Mapped[int] = mapped_column(ForeignKey("aircraft.id", ondelete="CASCADE"), unique=True)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True)     # SHA-256 токена; сам токен не хранится
+    token_hint: Mapped[str] = mapped_column(String(12))                  # последние символы — узнать токен в конфиге борта
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    last_seen_at: Mapped[datetime | None] = mapped_column(DateTime)
+    last_ip: Mapped[str | None] = mapped_column(String(64))
+    agent: Mapped[dict] = mapped_column(JSON, default=dict)              # версия агента, исполнитель, автопилот
+    state: Mapped[str] = mapped_column(String(20), default="offline")
+    detail: Mapped[str | None] = mapped_column(String(500))
+    checks: Mapped[list] = mapped_column(JSON, default=list)             # [{"name", "ok", "detail"}] — проверки на борту
+    telemetry: Mapped[dict] = mapped_column(JSON, default=dict)
+    telemetry_at: Mapped[datetime | None] = mapped_column(DateTime)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("mission_runs.id", ondelete="SET NULL"))
+
+    aircraft: Mapped[Aircraft] = relationship(lazy="joined")
+
+
+class DroneCommand(Base):
+    """Команда борту. Доставляется агенту при опросе; просроченная не доставляется («старый» старт не выполнится)."""
+
+    __tablename__ = "drone_commands"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    link_id: Mapped[int] = mapped_column(ForeignKey("drone_links.id", ondelete="CASCADE"), index=True)
+    run_id: Mapped[int | None] = mapped_column(ForeignKey("mission_runs.id", ondelete="SET NULL"))
+    kind: Mapped[str] = mapped_column(String(20))           # prepare | start | rtl | land | cancel
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    status: Mapped[str] = mapped_column(String(20), default="queued")   # queued | delivered | done | failed | expired
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_by: Mapped[str | None] = mapped_column(String(64))
+    expires_at: Mapped[datetime] = mapped_column(DateTime)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    result: Mapped[str | None] = mapped_column(String(500))
 
 
 class NotificationEvent(Base):

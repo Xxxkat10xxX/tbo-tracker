@@ -17,7 +17,9 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy.exc import DataError, IntegrityError
 
 from . import security
+from .api.agent import router as agent_router
 from .api.auth import router as auth_router
+from .api.drones import router as drones_router
 from .api.missions import router as missions_router
 from .api.routes import router
 from .api.server import router as server_router
@@ -103,6 +105,15 @@ def _resolve(token: str | None):
         return auth.resolve_session(s, token)
 
 
+def _resolve_device(token: str | None) -> tuple[int | None, str]:
+    from .services import drones
+    with SessionLocal() as s:
+        link = drones.resolve_device(s, token)
+        if link is None:
+            return None, "bad"
+        return (link.id, "") if link.enabled else (None, "disabled")
+
+
 def _audit_write(method: str, path: str, username: str, ip: str, status: int):
     from .services import auth
     auth.audit("api_write", username, ip, target=f"{method} {path}", status=status)
@@ -123,6 +134,19 @@ async def access_control(request: Request, call_next):
         return done(security.deny(400, "Неизвестное имя сайта в запросе (TBO_ALLOWED_HOSTS)", "host"))
     if unsafe and not security.origin_ok(request):
         return done(security.deny(403, "Запрос с другого сайта отклонён", "origin"))
+    if need == "device":                     # бортовой агент: токен устройства, ограничение неверных попыток
+        from .services.drones import auth_limiter
+        ip = security.client_ip(request)
+        if auth_limiter.blocked(ip):
+            return done(security.deny(429, "Слишком много неверных токенов устройства с этого адреса", "device_auth"))
+        lid, err = await run_in_threadpool(_resolve_device, security.bearer_token(request))
+        if lid is None:
+            if err == "bad":
+                auth_limiter.hit(ip)
+            return done(security.deny(401 if err == "bad" else 403, "Неверный токен устройства" if err == "bad"
+                                      else "Подключение борта отключено администратором", "device_auth"))
+        request.state.device = lid
+        return done(await call_next(request))
     if need is None:
         if unsafe and request.headers.get("x-requested-with") != "tbo":
             return done(security.deny(403, "Запрос должен отправляться из интерфейса tbo-tracker", "csrf"))
@@ -178,6 +202,8 @@ app.include_router(auth_router)
 app.include_router(router)
 app.include_router(missions_router)
 app.include_router(server_router)
+app.include_router(drones_router)
+app.include_router(agent_router)
 app.add_middleware(security.BodyLimitMiddleware)
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 app.mount("/media", MediaFiles(directory=UPLOADS_DIR, check_dir=False), name="media")   # каталог создаётся при запуске

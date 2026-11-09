@@ -8,7 +8,7 @@
 
 | № | Критерий | Где в интерфейсе | Сценарий | Автотесты (`tests/`) |
 |---|---|---|---|---|
-| 1 | Автономный полёт по заданному маршруту | «Миссии и автономный полёт» | 6 | `test_autonomous_mission_flight_accrues_hours`, `test_mission_crud_validation_and_export_roundtrip` |
+| 1 | Автономный полёт по заданному маршруту | «Миссии и автономный полёт», «Полёт на борту», «Борты на связи» | 6 | `test_autonomous_mission_flight_accrues_hours`, `test_mission_crud_validation_and_export_roundtrip`, `test_real_flight_via_agent_is_imported` |
 | 2 | Электронные паспорта узлов: UID, характеристики, ресурс | карточка узла → «Электронный паспорт» | 9 | `test_component_passport_uid_specs_residual`, `test_individual_resource_component` |
 | 3 | Мониторинг: количество падений и столкновений по датчикам | карточка борта → «Датчики»; «ТО и уведомления» → «Уведомления» | 7 | `test_sensor_detector_thresholds`, `test_fall_from_log_triggers_inspection_and_counters`, `test_mission_fault_detects_fall_and_preflight_blocks` |
 | 4 | Учёт фактической наработки: часы налёта и циклы | «Парк БПЛА», карточки бортов и узлов | 1, 6 | `test_1_log_import_accrues_to_aircraft_and_all_installed_components`, `test_late_import_uses_historical_configuration` |
@@ -45,8 +45,17 @@
   - экспорт в QGroundControl `.plan` (ArduPilot и PX4) и `.waypoints` (QGC WPL 110). Команды MAVLink: `NAV_TAKEOFF` (22), `NAV_WAYPOINT` (16), `NAV_RETURN_TO_LAUNCH` (20); кадр `GLOBAL_RELATIVE_ALT`;
   - импорт тех же форматов.
 - **`scripts/run_mission_mavlink.py`** загружает миссию в автопилот по MAVLink (pymavlink) и переводит его в AUTO.
+- **Полёт на реальном борту** (Skyris Technic 6S: Orange Pi 5 Pro + PX4) — [DRONE.md](DRONE.md):
+  - бортовой агент `agent/` получает план с сервера, проверяет борт и загружает план в PX4 со сверкой;
+  - по кнопке «Старт» выполняет миссию: AUTO.MISSION или OFFBOARD через simple_offboard Technic;
+  - передаёт телеметрию на карту, выполняет «Вернуть домой» и «Посадить»;
+  - после посадки отправляет журнал, который импортируется автоматически.
+  - Тесты: `tests/test_drones.py` (настоящий сервер ↔ агент), `agent/agent_tests` (модель PX4/MAVROS, Python 3.8).
 
-**Ограничения.** Полёт выполняется в кинематическом симуляторе, а не на реальном аппарате. Скрипт MAVLink — заготовка для стенда или SITL, на реальном борту в рамках прототипа он не проверялся. Журнал реального полёта загружается в «Импорт журналов» так же, как журнал симулятора.
+**Ограничения.**
+- Встроенный автономный полёт выполняется в кинематическом симуляторе.
+- Агент для реального борта проверен на модели PX4/MAVROS/simple_offboard и на собственном симуляторе; полёты на реальном Technic 6S не выполнялись.
+- Скрипт MAVLink — заготовка для стенда или SITL.
 
 ## 2. Электронные паспорта заменяемых компонентов
 

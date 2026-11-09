@@ -33,6 +33,8 @@ def tick() -> dict:
     with SessionLocal() as s:
         from . import auth
         auth.cleanup(s)                       # просроченные сессии и старые записи аудита
+        from . import drones
+        drones.sweep(s)                       # просроченные команды бортам, зависшие подготовки полёта
         out["new"] = len(notify.scan(s))
         res = notify.deliver_pending(s, conf)
         if res:

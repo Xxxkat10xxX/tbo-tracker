@@ -16,3 +16,4 @@ secrets
 .ruff_cache
 scripts
 deploy/raspberry-pi
+agent/agent_tests

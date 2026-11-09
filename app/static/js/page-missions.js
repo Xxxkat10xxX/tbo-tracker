@@ -5,7 +5,8 @@
 const R_EARTH = 6371000;
 const toXY = (h, lat, lon) => [((lon - h.lon) * Math.PI / 180) * R_EARTH * Math.cos(h.lat * Math.PI / 180), ((lat - h.lat) * Math.PI / 180) * R_EARTH];
 const toLL = (h, x, y) => [h.lat + (y / R_EARTH) * 180 / Math.PI, h.lon + (x / (R_EARTH * Math.cos(h.lat * Math.PI / 180))) * 180 / Math.PI];
-const PHASE_RU = { takeoff: "Взлёт", mission: "Полёт по маршруту", hold: "Удержание на точке", rtl: "Возврат домой", land: "Посадка", crash: "Аварийное завершение" };
+const PHASE_RU = { takeoff: "Взлёт", mission: "Полёт по маршруту", hold: "Удержание на точке", rtl: "Возврат домой", land: "Посадка", crash: "Аварийное завершение", manual: "Ручное управление (пульт)" };
+const runBadge = (r) => `<span class="badge ${RUN_CLS[r.status] || ""}">${esc(r.status_label || r.status)}</span>`;
 
 const fmtDur = (s) => `${Math.floor(s / 60)} мин ${String(Math.round(s % 60)).padStart(2, "0")} с`;
 
@@ -20,7 +21,7 @@ async function pageMissions() {
         <td>${m.aircraft_id ? `<a href="#/aircraft/${m.aircraft_id}">${esc(m.aircraft_name)}</a>` : '<span class="muted">не назначен</span>'}</td>
         <td class="num">${m.waypoints.length}</td><td class="num">${m.stats ? num(m.stats.distance_m / 1000, 2) + " км" : "—"}</td>
         <td class="num">${m.stats ? fmtDur(m.stats.duration_s) : "—"}</td>
-        <td>${m.last_run ? `<span class="badge ${m.last_run.status === "completed" ? "ok" : "bad"}">${m.last_run.status === "completed" ? "выполнена" : "прервана"}</span> <span class="small muted">${fmtDT(m.last_run.ended_at)}</span>` : '<span class="muted small">не выполнялась</span>'}</td></tr>`).join("")}
+        <td>${m.last_run ? `${runBadge(m.last_run)} <span class="small muted">${m.last_run.source === "drone" ? "борт · " : ""}${fmtDT(m.last_run.ended_at)}</span>` : '<span class="muted small">не выполнялась</span>'}</td></tr>`).join("")}
       </tbody></table></div>` : '<div class="empty-state">Миссий пока нет</div>'}</div>`;
   $("#m-new").onclick = async () => {
     const base = list[0] || { home_lat: 54.9512, home_lon: 38.2034 };
@@ -62,6 +63,7 @@ async function pageMission(id) {
         <div class="telemetry" id="telemetry" hidden></div></div>
         <div class="small muted mt-8" id="m-stats"></div></div>
       <div>
+        <div class="card" id="flight-panel"></div>
         <div class="card"><h2>Параметры миссии</h2>
           <div class="field"><label>Название</label><input name="name" value="${esc(st.name)}"></div>
           <div class="row2"><div class="field"><label>Борт</label><select name="aircraft_id"><option value="">— не назначен —</option>${fleet.map((a) => `<option value="${a.id}" ${a.id === st.aircraft_id ? "selected" : ""}>${esc(a.name)} · ${esc(a.serial)}</option>`).join("")}</select></div>
@@ -71,7 +73,7 @@ async function pageMission(id) {
           <div class="field"><label>Высота взлёта, м</label><input type="number" min="2" max="500" name="takeoff_alt" value="${st.takeoff_alt}"></div></div>
           <label><input type="checkbox" name="return_home" ${st.return_home ? "checked" : ""} class="w-auto"> Возврат в точку взлёта (RTL) и посадка</label></div>
         <div class="card"><div class="card-head"><h2>Точки маршрута</h2><span class="small muted" id="wp-count"></span></div><div id="wp-table"></div></div>
-        <div class="card"><h2>Автономный полёт</h2>
+        <div class="card"><h2>Симулятор автопилота</h2>
           <div class="row3"><div class="field"><label>Ветер, м/с</label><input type="number" min="0" max="20" step="0.5" name="wind_ms" value="3"></div>
           <div class="field"><label>Ветер откуда, °</label><input type="number" min="0" max="360" name="wind_from" value="250"></div>
           <div class="field"><label>Отказ (проверка)</label><select name="fault"><option value="">без отказов</option></select></div></div>
@@ -173,11 +175,13 @@ async function pageMission(id) {
   $("#z-fit").onclick = () => { fit(); drawMap(); };
 
   function drawRuns(runs) {
-    $("#runs").innerHTML = runs.length ? `<table><thead><tr><th>Окончание</th><th>Борт</th><th>Итог</th><th class="num">Длительность</th><th class="num">Путь</th><th class="num">Макс. боковое откл.</th><th>Журнал</th></tr></thead><tbody>
+    $("#runs").innerHTML = runs.length ? `<div class="table-wrap"><table><thead><tr><th>Окончание</th><th>Борт</th><th>Где</th><th>Итог</th><th class="num">Длительность</th><th class="num">Путь</th><th class="num">Макс. высота</th><th>Журнал</th></tr></thead><tbody>
       ${runs.map((r) => `<tr><td class="nowrap">${fmtDT(r.ended_at)}</td><td><a href="#/aircraft/${r.aircraft_id}">${esc(r.summary.aircraft_name || "")}</a></td>
-        <td><span class="badge ${r.status === "completed" ? "ok" : "bad"}">${r.status === "completed" ? "Выполнена" : "Прервана"}</span></td>
-        <td class="num">${fmtDur(r.summary.duration_s || 0)}</td><td class="num">${num((r.summary.distance_m || 0) / 1000, 2)} км</td><td class="num">${num(r.summary.max_xte_m || 0, 1)} м</td>
-        <td class="small">импорт №${r.import_id}</td></tr>`).join("")}</tbody></table>` : '<div class="empty-state">Миссия ещё не выполнялась</div>';
+        <td><span class="badge ${r.source === "drone" ? "blue" : ""}">${r.source === "drone" ? "Борт" : "Симулятор"}</span></td>
+        <td>${runBadge(r)}${r.summary.reason || r.summary.error ? `<div class="small muted">${esc(r.summary.reason || r.summary.error)}</div>` : ""}</td>
+        <td class="num">${r.summary.duration_s ? fmtDur(r.summary.duration_s) : "—"}</td><td class="num">${r.summary.distance_m ? num(r.summary.distance_m / 1000, 2) + " км" : "—"}</td>
+        <td class="num">${r.summary.max_alt_m != null ? num(r.summary.max_alt_m, 0) + " м" : "—"}</td>
+        <td class="small">${r.import_id ? `импорт №${r.import_id}` : "—"}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty-state">Миссия ещё не выполнялась</div>';
   }
   drawRuns(m.runs);
 
@@ -223,5 +227,10 @@ async function pageMission(id) {
     el.scrollIntoView({ behavior: "smooth" });
   }
   drawAll();
+  flightPanel($("#flight-panel"), {
+    missionId: +id, aircraftId: () => st.aircraft_id, waypoints: () => st.waypoints, returnHome: () => st.return_home, save,
+    drawLive: (track, ll) => { const q = toXY(home(), ll[0], ll[1]); drawMap(track, [sx(q[0]), sy(q[1])]); },
+    onRunsChanged: (runs) => { drawRuns(runs); refreshNavCount(); AIRCRAFT_CACHE = null; },
+  });
 }
 const view_ = () => $("#view");

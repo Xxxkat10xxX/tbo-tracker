@@ -94,7 +94,7 @@ install -d -m 0750 -o root -g "$SVC_USER" "$ETC_DIR"
 # ---------------------------------------------------------------- код и зависимости
 say "Копирование приложения в $APP_DIR"
 rsync -a --delete --exclude '.git' --exclude '.venv' --exclude 'data/' --exclude 'promo/' --exclude 'secrets/' \
-      --exclude '.env' --exclude '__pycache__' --exclude '.pytest_cache' --exclude 'tests/' "$SRC_DIR/" "$APP_DIR/"
+      --exclude '.env' --exclude '__pycache__' --exclude '.pytest_cache' --exclude 'tests/' --exclude 'agent_tests/' "$SRC_DIR/" "$APP_DIR/"
 chown -R root:root "$APP_DIR"
 
 say "Виртуальное окружение Python и зависимости (точные версии из requirements.lock)"
