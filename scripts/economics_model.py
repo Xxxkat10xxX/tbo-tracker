@@ -25,10 +25,10 @@ VALUE = {
 SAM0 = 8000       # дронов в коммерческих услугах, 2026 (Минпромторг)
 # ---------------------------------------------------------------- тарифы (₽ без НДС)
 # «Старт»: 2 борта бесплатно 2 недели (пробный период, выручки не даёт).
-# «Мини»: до 2 бортов — 1 290 ₽/мес; «Эксплуатант»: до 4 бортов — 2 290 ₽/мес; «Парк»: до 20 бортов — 9 900 ₽/мес;
-# «Предприятие»: закрытый контур для парков от 50 бортов, 600 тыс. ₽ в год (оплата вперёд за год).
+# «Мини»: до 2 бортов — 1 290 ₽/мес; «Эксплуатант»: до 6 бортов — 2 990 ₽/мес; «Парк»: до 20 бортов — 9 900 ₽/мес;
+# «Предприятие»: закрытый контур для парков от 50 бортов, бессрочная лицензия 900 тыс. ₽ (разовый платёж).
 TIER_MINI, TIER_MINI_FILL, MINI_SHARE = 1290, 1.5, 0.15       # в среднем 1,5 борта из 2; 15 % платящих бортов
-TIER_SMALL, TIER_SMALL_CAP, TIER_SMALL_FILL = 2290, 4, 3      # в среднем занято 3 места из 4
+TIER_SMALL, TIER_SMALL_CAP, TIER_SMALL_FILL = 2990, 6, 4.5    # в среднем занято 4,5 места из 6
 TIER_MID, TIER_MID_CAP, TIER_MID_FILL = 9900, 20, 12          # в среднем занято 12 мест из 20
 SMALL_SHARE = 0.30                                            # доля платящих бортов на тарифе «Эксплуатант»
 ARPU = (MINI_SHARE * TIER_MINI * 12 / TIER_MINI_FILL + SMALL_SHARE * TIER_SMALL * 12 / TIER_SMALL_FILL
@@ -52,7 +52,7 @@ HOSTING = 150
 MARKETING = [200, 400, 300, 300, 300]
 COMMISSION = 0.10             # бонус продавцам заказчика с подписок и лицензий
 VAR_PAID, VAR_FREE = 0.30, 0.10   # хранение журналов, трафик, обращения, тыс. ₽/борт/год
-LICENSE, IMPLEMENT = 600, 150   # «Предприятие»: 600 тыс. ₽ в год с каждого клиента; внедрение у нового клиента
+LICENSE, IMPLEMENT = 900, 150   # «Предприятие»: бессрочная лицензия 900 тыс. ₽ разово; внедрение у нового клиента
 PARTS_MARGIN = 0.70           # маржа заказчика на узлах, заказанных по напоминанию, тыс. ₽/подключённый борт/год
 #   = 40 тыс. ₽ трат на узлы × 50 % узлы профиля заказчика × 10 % заказов через сервис × 35 % маржи
 
@@ -87,7 +87,7 @@ def run(s, price=None, share_k=1.0, onprem=True, parts=True, dev0=DEV0):
         avg = (prev + end) / 2
         new_lic = s["onprem"][t] if onprem else 0
         saas = avg * price
-        lic = (base_lic + new_lic) * LICENSE        # годовая оплата вперёд, новые клиенты платят в год подключения
+        lic = new_lic * LICENSE                     # бессрочная лицензия: платёж один раз в год подключения
         sup = 0.0
         free = avg * s["free_k"]
         prt = (avg + free + (base_lic + new_lic) * ENTERPRISE_FLEET) * PARTS_MARGIN if parts else 0.0
@@ -135,7 +135,7 @@ def main():
     for k, v in VALUE.items():
         print(f"- {k}: {fmt(v)}")
     print(f"- Итого: {fmt(total)}")
-    for name, price, n in (("Мини, 2 из 2", TIER_MINI, 2), ("Мини, 1 борт", TIER_MINI, 1), ("Эксплуатант, 4 из 4", TIER_SMALL, 4), ("Эксплуатант, 3 из 4", TIER_SMALL, 3), ("Эксплуатант, 1 борт", TIER_SMALL, 1),
+    for name, price, n in (("Мини, 2 из 2", TIER_MINI, 2), ("Мини, 1 борт", TIER_MINI, 1), ("Эксплуатант, 6 из 6", TIER_SMALL, 6), ("Эксплуатант, 4,5 из 6", TIER_SMALL, 4.5), ("Эксплуатант, 3 борта", TIER_SMALL, 3), 
                            ("Парк, 20 из 20", TIER_MID, 20), ("Парк, 12 из 20", TIER_MID, 12), ("Парк, 5 бортов", TIER_MID, 5)):
         per = price * 12 / n
         print(f"- {name}: {fmt(per)} ₽/борт/год, польза/цена {total / per:.1f}")
@@ -188,3 +188,69 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+# ---------------------------------------------------------------- для модуля C: ROI, дисконтированная окупаемость
+def discounted_payback(cf, r=R):
+    cum = 0.0
+    for t, c in enumerate(cf):
+        d = c / (1 + r) ** t
+        if t and cum + d >= 0:
+            return t - 1 + (-cum) / d
+        cum += d
+    return None
+
+
+def roi(cf):
+    """ROI = чистый результат за горизонт / максимальная потребность в инвестициях (накопленный минус)."""
+    cum, need = 0.0, 0.0
+    for c in cf:
+        cum += c
+        need = min(need, cum)
+    return sum(cf) / -need, -need
+
+
+# ---------------------------------------------------------------- сравнение вариантов для эксплуатанта (одинаковый объём и период)
+RPI_KIT = 55.0        # тыс. ₽: Raspberry Pi 5 8GB ≈ 39,5 (xcom-shop) + корпус, питание, SSD, ИБП ≈ 15,5
+ADMIN_H_MONTH = 2     # часов администрирования своего сервера в месяц
+SETUP_H = 8           # часов инженера на подключение и обучение
+
+
+def customer_case(fleet, years=5):
+    v = sum(VALUE.values()) / 1000                    # тыс. ₽ пользы на борт в год
+    h = ENGINEER_HOUR / 1000
+    base = {"Ручной учёт (Excel, бумага)": dict(capex=0, opex=0)}
+    if fleet <= 2:   sub = TIER_MINI * 12
+    elif fleet <= 6: sub = TIER_SMALL * 12
+    else:
+        big, rest = divmod(fleet, 20)
+        sub = big * TIER_MID * 12 + (0 if rest == 0 else min(TIER_MID, -(-rest // 6) * TIER_SMALL) * 12)
+    variants = {"tbo-tracker в облаке (подписка)": dict(capex=SETUP_H * h, opex=sub / 1000),
+                "tbo-tracker на своём сервере": dict(capex=LICENSE + RPI_KIT + SETUP_H * h, opex=ADMIN_H_MONTH * 12 * h)}
+    out = []
+    for name, x in variants.items():
+        benefit = fleet * v
+        net = benefit - x["opex"]
+        total_cost = x["capex"] + x["opex"] * years
+        pb = x["capex"] / net if net > 0 else None
+        out.append((name, x["capex"], x["opex"], benefit, total_cost, benefit * years - total_cost,
+                    (benefit * years - total_cost) / total_cost, pb))
+    return out
+
+
+def module_c():
+    b = SCENARIOS["Базовый"]
+    cf, rows = run(b)
+    r_, need = roi(cf)
+    pv_inv = sum(-c / (1 + R) ** t for t, c in enumerate(cf) if c < 0)
+    print(f"\n## Модуль C (базовый)\nROI 5 лет {r_ * 100:.0f} % (чистый результат {sum(cf):,.0f} / вложения {need:,.0f}); "
+          f"дисконт. ROI {npv(cf) / pv_inv * 100:.0f} % (NPV / PV вложений {pv_inv:,.0f}); "
+          f"дисконт. окупаемость {discounted_payback(cf):.1f} г.")
+    for fleet in (6, 50):
+        print(f"\nЭксплуатант, {fleet} бортов, 5 лет (тыс. ₽): вариант | разово | в год | польза в год | затраты 5 лет | эффект 5 лет | ROI | окупаемость, мес")
+        print(f"  Ручной учёт: затраты на учёт {fleet * 12 * ENGINEER_HOUR / 1000:,.0f} в год (12 ч на борт), потери от пропусков ТО {fleet * FAIL_RATE * (FAIL_REPAIR + FAIL_DOWNTIME) / 1000:,.0f} в год")
+        for name, capex, opex, ben, tc, eff, ro, pb in customer_case(fleet):
+            print(f"  {name}: {capex:,.0f} | {opex:,.1f} | {ben:,.0f} | {tc:,.0f} | {eff:,.0f} | {ro * 100:.0f} % | {pb * 12 if pb is not None else float('nan'):.1f}")
+
+
+if __name__ == "__main__":
+    module_c()
