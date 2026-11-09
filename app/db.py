@@ -86,6 +86,7 @@ EXTRA_COLUMNS = {
     "component_types": {"spec_fields": "JSON"},
     "maintenance_rules": {"interval_events": "INTEGER", "warn_events": "INTEGER"},
     "mission_runs": {"source": "VARCHAR(20)"},
+    "missions": {"frame": "VARCHAR(10)"},
 }
 
 
@@ -95,7 +96,7 @@ def migrate(eng=None):
     eng = eng or engine
     insp = inspect(eng)
     with eng.begin() as conn:
-        for table in ("aircraft", "components", "component_types", "maintenance_rules", "mission_runs"):
+        for table in ("aircraft", "components", "component_types", "maintenance_rules", "mission_runs", "missions"):
             if not insp.has_table(table):
                 continue
             have = {c["name"] for c in insp.get_columns(table)}

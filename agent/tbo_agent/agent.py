@@ -15,7 +15,7 @@ import time
 from . import VERSION
 from .checks import failed, preflight, summary
 from .client import ApiError
-from .plan import PlanError, dist_m, effective_limits, validate
+from .plan import PlanError, dist_m, effective_limits, frame_of, validate
 from .recorder import Recorder
 from .vehicle import VehicleError
 
@@ -110,8 +110,8 @@ class Agent:
         with self.lock:
             body = {"state": self.state, "detail": (self.detail or "")[:500] or None, "run_id": self.run_id,
                     "plan_hash": (self.plan or {}).get("plan_hash"),
-                    "checks": [{"name": str(c.get("name"))[:80], "ok": bool(c.get("ok")), "detail": str(c.get("detail") or "")[:300]}
-                               for c in self.checks[:30]]}
+                    "checks": [{"name": str(c.get("name"))[:80], "ok": bool(c.get("ok")), "detail": str(c.get("detail") or "")[:300],
+                                "warn": bool(c.get("warn"))} for c in self.checks[:30]]}
         body["telemetry"] = self._telemetry()
         return body
 
@@ -191,7 +191,10 @@ class Agent:
                 time.sleep(1 + attempt)
 
     def _limits(self, plan: dict) -> dict:
-        return effective_limits((plan or {}).get("limits") or {}, self.cfg.limits)
+        return effective_limits((plan or {}).get("limits") or {}, self.cfg.limits, frame_of(plan))
+
+    def _checks(self, plan: dict, limits: dict) -> list:
+        return preflight(self.v.snapshot(), plan, limits) + list(self.v.extra_checks(plan))
 
     def _prepare(self, cmd: dict):
         plan, run_id = (cmd.get("payload") or {}).get("plan"), cmd.get("run_id")
@@ -209,7 +212,7 @@ class Agent:
             return False, "План отклонён бортом: %s" % e
         self.v.place_for(plan)
         snap = self.v.snapshot()
-        checks = preflight(snap, plan, limits)
+        checks = self._checks(plan, limits)
         if failed(checks):
             self._set("idle", summary(checks), run_id=None, checks=checks)
             return False, "Проверки на борту не пройдены: " + summary(checks)
@@ -235,7 +238,7 @@ class Agent:
             plan = self.plan
         if (cmd.get("ttl_s") or 0) <= 0:
             return False, "команда «Старт» просрочена"
-        checks = preflight(self.v.snapshot(), plan, self._limits(plan))
+        checks = self._checks(plan, self._limits(plan))
         if failed(checks):
             self._set("ready", "перед стартом: " + summary(checks), checks=checks + self.checks[-1:])
             return False, "Перед стартом не пройдены проверки: " + summary(checks)

@@ -196,3 +196,83 @@ def test_prepare_refused_for_unairworthy_or_out_of_limits(client):
         assert r.status_code == 200, r.text
         assert client.post(f"/api/drones/{lid}/cancel").status_code == 200
         assert get(client, lid)["run"] is None
+
+
+def local_mission(client, aircraft_id, **kw):
+    from tbo_agent.offboard import body_to_ll
+    p1, p2 = body_to_ll(HOME[0], HOME[1], 3.0, 0.0), body_to_ll(HOME[0], HOME[1], 3.0, -2.0)    # 3 м вперёд, затем 2 м вправо
+    body = {"name": "Облёт стеллажа", "aircraft_id": aircraft_id, "home_lat": HOME[0], "home_lon": HOME[1], "frame": "local",
+            "takeoff_alt": 1.5, "speed_ms": 0.8, "return_home": True,
+            "waypoints": [{"lat": p1[0], "lon": p1[1], "alt": 1.5, "hold_s": 0}, {"lat": p2[0], "lon": p2[1], "alt": 2.0, "hold_s": 1}]}
+    body.update(kw)
+    return client.post("/api/missions", json=body)
+
+
+def test_local_mission_rules(client):
+    a = next(x for x in client.get("/api/aircraft").json() if x["serial"] == "TBT-M4-001")
+    r = local_mission(client, a["id"])
+    assert r.status_code == 201 and r.json()["frame"] == "local"
+    mid = r.json()["id"]
+    assert "QGroundControl" in client.get(f"/api/missions/{mid}/export").json()["detail"]          # только GPS-координаты
+    assert local_mission(client, a["id"], speed_ms=3.5).status_code == 400                        # Optical Flow: до 3 м/с
+    glob = local_mission(client, a["id"], frame="global")
+    assert glob.status_code == 400 and "от 2" in glob.json()["detail"]                            # по GPS точки не ниже 2 м
+    # реальный полёт строже: до 3 м и 2 м/с (TBO_DRONE_LOCAL_*)
+    _, lid, token = link_for(client)
+    with TestClient(app) as dev:
+        dev.headers["Authorization"] = "Bearer " + token
+        dev.post("/api/agent/state", json={"state": "idle"})
+        high = local_mission(client, a["id"], takeoff_alt=4.0).json()
+        assert "TBO_DRONE_LOCAL_MAX_ALT_M" in client.post(f"/api/drones/{lid}/prepare", json={"mission_id": high["id"]}).json()["detail"]
+        fast = local_mission(client, a["id"], speed_ms=2.5).json()
+        assert "2 м/с" in client.post(f"/api/drones/{lid}/prepare", json={"mission_id": fast["id"]}).json()["detail"]
+        assert client.post(f"/api/drones/{lid}/prepare", json={"mission_id": mid}).status_code == 200
+        cmd = dev.get("/api/agent/commands?wait=0").json()["command"]
+        plan = cmd["payload"]["plan"]
+        assert plan["frame"] == "local" and plan["limits"]["max_alt_m"] == 3 and plan["limits"]["max_speed_ms"] == 2.0
+
+
+def test_local_flight_via_agent(client, live, tmp_path):
+    a, lid, token = link_for(client)
+    mid = local_mission(client, a["id"]).json()["id"]
+    ag, v = start_agent(live, token, tmp_path / "ag")
+    try:
+        assert wait(lambda: get(client, lid)["state"] == "idle")
+        assert client.post(f"/api/drones/{lid}/prepare", json={"mission_id": mid}).status_code == 200
+        d = wait(lambda: (lambda x: x if x["run"] and x["run"]["status"] == "ready" else None)(get(client, lid)), 20)
+        assert d and any(c["name"].startswith("Локальная позиция") and c["ok"] for c in d["checks"])
+        assert not any(c["name"] == "GPS" for c in d["checks"])                                     # без GPS-проверок
+        client.post(f"/api/drones/{lid}/start", json={"run_id": d["run"]["id"], "plan_hash": d["run"]["plan_hash"], "confirm": True})
+        run = wait(lambda: (lambda m: next((x for x in m["runs"] if x["status"] in ("completed", "aborted", "failed")), None))(
+            client.get(f"/api/missions/{mid}").json()), 40)
+        assert run and run["status"] == "completed" and run["summary"]["wp_reached"] == 2 and run["import_id"]
+        assert run["summary"]["max_alt_m"] <= 2.1                       # в помещении домой — на высоте точки, без набора 5 м
+    finally:
+        ag.stop()
+        v.close()
+
+
+def test_admin_cli_drone_add(client, capsys):
+    from app.admin import main
+    from app.models import Aircraft, AircraftType
+    assert main(["drone-add", "technic-2306", "--name", "Technic 6S", "--token-only"]) == 0
+    token = capsys.readouterr().out.strip()
+    assert token.startswith("tbo_") and len(token) > 40
+    with TestClient(app) as dev:
+        dev.headers["Authorization"] = "Bearer " + token
+        r = dev.post("/api/agent/hello", json={"agent_version": "1.0", "executor": "offboard"})
+        assert r.status_code == 200 and r.json()["aircraft"]["serial"] == "technic-2306"
+    assert main(["drone-add", "technic-2306"]) == 1                                                  # уже подключён
+    assert main(["drone-add", "technic-9999", "--rotate"]) == 1                                      # опечатка в номере
+    with SessionLocal() as s:
+        assert s.query(Aircraft).filter_by(serial="technic-9999").count() == 0                         # лишний борт не создан
+    assert main(["drone-add", "technic-2306", "--rotate", "--token-only"]) == 0
+    new = capsys.readouterr().out.strip().splitlines()[-1]
+    with TestClient(app) as dev:
+        dev.headers["Authorization"] = "Bearer " + token
+        assert dev.post("/api/agent/hello", json={}).status_code == 401                              # прежний токен не действует
+        dev.headers["Authorization"] = "Bearer " + new
+        assert dev.post("/api/agent/hello", json={}).status_code == 200
+    with SessionLocal() as s:
+        ac = s.query(Aircraft).filter_by(serial="technic-2306").one()
+        assert ac.status == "active" and s.get(AircraftType, ac.type_id).code == "SKYRIS-T6S"

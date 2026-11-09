@@ -34,6 +34,7 @@ class Config:
             raise ConfigError("vehicle.executor: auto, mission или offboard")
         self.fcu_wait_s = cp.getfloat("vehicle", "fcu_wait_s", fallback=60.0)
         self.offboard_tolerance_m = cp.getfloat("vehicle", "offboard_tolerance_m", fallback=1.5)
+        self.local_tolerance_m = cp.getfloat("vehicle", "local_tolerance_m", fallback=0.25)
         self.takeoff_speed_ms = cp.getfloat("vehicle", "takeoff_speed_ms", fallback=1.0)
         self.limits = {
             "max_alt_m": cp.getfloat("limits", "max_alt_m", fallback=120.0),
@@ -43,6 +44,10 @@ class Config:
             "min_sats": cp.getint("limits", "min_sats", fallback=8),
             "min_cell_v": cp.getfloat("limits", "min_cell_v", fallback=3.75),
             "cells": cp.getint("limits", "cells", fallback=6),
+            # локальная навигация (Optical Flow / ArUco, без GPS): дальномер VL53L1X меряет до 4 м
+            "local_max_alt_m": cp.getfloat("limits", "local_max_alt_m", fallback=3.0),
+            "local_max_dist_m": cp.getfloat("limits", "local_max_dist_m", fallback=20.0),
+            "local_max_speed_ms": cp.getfloat("limits", "local_max_speed_ms", fallback=2.0),
         }
         self.ready_timeout_s = cp.getfloat("limits", "ready_timeout_min", fallback=10.0) * 60
         self.state_dir = g("agent", "state_dir", fallback="/var/lib/tbo-agent").strip()

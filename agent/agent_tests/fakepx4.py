@@ -9,7 +9,7 @@ import time
 from types import SimpleNamespace as NS
 
 import rospy
-from geometry_msgs.msg import TwistStamped
+from geometry_msgs.msg import PoseStamped, TwistStamped
 from mavros_msgs.msg import ExtendedState, HomePosition, State, StatusText, Waypoint, WaypointList, WaypointReached
 from sensor_msgs.msg import BatteryState, Imu, NavSatFix
 from std_msgs.msg import Float64, UInt32
@@ -18,7 +18,10 @@ R = 6371000.0
 
 
 class FakePX4:
-    def __init__(self, lat=55.75, lon=37.6, mission_plugin=True, technic=True, refuse_arm=None, speed=40.0):
+    # заводские параметры Technic для полётов в помещении (docs.skyris.ru → «Параметры полетного контроллера»)
+    TECHNIC_INDOOR = {"EKF2_GPS_CTRL": 0, "SYS_HAS_MAG": 0, "EKF2_MAG_TYPE": 5, "COM_DISARM_LAND": 2.0}
+
+    def __init__(self, lat=55.75, lon=37.6, mission_plugin=True, technic=True, refuse_arm=None, speed=40.0, params=None):
         rospy.reset()
         self.lat0, self.lon0 = lat, lon
         self.x = self.y = self.z = 0.0
@@ -26,8 +29,10 @@ class FakePX4:
         self.items, self.seq, self.target = [], 0, None
         self.refuse_arm, self.speed = refuse_arm, speed
         self.calls = []
+        self.params = dict(self.TECHNIC_INDOOR if params is None else params)
         self._stop = threading.Event()
         s = rospy._services
+        s["/mavros/param/get"] = self._param_get
         s["/mavros/cmd/arming"] = self._arming
         s["/mavros/set_mode"] = self._set_mode
         if mission_plugin:
@@ -78,6 +83,12 @@ class FakePX4:
         self.items = []
         return NS(success=True)
 
+    def _param_get(self, param_id):
+        if param_id not in self.params:
+            return NS(success=False, value=NS(integer=0, real=0.0))
+        v = self.params[param_id]
+        return NS(success=True, value=NS(integer=v if isinstance(v, int) else 0, real=float(v) if isinstance(v, float) else 0.0))
+
     # ------------------------------------------------------------ simple_offboard (Technic)
     def _telemetry(self, frame_id=""):
         if frame_id == "navigate_target":
@@ -85,7 +96,7 @@ class FakePX4:
                 return NS(x=float("nan"), y=float("nan"), z=float("nan"))
             return NS(x=self.target[0] - self.x, y=self.target[1] - self.y, z=self.target[2] - self.z)
         lat, lon = self.ll()
-        return NS(x=self.x, y=self.y, z=self.z, lat=lat, lon=lon, armed=self.armed, mode=self.mode, connected=True)
+        return NS(x=self.x, y=self.y, z=self.z, yaw=0.0, lat=lat, lon=lon, armed=self.armed, mode=self.mode, connected=True)
 
     def _navigate(self, x, y, z, yaw, speed, frame_id, auto_arm):
         self.calls.append(("navigate", frame_id, z, auto_arm))
@@ -171,6 +182,8 @@ class FakePX4:
             p("/mavros/global_position/raw/satellites", UInt32(data=15))
             p("/mavros/global_position/rel_alt", Float64(data=self.z))
             p("/mavros/local_position/velocity_local", TwistStamped(twist=NS(linear=NS(x=0.0, y=0.0, z=0.0))))
+            p("/mavros/local_position/pose", PoseStamped(pose=NS(position=NS(x=self.x, y=self.y, z=self.z),
+                                                                 orientation=NS(x=0.0, y=0.0, z=0.0, w=1.0))))
             p("/mavros/battery", BatteryState(percentage=0.9, voltage=24.6))
             p("/mavros/home_position/home", HomePosition(geo=NS(latitude=self.lat0, longitude=self.lon0)))
             p("/mavros/imu/data", Imu(linear_acceleration=NS(x=0.0, y=0.0, z=9.80665)))

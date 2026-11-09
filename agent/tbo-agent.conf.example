@@ -15,8 +15,9 @@ timeout_s = 15
 executor = auto
 ; сколько ждать полётный контроллер при запуске, с
 fcu_wait_s = 60
-; offboard: точность прилёта в точку (GPS), м, и скорость взлёта, м/с
+; программа на борту: точность прилёта в точку по GPS и локально (Optical Flow / ArUco), м; скорость взлёта, м/с
 offboard_tolerance_m = 1.5
+local_tolerance_m = 0.25
 takeoff_speed_ms = 1.0
 
 [limits]
@@ -32,6 +33,10 @@ cells = 6
 min_cell_v = 3.75
 ; «Готов к старту» дольше — план снимается с борта
 ready_timeout_min = 10
+; локальная навигация (в помещении, без GPS): дальномер VL53L1X меряет до 4 м, Optical Flow ограничивает скорость
+local_max_alt_m = 3
+local_max_dist_m = 20
+local_max_speed_ms = 2
 
 [agent]
 state_dir = /var/lib/tbo-agent

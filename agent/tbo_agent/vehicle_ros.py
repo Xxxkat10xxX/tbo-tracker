@@ -1,25 +1,25 @@
 """Борт на ROS Noetic: MAVROS (PX4) и simple_offboard платформы Technic (Skyris Technic 6S; основа — COEX Clover).
 
-Телеметрия — топики MAVROS. Исполнители плана (agent.conf → [vehicle] executor):
+Телеметрия — топики MAVROS. План по GPS выполняет исполнитель из agent.conf → [vehicle] executor:
 
 * mission  — план загружается в PX4 как миссия (mavros/mission/push) и сверяется обратным чтением; старт — режим
-             AUTO.MISSION и арминг (как «Start Mission» в QGroundControl). Полёт ведёт PX4 и он виден в QGroundControl;
-             при сбое бортового компьютера миссия продолжается.
-* offboard — полёт программой на борту по образцу Technic (docs.skyris.ru → «Программирование автономного полёта»):
-             navigate (взлёт, auto_arm) → navigate_global по точкам → AUTO.RTL или land.
+             AUTO.MISSION и арминг (как «Start Mission» в QGroundControl). Полёт ведёт PX4 и он виден в QGroundControl.
+* offboard — программа на борту (offboard.py): navigate → navigate_global по точкам → AUTO.RTL или land.
 * auto     — mission, если в MAVROS доступен плагин миссий (waypoint), иначе offboard.
 
-Пульт всегда главнее: переключение режима на пульте забирает управление (штатно для PX4); исполнитель offboard
-при этом прекращает работу и ничего не переключает. В tbo-tracker — «Вернуть домой» и «Посадить».
+Локальный план (в помещении, без GPS) всегда выполняет программа на борту в кадре map (offboard.py).
+Пульт главнее: переключение режима на пульте забирает управление (в документации Skyris — из Position в Stab).
 """
 from __future__ import annotations
 
 import math
+import subprocess
 import threading
 import time
 from collections import deque
 
-from .plan import dist_m
+from .offboard import OffboardMixin
+from .plan import frame_of
 from .vehicle import Vehicle, VehicleError
 
 G = 9.80665
@@ -27,10 +27,7 @@ NAN = float("nan")
 FRAME_GLOBAL_REL_ALT, FRAME_MISSION = 3, 2
 CMD_WAYPOINT, CMD_RTL, CMD_LAND, CMD_TAKEOFF, CMD_CHANGE_SPEED = 16, 20, 21, 22, 178
 IN_AIR_STATES = (2, 3, 4)          # mavros_msgs/ExtendedState: IN_AIR, TAKEOFF, LANDING
-
-
-class _Stop(Exception):
-    """Прерывание программы offboard: команда оператора или перехват управления пилотом."""
+PARAMS = ("EKF2_GPS_CTRL", "EKF2_AID_MASK", "SYS_HAS_MAG", "EKF2_MAG_TYPE", "COM_DISARM_LAND")
 
 
 def call(fn, timeout: float, what: str, **kw):
@@ -61,9 +58,27 @@ def _fin(v):
     return v if math.isfinite(v) else None
 
 
-class RosVehicle(Vehicle):
-    def __init__(self, executor: str = "auto", fcu_wait_s: float = 60.0, tolerance_m: float = 1.5, takeoff_speed: float = 1.0):
+def service_active(name: str) -> bool:
+    """Запущена ли служба systemd (например, technic-show — второй клиент управления дроном)."""
+    try:
+        return subprocess.run(["systemctl", "is-active", "--quiet", name], timeout=3).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def gps_enabled(p: dict):
+    """GPS в навигации PX4: EKF2_GPS_CTRL (PX4 ≥ 1.14, бит 0) или EKF2_AID_MASK (раньше, бит 0). None — неизвестно."""
+    for name in ("EKF2_GPS_CTRL", "EKF2_AID_MASK"):
+        if p.get(name) is not None:
+            return int(p[name]) & 1 == 1
+    return None
+
+
+class RosVehicle(OffboardMixin, Vehicle):
+    def __init__(self, executor: str = "auto", fcu_wait_s: float = 60.0, tolerance_m: float = 1.5, takeoff_speed: float = 1.0,
+                 local_tolerance_m: float = 0.25):
         self.want, self.fcu_wait_s, self.tol, self.takeoff_speed = executor, fcu_wait_s, tolerance_m, takeoff_speed
+        self.tol_local = local_tolerance_m
         self.executor = executor
         self._lock = threading.Lock()
         self._s = {}
@@ -72,15 +87,19 @@ class RosVehicle(Vehicle):
         self._modes = deque(maxlen=50)          # (время, режим) — для ожидания смены режима
         self._wp_list, self._wp_version = [], 0
         self._items, self._seq_to_wp = None, {}
-        self._plan = None
+        self._plan, self._local = None, None
         self._fly_thread, self._stop_fly = None, threading.Event()
         self._fly_error, self._phase, self._wp_reached = None, None, 0
+        self._params, self._params_at, self._param_get = {}, 0.0, None
         self.technic = False
+
+    def _call(self, fn, timeout: float, what: str, **kw):
+        return call(fn, timeout, what, **kw)
 
     # ---------------------------------------------------------------- подключение
     def open(self):
         import rospy
-        from geometry_msgs.msg import TwistStamped
+        from geometry_msgs.msg import PoseStamped, TwistStamped
         from mavros_msgs.msg import ExtendedState, HomePosition, State, StatusText, WaypointList, WaypointReached
         from mavros_msgs.srv import CommandBool, SetMode, WaypointClear, WaypointPull, WaypointPush
         from sensor_msgs.msg import BatteryState, Imu, NavSatFix
@@ -96,6 +115,7 @@ class RosVehicle(Vehicle):
         sub("/mavros/global_position/raw/satellites", UInt32, lambda m: self._put(sats=int(m.data)), queue_size=5)
         sub("/mavros/global_position/rel_alt", Float64, lambda m: self._put(alt_rel=_fin(m.data)), queue_size=5)
         sub("/mavros/global_position/compass_hdg", Float64, lambda m: self._put(heading=_fin(m.data)), queue_size=5)
+        sub("/mavros/local_position/pose", PoseStamped, self._on_pose, queue_size=5)
         for topic in ("/mavros/local_position/velocity_local", "/mavros/local_position/velocity"):
             sub(topic, TwistStamped, self._on_vel, queue_size=5)
         sub("/mavros/battery", BatteryState, self._on_battery, queue_size=5)
@@ -116,6 +136,12 @@ class RosVehicle(Vehicle):
         self._push_srv = sp("/mavros/mission/push", WaypointPush)
         self._pull_srv = sp("/mavros/mission/pull", WaypointPull)
         self._clear_srv = sp("/mavros/mission/clear", WaypointClear)
+        try:
+            from mavros_msgs.srv import ParamGet
+            if self._has("/mavros/param/get", 2):
+                self._param_get = sp("/mavros/param/get", ParamGet)
+        except ImportError:
+            pass
         have_mission = self._has("/mavros/mission/push") and self._has("/mavros/mission/pull")
         have_offboard = self._open_technic()
         if self.want == "mission" and not have_mission:
@@ -157,8 +183,30 @@ class RosVehicle(Vehicle):
         except Exception:  # noqa: BLE001 — ROSException при отсутствии сервиса
             return False
 
+    def params(self) -> dict:
+        """Параметры PX4, важные для полёта (через mavros/param/get; кэш 60 с)."""
+        if self._param_get is None or time.monotonic() - self._params_at < 60:
+            return dict(self._params)
+        out = {}
+        for name in PARAMS:
+            try:
+                r = call(self._param_get, 3, "параметр %s" % name, param_id=name)
+            except VehicleError:
+                continue
+            if getattr(r, "success", False):
+                v = r.value
+                out[name] = v.real if getattr(v, "real", 0.0) else getattr(v, "integer", 0)
+        self._params, self._params_at = out, time.monotonic()
+        return dict(out)
+
     def info(self) -> dict:
-        return {"autopilot": "PX4 (MAVROS)", "executor": self.executor, "technic": self.technic}
+        sim = False
+        try:
+            sim = bool(self.rospy.get_param("/use_sim_time", False))
+        except Exception:  # noqa: BLE001
+            pass
+        return {"autopilot": "PX4 (MAVROS)", "executor": self.executor, "technic": self.technic, "simulation": sim,
+                "params": self.params(), "technic_show": service_active("technic-show")}
 
     def now(self) -> float:
         return time.monotonic()
@@ -179,6 +227,12 @@ class RosVehicle(Vehicle):
 
     def _on_raw_fix(self, m):
         self._put(gps_status=int(m.status.status))
+
+    def _on_pose(self, m):
+        p, q = m.pose.position, m.pose.orientation
+        yaw = math.atan2(2 * (q.w * q.z + q.x * q.y), 1 - 2 * (q.y * q.y + q.z * q.z))
+        vals = [_fin(p.x), _fin(p.y), _fin(p.z)]
+        self._put(pose=None if None in vals else (vals[0], vals[1], vals[2], yaw, time.monotonic()))
 
     def _on_vel(self, m):
         v = m.twist.linear
@@ -224,22 +278,53 @@ class RosVehicle(Vehicle):
             reached = self._wp_reached
         landed = s.get("landed_state")
         armed = bool(s.get("armed"))
-        in_air = landed in IN_AIR_STATES if landed else bool(armed and (s.get("alt_rel") or 0) > 1.0)
+        pose = s.get("pose")
+        local_ok = bool(pose and time.monotonic() - pose[4] < 1.5)
+        lp = self.local_position() if frame_of(self._plan) == "local" else None
+        alt = lp[2] if lp else s.get("alt_rel")
+        in_air = landed in IN_AIR_STATES if landed else bool(armed and (alt or 0) > (0.3 if lp else 1.0))
         fix = s.get("gps_fix_raw")
         if fix is None and s.get("gps_status") is not None:
             fix = 3 if s["gps_status"] >= 0 else 0
         n_wp = len((self._plan or {}).get("waypoints") or [])
+        home = (self._local["lat0"], self._local["lon0"]) if lp else s.get("home")
         return {"connected": bool(s.get("connected")), "armed": armed, "mode": s.get("mode"), "in_air": in_air,
-                "lat": s.get("lat"), "lon": s.get("lon"), "alt_rel": s.get("alt_rel"), "heading": s.get("heading"),
-                "speed": s.get("speed"), "climb": s.get("climb"), "battery_pct": s.get("battery_pct"),
-                "battery_v": s.get("battery_v"), "gps_fix": fix, "sats": s.get("sats"), "home": s.get("home"),
-                "wp_total": n_wp, "wp_reached": reached, "wp_current": min(n_wp, reached + 1) if armed and n_wp else 0,
-                "status_text": self._last_text(), "phase": self._phase}
+                "lat": lp[0] if lp else s.get("lat"), "lon": lp[1] if lp else s.get("lon"), "alt_rel": alt,
+                "heading": s.get("heading"), "speed": s.get("speed"), "climb": s.get("climb"),
+                "battery_pct": s.get("battery_pct"), "battery_v": s.get("battery_v"), "gps_fix": fix, "sats": s.get("sats"),
+                "home": home, "local_ok": local_ok, "wp_total": n_wp, "wp_reached": reached,
+                "wp_current": min(n_wp, reached + 1) if armed and n_wp else 0, "status_text": self._last_text(),
+                "phase": self._phase}
 
     def drain_imu(self) -> list:
         out = []
         while self._imu:
             out.append(self._imu.popleft())
+        return out
+
+    def extra_checks(self, plan: dict) -> list:
+        out = []
+        if service_active("technic-show"):
+            out.append({"name": "Нет другого клиента управления", "ok": False,
+                        "detail": "запущен Техник-шоу (technic-show.service) — остановите: sudo systemctl stop technic-show"})
+        p = self.params()
+        if frame_of(plan) == "local":
+            out.append({"name": "simple_offboard Technic", "ok": self.technic,
+                        "detail": "navigate, get_telemetry, land" if self.technic else "нет сервисов — служба technic запущена?"})
+        else:
+            gps = gps_enabled(p)
+            if gps is not None:
+                out.append({"name": "GPS в навигации PX4", "ok": gps, "detail": "включён" if gps else
+                            "выключен (EKF2_GPS_CTRL / EKF2_AID_MASK) — параметры Technic для полётов в помещении. Для GPS: "
+                            "модуль GPS с компасом (разъёмы GPS и I2C), калибровка компаса, включить GPS в EKF2. Без GPS — "
+                            "локальная миссия"})
+            if p.get("SYS_HAS_MAG") is not None and int(p["SYS_HAS_MAG"]) == 0:
+                out.append({"name": "Магнитометр", "ok": False,
+                            "detail": "SYS_HAS_MAG=0 — для полёта по GPS нужен компас модуля GPS (I2C) и его калибровка"})
+        d = p.get("COM_DISARM_LAND")
+        if d is not None and float(d) <= 0:
+            out.append({"name": "Выключение моторов после посадки", "ok": True, "warn": True,
+                        "detail": "COM_DISARM_LAND ≤ 0: моторы не выключатся сами — полёт завершится через 10 с на земле"})
         return out
 
     # ---------------------------------------------------------------- режимы
@@ -322,10 +407,20 @@ class RosVehicle(Vehicle):
             raise VehicleError("миссия в контроллере отличается от плана (%d элементов вместо %d) — "
                                "возможно, загружена другая из QGroundControl" % (len(got), len(self._items)))
 
+    def _program(self, plan: dict) -> bool:
+        """План выполняет программа на борту (simple_offboard), а не миссия PX4."""
+        return frame_of(plan) == "local" or self.executor == "offboard"
+
     def upload(self, plan: dict, position: dict) -> str:
-        self._plan = plan
+        self._plan, self._local = plan, None
         with self._lock:
             self._wp_reached = 0
+        if frame_of(plan) == "local":
+            if not self.technic:
+                raise VehicleError("для локальной миссии нужен simple_offboard Technic (служба technic)")
+            if not self._s.get("connected"):
+                raise VehicleError("нет связи с полётным контроллером")
+            return "план принят: локальная навигация (OFFBOARD, кадр map, метры от точки взлёта)"
         if self.executor == "offboard":
             if not self._s.get("connected"):
                 raise VehicleError("нет связи с полётным контроллером")
@@ -343,14 +438,14 @@ class RosVehicle(Vehicle):
             len(plan["waypoints"]), "возврат домой" if plan.get("return_home", True) else "посадка в последней точке")
 
     def verify(self, plan: dict):
-        if self.executor == "mission":
+        if not self._program(plan):
             if self._items is None:
                 raise VehicleError("миссия не загружена")
             self._check_fc()
 
     def clear(self):
-        self._plan, self._items = None, None
-        if self.executor == "mission" and not self._s.get("armed"):
+        plan, self._plan, self._items, self._local = self._plan, None, None, None
+        if plan is not None and not self._program(plan) and not self._s.get("armed"):
             try:
                 call(self._clear_srv, 15, "очистка миссии")
             except VehicleError:
@@ -358,8 +453,10 @@ class RosVehicle(Vehicle):
 
     # ---------------------------------------------------------------- старт и прерывание
     def start_mission(self, plan: dict) -> str:
+        if frame_of(plan) == "local":
+            return self._start_program(self._fly_local, plan)
         if self.executor == "offboard":
-            return self._start_offboard(plan)
+            return self._start_program(self._fly, plan)
         prev = self._s.get("mode")
         self._set_mode("AUTO.MISSION")
         try:
@@ -374,14 +471,19 @@ class RosVehicle(Vehicle):
         return "моторы включены, режим AUTO.MISSION — PX4 выполняет миссию"
 
     def rtl(self) -> str:
-        self._halt_offboard()
+        if frame_of(self._plan) == "local" and self._local:
+            self._halt_program(release=False)       # цель остаётся — PX4 не уходит в failsafe потери OFFBOARD
+            self._launch(self._return_local, self._plan)
+            return "возврат к точке взлёта и посадка (программа на борту, без GPS)"
+        self._halt_program(release=True)
         self._set_mode("AUTO.RTL")
         self._phase = "rtl"
         return "режим AUTO.RTL: возврат домой и посадка"
 
     def land(self) -> str:
-        self._halt_offboard()
-        if self.executor == "offboard" and self.technic:
+        program = self._plan is not None and self._program(self._plan)
+        self._halt_program(release=False)
+        if program and self.technic:
             r = call(self._land_srv, 5, "посадка (land)")
             if not getattr(r, "success", False):
                 self._set_mode("AUTO.LAND")
@@ -389,105 +491,3 @@ class RosVehicle(Vehicle):
             self._set_mode("AUTO.LAND")
         self._phase = "land"
         return "посадка на месте (AUTO.LAND)"
-
-    # ---------------------------------------------------------------- исполнитель offboard (Technic)
-    def _start_offboard(self, plan: dict) -> str:
-        if self._fly_thread and self._fly_thread.is_alive():
-            raise VehicleError("программа полёта уже выполняется")
-        self._stop_fly.clear()
-        self._fly_error, self._phase = None, "takeoff"
-        self._fly_thread = threading.Thread(target=self._fly, args=(plan,), name="offboard", daemon=True)
-        self._fly_thread.start()
-        end = time.monotonic() + 10
-        while time.monotonic() < end:
-            if self._s.get("armed"):
-                return "моторы включены, режим OFFBOARD — программа полёта на борту"
-            if self._fly_error:
-                break
-            time.sleep(0.1)
-        self._halt_offboard()
-        raise VehicleError("моторы не включились: %s%s" % (self._fly_error or "нет ответа", self._why()))
-
-    def _halt_offboard(self):
-        if self.executor != "offboard":
-            return
-        if self._fly_thread and self._fly_thread.is_alive():
-            self._stop_fly.set()
-            self._fly_thread.join(3)
-        if self.technic:
-            try:
-                call(self._release, 3, "остановка setpoint")
-            except VehicleError:
-                pass
-
-    def _tel(self, frame: str):
-        return call(self._get_telemetry, 3, "телеметрия", frame_id=frame)
-
-    def _wait_arrival(self, timeout: float, tol: float):
-        end = time.monotonic() + timeout
-        while True:
-            if self._stop_fly.is_set():
-                raise _Stop()
-            if self._s.get("mode") not in (None, "OFFBOARD"):
-                raise _Stop("пилот перехватил управление (режим %s)" % self._s.get("mode"))
-            t = self._tel("navigate_target")
-            d = _fin(math.sqrt(t.x ** 2 + t.y ** 2 + t.z ** 2)) if None not in (_fin(t.x), _fin(t.y), _fin(t.z)) else None
-            if d is not None and d < tol:
-                return
-            if time.monotonic() > end:
-                raise VehicleError("точка не достигнута за %.0f с" % timeout)
-            time.sleep(0.2)
-
-    def _sleep(self, seconds: float):
-        end = time.monotonic() + seconds
-        while time.monotonic() < end:
-            if self._stop_fly.wait(0.2) or self._s.get("mode") not in (None, "OFFBOARD"):
-                raise _Stop()
-
-    def _fly(self, plan: dict):
-        try:
-            t0 = self._tel("map")
-            z0 = _fin(t0.z) or 0.0
-            call(self._navigate, 5, "взлёт (navigate)", x=0.0, y=0.0, z=float(plan["takeoff_alt"]), yaw=NAN,
-                 speed=self.takeoff_speed, frame_id="body", auto_arm=True)
-            end = time.monotonic() + 8                 # simple_offboard включает OFFBOARD и арминг
-            while not (self._s.get("mode") == "OFFBOARD" and self._s.get("armed")):
-                if self._stop_fly.is_set():
-                    raise _Stop()
-                if time.monotonic() > end:
-                    raise VehicleError("контроллер не перешёл в OFFBOARD с включёнными моторами%s" % self._why())
-                time.sleep(0.1)
-            self._wait_arrival(float(plan["takeoff_alt"]) / self.takeoff_speed * 2 + 30, 0.5)
-            self._phase = "mission"
-            lat0, lon0 = self._s.get("lat") or plan["home"]["lat"], self._s.get("lon") or plan["home"]["lon"]
-            speed = float(plan["speed_ms"])
-            for i, w in enumerate(plan["waypoints"], 1):
-                d = dist_m(lat0, lon0, w["lat"], w["lon"])
-                call(self._navigate_global, 5, "полёт к точке %d (navigate_global)" % i, lat=float(w["lat"]),
-                     lon=float(w["lon"]), z=z0 + float(w["alt"]), yaw=NAN, speed=speed, frame_id="map", auto_arm=False)
-                self._wait_arrival(d / speed * 2 + 60, self.tol)
-                with self._lock:
-                    self._wp_reached = i
-                lat0, lon0 = w["lat"], w["lon"]
-                if w.get("hold_s"):
-                    self._phase = "hold"
-                    self._sleep(float(w["hold_s"]))
-                    self._phase = "mission"
-            if plan.get("return_home", True):
-                call(self._release, 3, "остановка setpoint")
-                self._set_mode("AUTO.RTL")
-                self._phase = "rtl"
-            else:
-                call(self._land_srv, 5, "посадка (land)")
-                self._phase = "land"
-        except _Stop as e:
-            self._fly_error = str(e) or None            # команда оператора или пульт: режимы не трогаем
-        except Exception as e:  # noqa: BLE001 — сбой программы в воздухе → безопасный возврат домой
-            self._fly_error = str(e)
-            if self._s.get("armed") and self._s.get("mode") == "OFFBOARD":
-                try:
-                    call(self._release, 3, "остановка setpoint")
-                    self._set_mode("AUTO.RTL")
-                    self._phase = "rtl"
-                except VehicleError:
-                    pass

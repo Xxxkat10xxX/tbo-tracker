@@ -47,6 +47,7 @@ class CheckIn(BaseModel):
     name: str = Field(max_length=80)
     ok: bool
     detail: str = Field("", max_length=300)
+    warn: bool = False                      # предупреждение: не запрещает старт
 
 
 class TelemetryIn(BaseModel):
@@ -132,7 +133,8 @@ def _seen(link: DroneLink, request: Request):
 @router.post("/hello")
 def hello(data: HelloIn, request: Request, link: DroneLink = Depends(device), s: Session = Depends(get_session)):
     _seen(link, request)
-    link.agent = {"version": data.agent_version, "executor": data.executor, "vehicle": data.vehicle, "hello_at": iso(utcnow())}
+    if data.executor != "check":           # «tbo-agent check» только проверяет связь — сведения об агенте не трогает
+        link.agent = {"version": data.agent_version, "executor": data.executor, "vehicle": data.vehicle, "hello_at": iso(utcnow())}
     s.commit()
     a = link.aircraft
     return {"link_id": link.id, "aircraft": {"serial": a.serial, "name": a.name}, "server_time": iso(utcnow()),

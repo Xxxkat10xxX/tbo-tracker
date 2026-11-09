@@ -12,5 +12,7 @@ for ws in /home/orangepi/technic_ws /home/orangepi/catkin_ws "${HOME:-/nonexiste
     break
   fi
 done
+# Как в примерах Skyris (docs.skyris.ru → «SSH-ключи»): ROS-сеть образа Technic работает по имени <hostname>.local
+export ROS_HOSTNAME="${ROS_HOSTNAME:-$(hostname).local}"
 export PYTHONPATH="/opt/tbo-agent${PYTHONPATH:+:$PYTHONPATH}"
 exec python3 -m tbo_agent --config "${TBO_AGENT_CONFIG:-/etc/tbo-agent/agent.conf}" "$@"

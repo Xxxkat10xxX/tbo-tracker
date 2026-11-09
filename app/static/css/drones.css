@@ -9,7 +9,7 @@
 .bat > span.warn { background: var(--warn); } .bat > span.bad { background: var(--bad); }
 .checks { list-style: none; padding: 0; margin: 8px 0; }
 .checks li { padding: 4px 0 4px 2px; border-bottom: 1px dashed var(--line, #e3e7ef); font-size: 14px; }
-.checks li.ok b { color: var(--ok); } .checks li.bad b { color: var(--bad); }
+.checks li.ok b { color: var(--ok); } .checks li.bad b { color: var(--bad); } .checks li.warn b { color: var(--warn); }
 .fl-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0 6px; }
 .fl-actions .hint, .fl-actions .notice { flex-basis: 100%; margin: 0; }
 button.go { background: var(--ok); border-color: var(--ok); color: #fff; font-weight: 700; font-size: 16px; padding: 10px 26px; }

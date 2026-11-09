@@ -28,7 +28,16 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..config import DRONE_MAX_ALT_M, DRONE_MAX_DIST_M, DRONE_MAX_HOME_OFFSET_M, DRONE_MIN_BATTERY_PCT, DRONE_ONLINE_S
+from ..config import (
+    DRONE_LOCAL_MAX_ALT_M,
+    DRONE_LOCAL_MAX_DIST_M,
+    DRONE_LOCAL_MAX_SPEED_MS,
+    DRONE_MAX_ALT_M,
+    DRONE_MAX_DIST_M,
+    DRONE_MAX_HOME_OFFSET_M,
+    DRONE_MIN_BATTERY_PCT,
+    DRONE_ONLINE_S,
+)
 from ..errors import DomainError, NotFound
 from ..models import Aircraft, DroneCommand, DroneLink, Mission, MissionRun
 from ..timeutil import iso, utcnow
@@ -160,17 +169,31 @@ def _dist_m(lat0, lon0, lat, lon) -> float:
     return math.dist((0.0, 0.0), autopilot.to_xy(lat0, lon0, lat, lon))
 
 
+def limits_for(frame: str) -> dict:
+    """Пределы реального полёта: по GPS — высота и удаление; локально (в помещении) — малые высота, удаление, скорость."""
+    if frame == "local":
+        return {"max_alt_m": DRONE_LOCAL_MAX_ALT_M, "max_dist_m": DRONE_LOCAL_MAX_DIST_M, "max_speed_ms": DRONE_LOCAL_MAX_SPEED_MS,
+                "min_battery_pct": DRONE_MIN_BATTERY_PCT, "env": ("TBO_DRONE_LOCAL_MAX_ALT_M", "TBO_DRONE_LOCAL_MAX_DIST_M")}
+    return {"max_alt_m": DRONE_MAX_ALT_M, "max_dist_m": DRONE_MAX_DIST_M, "max_home_offset_m": DRONE_MAX_HOME_OFFSET_M,
+            "min_battery_pct": DRONE_MIN_BATTERY_PCT, "env": ("TBO_DRONE_MAX_ALT_M", "TBO_DRONE_MAX_DIST_M")}
+
+
 def check_limits(md: dict):
-    """Пределы реального полёта (строже, чем у симулятора): высота и удаление от точки взлёта."""
-    if float(md["takeoff_alt"]) > DRONE_MAX_ALT_M:
-        raise DomainError(f"Высота взлёта {md['takeoff_alt']:g} м выше предела {DRONE_MAX_ALT_M} м (TBO_DRONE_MAX_ALT_M)")
+    """Пределы реального полёта (строже, чем у симулятора): высота, удаление от точки взлёта, для локальной — скорость."""
+    lim = limits_for(md.get("frame") or "global")
+    env_alt, env_dist = lim["env"]
+    if float(md["takeoff_alt"]) > lim["max_alt_m"]:
+        raise DomainError(f"Высота взлёта {float(md['takeoff_alt']):g} м выше предела {lim['max_alt_m']} м ({env_alt})")
+    if lim.get("max_speed_ms") and float(md["speed_ms"]) > lim["max_speed_ms"]:
+        raise DomainError(f"Скорость {float(md['speed_ms']):g} м/с выше {lim['max_speed_ms']:g} м/с для локальной навигации "
+                          "(Optical Flow ограничивает скорость)")
     for i, w in enumerate(md["waypoints"], 1):
-        if float(w["alt"]) > DRONE_MAX_ALT_M:
-            raise DomainError(f"Точка {i}: высота {float(w['alt']):g} м выше предела {DRONE_MAX_ALT_M} м для реального полёта "
-                              "(TBO_DRONE_MAX_ALT_M)")
+        if float(w["alt"]) > lim["max_alt_m"]:
+            raise DomainError(f"Точка {i}: высота {float(w['alt']):g} м выше предела {lim['max_alt_m']} м для реального полёта "
+                              f"({env_alt})")
         d = _dist_m(md["home_lat"], md["home_lon"], float(w["lat"]), float(w["lon"]))
-        if d > DRONE_MAX_DIST_M:
-            raise DomainError(f"Точка {i}: {d:.0f} м от точки взлёта — больше предела {DRONE_MAX_DIST_M} м (TBO_DRONE_MAX_DIST_M)")
+        if d > lim["max_dist_m"]:
+            raise DomainError(f"Точка {i}: {d:.0f} м от точки взлёта — больше предела {lim['max_dist_m']} м ({env_dist})")
 
 
 def plan_hash(plan: dict) -> str:
@@ -179,17 +202,18 @@ def plan_hash(plan: dict) -> str:
 
 
 def plan_for(m: Mission, a: Aircraft, run_id: int) -> dict:
+    frame = m.frame or "global"
     md = {"name": m.name, "home_lat": m.home_lat, "home_lon": m.home_lon, "takeoff_alt": m.takeoff_alt,
-          "speed_ms": m.speed_ms, "return_home": m.return_home, "waypoints": m.waypoints or []}
+          "speed_ms": m.speed_ms, "return_home": m.return_home, "frame": frame, "waypoints": m.waypoints or []}
     autopilot.validate(md)
     check_limits(md)
-    plan = {"format": "tbo-plan/1", "run_id": run_id, "mission": {"id": m.id, "name": m.name},
+    lim = {k: v for k, v in limits_for(frame).items() if k != "env"}
+    plan = {"format": "tbo-plan/1", "run_id": run_id, "frame": frame, "mission": {"id": m.id, "name": m.name},
             "aircraft": {"serial": a.serial, "name": a.name}, "home": {"lat": float(m.home_lat), "lon": float(m.home_lon)},
             "takeoff_alt": float(m.takeoff_alt), "speed_ms": float(m.speed_ms), "return_home": bool(m.return_home),
             "waypoints": [{"lat": float(w["lat"]), "lon": float(w["lon"]), "alt": float(w["alt"]),
                            "hold_s": float(w.get("hold_s") or 0)} for w in m.waypoints],
-            "limits": {"max_alt_m": DRONE_MAX_ALT_M, "max_dist_m": DRONE_MAX_DIST_M,
-                       "max_home_offset_m": DRONE_MAX_HOME_OFFSET_M, "min_battery_pct": DRONE_MIN_BATTERY_PCT}}
+            "limits": lim}
     plan["plan_hash"] = plan_hash(plan)
     return plan
 

@@ -1,7 +1,8 @@
 """Симулятор борта без ROS: проверка агента и всей цепочки tbo-tracker без дрона (python3 -m tbo_agent --sim).
 
 Последовательность как у PX4 в AUTO.MISSION: арминг → взлёт 2,5 м/с до высоты → полёт к точкам с крейсерской
-скоростью → удержание → возврат домой (если в плане) → посадка 1,5 м/с → выключение моторов через 2 с.
+скоростью → удержание → возврат домой (если в плане; PX4 набирает 5 м, локальная миссия — на текущей высоте,
+как программа на борту) → посадка 1,5 м/с → выключение моторов через 2 с.
 Команды AUTO.RTL и AUTO.LAND прерывают маршрут. Батарея расходуется, акселерометр — 1 g с вибрацией,
 касание — 1,4 g; fault="collision@N" — удар 5,5 g на подлёте к точке N (проверка анализа датчиков на сервере).
 Время модели ускоряется (time_scale): пятиминутный полёт при ×50 — около 6 с.
@@ -13,7 +14,7 @@ import random
 import threading
 import time
 
-from .plan import R_EARTH, plan_hash, to_xy
+from .plan import R_EARTH, frame_of, plan_hash, to_xy
 from .vehicle import Vehicle, VehicleError
 
 CLIMB, DESCENT, VZ = 2.5, 1.5, 2.0
@@ -34,6 +35,7 @@ class SimVehicle(Vehicle):
         self.battery, self.sats = float(battery_pct), sats
         self.items, self.idx, self.hold_left, self.wp_reached = [], 0, None, 0
         self._plan_hash, self._speed = None, 5.0
+        self._rtl_alt = 5.0                               # RTL_RETURN_ALT; в помещении — 0 (текущая высота)
         self._fault_wp = int(fault.split("@")[1]) if fault and fault.startswith("collision@") else None
         self._fault_done = False
         self._imu, self._imu_next = [], 0.0
@@ -75,7 +77,7 @@ class SimVehicle(Vehicle):
                     "alt_rel": round(self.z, 2), "speed": round(spd, 2), "climb": round(self.vz, 2),
                     "heading": round(math.degrees(math.atan2(self.vx, self.vy)) % 360, 1) if spd > 0.3 else None,
                     "battery_pct": round(self.battery, 1), "battery_v": round(6 * (3.5 + 0.7 * self.battery / 100), 2),
-                    "gps_fix": 3, "sats": self.sats, "home": self._origin, "wp_total": n_wp,
+                    "gps_fix": 3, "sats": self.sats, "home": self._origin, "local_ok": True, "wp_total": n_wp,
                     "wp_current": min(n_wp, self.wp_reached + 1) if self.armed else 0, "wp_reached": self.wp_reached,
                     "status_text": self._status}
 
@@ -102,6 +104,7 @@ class SimVehicle(Vehicle):
             items.append(("rtl",) if plan.get("return_home", True) else ("land",))
             self.items, self.idx, self.wp_reached = items, 0, 0
             self._plan_hash, self._speed = plan_hash(plan), float(plan["speed_ms"])
+            self._rtl_alt = 0.0 if frame_of(plan) == "local" else 5.0
         return "миссия загружена в симулятор: %d элементов" % len(items)
 
     def verify(self, plan: dict):
@@ -183,7 +186,7 @@ class SimVehicle(Vehicle):
                 else:
                     self.mode = "AUTO.LAND"
             if self.mode == "AUTO.RTL":
-                if self._go(0.0, 0.0, max(self.z, 5.0), self._speed, dt) < 1.0:
+                if self._go(0.0, 0.0, max(self.z, self._rtl_alt), self._speed, dt) < 1.0:
                     self.mode = "AUTO.LAND"
             if self.mode == "AUTO.LAND":
                 self.vx = self.vy = 0.0

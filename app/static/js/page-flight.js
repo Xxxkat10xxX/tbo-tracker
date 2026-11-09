@@ -24,7 +24,7 @@ function droneTelemetryHTML(d) {
 
 function droneChecksHTML(checks) {
   if (!checks || !checks.length) return "";
-  return `<ul class="checks">${checks.map((c) => `<li class="${c.ok ? "ok" : "bad"}"><b>${c.ok ? "✓" : "✕"} ${esc(c.name)}</b>${c.detail ? ` <span class="muted">— ${esc(c.detail)}</span>` : ""}</li>`).join("")}</ul>`;
+  return `<ul class="checks">${checks.map((c) => `<li class="${c.warn ? "warn" : c.ok ? "ok" : "bad"}"><b>${c.warn ? "⚠" : c.ok ? "✓" : "✕"} ${esc(c.name)}</b>${c.detail ? ` <span class="muted">— ${esc(c.detail)}</span>` : ""}</li>`).join("")}</ul>`;
 }
 
 function droneRunResultHTML(r) {
@@ -80,8 +80,11 @@ async function flightPanel(root, ctx) {
     if (run && !mine && ["preparing", "ready", "in_flight", "landed"].includes(run.status)) return `<div class="notice">Борт занят миссией «${esc(run.mission_name || "")}» (${esc(run.status_label)}).</div>`;
     if (!eng) return '<div class="small muted">Команды борту отдают инженер и администратор.</div>';
     if (["idle", "error"].includes(d.state)) {
+      const local = ctx.frame && ctx.frame() === "local";
       return `<button class="primary" data-fl="prepare">⇪ Отправить план на борт</button>
-        <div class="hint">Миссия будет сохранена и загружена в полётный контроллер; борт проверит связь с контроллером, GPS, заряд и положение относительно точки взлёта. Взлёт — только после кнопки «Старт».</div>`;
+        <div class="hint">${local
+          ? "Локальная миссия: борт проверит связь с контроллером, локальную позицию (Optical Flow / ArUco), simple_offboard и заряд. Поставьте дрон в точку взлёта носом в направлении «вверх» карты. «Вернуть домой» — полёт к точке взлёта и посадка программой на борту."
+          : "Миссия будет сохранена и загружена в полётный контроллер; борт проверит связь с контроллером, GPS, заряд и положение относительно точки взлёта."} Взлёт — только после кнопки «Старт».</div>`;
     }
     if (d.state === "preparing") return '<div class="notice">Загрузка плана в контроллер и проверки на борту…</div>';
     if (d.state === "ready" && mine && run.status === "ready") return '<button class="go" data-fl="start">▶ Старт</button> <button data-fl="cancel">Отменить подготовку</button>';

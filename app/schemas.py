@@ -208,7 +208,7 @@ class GeneratorIn(BaseModel):
 class WaypointIn(BaseModel):
     lat: float = Field(ge=-90, le=90)
     lon: float = Field(ge=-180, le=180)
-    alt: float = Field(ge=2, le=500)
+    alt: float = Field(ge=0.5, le=500)          # нижняя граница по типу навигации — autopilot.validate
     hold_s: float = Field(0, ge=0, le=600)
 
 
@@ -217,9 +217,11 @@ class MissionIn(BaseModel):
     aircraft_id: int | None = None
     home_lat: float = Field(ge=-90, le=90)
     home_lon: float = Field(ge=-180, le=180)
-    takeoff_alt: float = Field(30, ge=2, le=500)
-    speed_ms: float = Field(8, ge=0.5, le=40)
+    takeoff_alt: float = Field(30, ge=0.5, le=500)
+    speed_ms: float = Field(8, ge=0.2, le=40)
     return_home: bool = True
+    # global — точки по GPS (широта/долгота); local — метры от точки взлёта (Optical Flow / ArUco, без GPS)
+    frame: Literal["global", "local"] = "global"
     waypoints: list[WaypointIn] = Field(default_factory=list, max_length=200)
     notes: str | None = None
 

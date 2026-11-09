@@ -51,7 +51,7 @@ def main(argv=None) -> int:
         vehicle = SimVehicle(home=home, time_scale=a.sim_speed, fault=a.sim_fault)
     else:
         from .vehicle_ros import RosVehicle
-        vehicle = RosVehicle(cfg.executor, cfg.fcu_wait_s, cfg.offboard_tolerance_m, cfg.takeoff_speed_ms)
+        vehicle = RosVehicle(cfg.executor, cfg.fcu_wait_s, cfg.offboard_tolerance_m, cfg.takeoff_speed_ms, cfg.local_tolerance_m)
     from .agent import Agent
     agent = Agent(cfg, vehicle, api)
     signal.signal(signal.SIGTERM, lambda *_: agent.stop())

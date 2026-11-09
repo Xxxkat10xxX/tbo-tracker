@@ -60,22 +60,36 @@ def plan_stats(m: dict) -> dict:
             "max_alt_m": max([p[2] for p in pts[1:]] or [first_alt])}
 
 
+# Локальная навигация (в помещении: Optical Flow с дальномером VL53L1X до 4 м, ArUco): малые высоты и скорости
+LOCAL = {"alt": (0.5, 10.0), "speed": (0.2, 3.0), "dist": 100.0}
+GLOBAL = {"alt": (2.0, 500.0), "speed": (0.5, 40.0), "dist": 20000.0}
+
+
 def validate(m: dict):
+    local = (m.get("frame") or "global") == "local"
+    lim = LOCAL if local else GLOBAL
     if not m["waypoints"]:
         raise DomainError("Добавьте хотя бы одну точку маршрута")
     if len(m["waypoints"]) > 200:
         raise DomainError("Не более 200 точек маршрута")
-    if not (0.5 <= float(m["speed_ms"]) <= 40):
-        raise DomainError("Крейсерская скорость: от 0,5 до 40 м/с")
+    lo, hi = lim["speed"]
+    if not (lo <= float(m["speed_ms"]) <= hi):
+        raise DomainError(f"Крейсерская скорость: от {lo:g} до {hi:g} м/с" + (" (локальная навигация)" if local else ""))
+    lo, hi = lim["alt"]
+    if not (lo <= float(m.get("takeoff_alt") or lo) <= hi):
+        raise DomainError(f"Высота взлёта: от {lo:g} до {hi:g} м" + (" (локальная навигация)" if local else ""))
     for i, w in enumerate(m["waypoints"], 1):
         if not (-90 <= float(w["lat"]) <= 90 and -180 <= float(w["lon"]) <= 180):
             raise DomainError(f"Точка {i}: некорректные координаты")
-        if not (2 <= float(w["alt"]) <= 500):
-            raise DomainError(f"Точка {i}: высота должна быть от 2 до 500 м над точкой взлёта")
+        if not (lo <= float(w["alt"]) <= hi):
+            raise DomainError(f"Точка {i}: высота должна быть от {lo:g} до {hi:g} м над точкой взлёта"
+                              + (" (локальная навигация)" if local else ""))
         if float(w.get("hold_s") or 0) < 0 or float(w.get("hold_s") or 0) > 600:
             raise DomainError(f"Точка {i}: удержание от 0 до 600 с")
-        if math.dist((0, 0), to_xy(m["home_lat"], m["home_lon"], float(w["lat"]), float(w["lon"]))) > 20000:
-            raise DomainError(f"Точка {i}: дальше 20 км от точки взлёта — проверьте координаты")
+        d = math.dist((0, 0), to_xy(m["home_lat"], m["home_lon"], float(w["lat"]), float(w["lon"])))
+        if d > lim["dist"]:
+            raise DomainError(f"Точка {i}: {d:.0f} м от точки взлёта — больше {lim['dist']:g} м"
+                              + (" для локальной навигации" if local else " — проверьте координаты"))
 
 
 # ------------------------------------------------------------------ симулятор

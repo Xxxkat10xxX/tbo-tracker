@@ -309,6 +309,9 @@ class Mission(Base):
     takeoff_alt: Mapped[float] = mapped_column(Float, default=30.0)
     speed_ms: Mapped[float] = mapped_column(Float, default=8.0)
     return_home: Mapped[bool] = mapped_column(Boolean, default=True)
+    # global — по GPS; local — метры от точки взлёта (в помещении: Optical Flow, ArUco). Точки хранятся как
+    # широта/долгота вокруг «дома» в обоих случаях: редактор, симулятор и оценка маршрута общие.
+    frame: Mapped[str | None] = mapped_column(String(10), default="global")
     # [{"lat": …, "lon": …, "alt": м, "hold_s": с}]
     waypoints: Mapped[list] = mapped_column(JSON, default=list)
     notes: Mapped[str | None] = mapped_column(Text)

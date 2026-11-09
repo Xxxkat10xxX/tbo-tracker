@@ -93,6 +93,10 @@ DRONE_MAX_ALT_M = _int("TBO_DRONE_MAX_ALT_M", 120, 5, 500)                   # �
 DRONE_MAX_DIST_M = _int("TBO_DRONE_MAX_DIST_M", 2000, 50, 20000)             # удаление точек от точки взлёта
 DRONE_MAX_HOME_OFFSET_M = _int("TBO_DRONE_MAX_HOME_OFFSET_M", 50, 5, 5000)   # борт не дальше от точки взлёта миссии
 DRONE_MIN_BATTERY_PCT = _int("TBO_DRONE_MIN_BATTERY_PCT", 50, 10, 100)       # заряд для старта
+# Локальная навигация (Technic 6S в помещении: Optical Flow + дальномер VL53L1X до 4 м, ArUco): высота и удаление, м
+DRONE_LOCAL_MAX_ALT_M = _int("TBO_DRONE_LOCAL_MAX_ALT_M", 3, 1, 10)
+DRONE_LOCAL_MAX_DIST_M = _int("TBO_DRONE_LOCAL_MAX_DIST_M", 20, 2, 100)
+DRONE_LOCAL_MAX_SPEED_MS = 2.0
 
 # Допуск на расхождение часов при проверке «полёт в будущем», минуты
 FUTURE_TOLERANCE_MIN = 10
