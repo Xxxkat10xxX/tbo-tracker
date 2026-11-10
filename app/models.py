@@ -320,7 +320,9 @@ class Mission(Base):
     # global — по GPS; local — метры от точки взлёта (в помещении: Optical Flow, ArUco). Точки хранятся как
     # широта/долгота вокруг «дома» в обоих случаях: редактор, симулятор и оценка маршрута общие.
     frame: Mapped[str | None] = mapped_column(String(10), default="global")
-    # [{"lat": …, "lon": …, "alt": м, "hold_s": с}]
+    # курс дрона: keep — не меняется (поворот только в точках с yaw_deg), route — нос по линии маршрута
+    yaw_mode: Mapped[str | None] = mapped_column(String(10), default="keep")
+    # [{"lat": …, "lon": …, "alt": м, "hold_s": с, "yaw_deg": ° или None — курс в точке}]
     waypoints: Mapped[list] = mapped_column(JSON, default=list)
     notes: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)

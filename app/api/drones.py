@@ -9,19 +9,20 @@ import io
 import tarfile
 from typing import Literal
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import Response, StreamingResponse
 from pydantic import Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import BASE_DIR
-from ..db import get_session
+from ..db import SessionLocal, get_session
 from ..errors import DomainError, NotFound
 from ..models import DroneLink
 from ..schemas import BaseModel
 from ..security import client_ip
-from ..services import drones
+from ..services import drones, video
 from ..services.auth import audit
 from ..timeutil import utcnow
 
@@ -90,6 +91,32 @@ def list_links(s: Session = Depends(get_session)):
 def get_link(lid: int, s: Session = Depends(get_session)):
     drones.sweep(s)
     return drones.link_dict(s, drones.get_link(s, lid), detail=True)
+
+
+def _video_ip(lid: int) -> str | None:
+    """Адрес борта для видео: подключение включено и борт на связи (адрес — с последнего обмена агента)."""
+    with SessionLocal() as s:
+        link = drones.get_link(s, lid)
+        if not link.enabled:
+            raise DomainError("Подключение борта отключено администратором", 409)
+        if not drones.online(link):
+            raise DomainError(f"Борт {link.aircraft.name} не на связи — видео недоступно", 409)
+        return link.last_ip
+
+
+@router.get("/drones/video/streams")
+def video_streams():
+    return video.streams()
+
+
+@router.get("/drones/{lid}/video")
+async def drone_video(lid: int, request: Request, stream: str = Query("main", max_length=20), probe: bool = False):
+    """Видео с борта (MJPEG) через сервер. probe=1 — только проверить доступность потока (JSON)."""
+    ip = await run_in_threadpool(_video_ip, lid)
+    if probe:
+        return await video.probe(ip, stream)
+    ctype, body = await video.open_stream(ip, stream, request.is_disconnected)
+    return StreamingResponse(body, media_type=ctype, headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"})
 
 
 @router.post("/drones", status_code=201)

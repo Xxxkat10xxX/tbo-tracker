@@ -225,6 +225,9 @@ table.spec-edit td{padding:3px 4px;border:0}
 /* ------------------------------------------------------------------ миссии */
 .mission-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 16px; align-items: start; }
 @media (max-width: 1100px) { .mission-grid { grid-template-columns: 1fr; } }
+.video-ctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.video-wrap { background: #0d1117; border-radius: 8px; overflow: hidden; aspect-ratio: 4 / 3; display: flex; align-items: center; justify-content: center; }
+.video-wrap img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .map-wrap { position: relative; }
 #map { width: 100%; height: auto; display: block; border-radius: 8px; cursor: crosshair; touch-action: none; user-select: none; }
 #map .map-bg { fill: #eef3ea; }
@@ -238,6 +241,14 @@ table.spec-edit td{padding:3px 4px;border:0}
 #map .wp circle { fill: #fff; stroke: var(--accent); stroke-width: 3; }
 #map .wp text { fill: #1f2a3d; font: 700 12px Inter, sans-serif; text-anchor: middle; pointer-events: none; }
 #map .wp .wp-alt { font: 500 10.5px Inter, sans-serif; fill: #44506a; paint-order: stroke; stroke: #eef3ea; stroke-width: 3px; }
+#map .wp.sel circle { fill: var(--accent); stroke: #1f2a3d; }
+#map .wp.sel > text:not(.wp-alt) { fill: #fff; }
+#map .home-g { cursor: default; }
+.wp-table tr.sel td { background: rgba(47, 111, 237, 0.08); }
+#map .wp-yaw { fill: var(--accent); stroke: #fff; stroke-width: 1.5; }
+#map .wp.sel .wp-yaw { fill: #1f2a3d; }
+#map .leg-dir { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+#map .drone-hdg { fill: #e0682b; stroke: #fff; stroke-width: 1.5; }
 #map .drone { fill: #e0682b; stroke: #fff; stroke-width: 2; }
 #map .drone-ring { fill: none; stroke: #e0682b; stroke-opacity: .35; stroke-width: 2; }
 #map .north { fill: #1f2a3d; }

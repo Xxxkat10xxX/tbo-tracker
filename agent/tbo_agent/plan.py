@@ -6,6 +6,10 @@ import json
 import math
 
 R_EARTH = 6371000.0
+# Курс дрона в плане: keep — не меняется (поворот только в точках с yaw_deg), route — нос по линии маршрута.
+# yaw_deg точки — градусы по часовой стрелке от «верха» карты миссии: по GPS — от севера, локально — от носа
+# дрона в момент взлёта (0° — вперёд, 90° — вправо).
+YAW_MODES = ("keep", "route")
 
 
 class PlanError(Exception):
@@ -31,6 +35,28 @@ def plan_hash(plan: dict) -> str:
 
 def frame_of(plan: dict) -> str:
     return "local" if (plan or {}).get("frame") == "local" else "global"
+
+
+def yaw_mode(plan: dict) -> str:
+    return "route" if (plan or {}).get("yaw_mode") == "route" else "keep"
+
+
+def yaw_points(plan: dict) -> int:
+    """Сколько точек плана с заданным курсом."""
+    return sum(1 for w in (plan or {}).get("waypoints") or [] if w.get("yaw_deg") is not None)
+
+
+def uses_yaw(plan: dict) -> bool:
+    return yaw_mode(plan) == "route" or yaw_points(plan) > 0
+
+
+def yaw_desc(plan: dict) -> str:
+    """Курс в плане — для описания загруженного плана; пустая строка, если курс не задан."""
+    n = yaw_points(plan)
+    parts = ["нос по линии маршрута"] if yaw_mode(plan) == "route" else []
+    if n:
+        parts.append(f"заданный курс в {n} {'точке' if n % 10 == 1 and n % 100 != 11 else 'точках'}")
+    return ", курс: " + ", ".join(parts) if parts else ""
 
 
 def effective_limits(server: dict, local: dict, frame: str = "global") -> dict:
@@ -71,6 +97,8 @@ def validate(plan: dict, serial: str, limits: dict):
         raise PlanError("неверная точка взлёта")
     if not isinstance(wps, list) or not 1 <= len(wps) <= 200:
         raise PlanError("в плане должно быть от 1 до 200 точек")
+    if plan.get("yaw_mode", "keep") not in YAW_MODES:            # новый режим сервера — отказ, а не полёт без него
+        raise PlanError(f"неизвестный режим курса «{plan.get('yaw_mode')}» — обновите агент на борту")
     local = frame_of(plan) == "local"
     max_speed = limits.get("max_speed_ms") or 20
     if not 0.2 <= speed <= max_speed:
@@ -93,3 +121,10 @@ def validate(plan: dict, serial: str, limits: dict):
             raise PlanError("точка %d: %.0f м от точки взлёта, предел борта %.0f м" % (i, d, max_dist))
         if not 0 <= hold <= 600:
             raise PlanError("точка %d: удержание вне 0–600 с" % i)
+        if w.get("yaw_deg") is not None:
+            try:
+                yaw = float(w["yaw_deg"])
+            except (TypeError, ValueError):
+                raise PlanError(f"точка {i}: курс заполнен неверно") from None
+            if not (math.isfinite(yaw) and 0 <= yaw <= 360):
+                raise PlanError(f"точка {i}: курс вне 0–360°")

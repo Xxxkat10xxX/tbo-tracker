@@ -1,0 +1,13 @@
+[Unit]
+Description=tbo-tracker: Wi-Fi сервера (клиент раздачи телефона + собственная точка доступа)
+After=NetworkManager.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/tbo-wifi
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

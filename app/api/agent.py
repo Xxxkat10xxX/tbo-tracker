@@ -54,6 +54,8 @@ class HelloIn(BaseModel):
     agent_version: str = Field("", max_length=40)
     executor: str = Field("", max_length=40)
     vehicle: dict = Field(default_factory=dict)
+    # возможности агента (например, yaw — курс в плане); прежние агенты их не сообщают
+    features: list[Annotated[str, Field(max_length=40)]] = Field(default_factory=list, max_length=30)
 
     @field_validator("vehicle")
     @classmethod
@@ -164,7 +166,8 @@ def _seen(link: DroneLink, request: Request):
 def hello(data: HelloIn, request: Request, link: DroneLink = Depends(device), s: Session = Depends(get_session)):
     _seen(link, request)
     if data.executor != "check":           # «tbo-agent check» только проверяет связь — сведения об агенте не трогает
-        link.agent = {"version": data.agent_version, "executor": data.executor, "vehicle": data.vehicle, "hello_at": iso(utcnow())}
+        link.agent = {"version": data.agent_version, "executor": data.executor, "vehicle": data.vehicle,
+                      "features": data.features, "hello_at": iso(utcnow())}
     s.commit()
     a = link.aircraft
     return {"link_id": link.id, "aircraft": {"serial": a.serial, "name": a.name}, "server_time": iso(utcnow()),

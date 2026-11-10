@@ -60,6 +60,41 @@ def test_preflight_checks():
     assert bad == {"GPS", "Заряд батареи"}
 
 
+def _sim_headings(mode):
+    """Шаги модели вручную (без потока): курс на отрезке 1 (на север), в конце удержания в точке 1 (курс 200°),
+    на отрезке 2 (на восток) и на возврате."""
+    v = SimVehicle(home=HOME)
+    p = make_plan(yaw_mode=mode, waypoints=[
+        {"lat": HOME[0] + 0.001, "lon": HOME[1], "alt": 25.0, "hold_s": 2.0, "yaw_deg": 200.0},
+        {"lat": HOME[0] + 0.001, "lon": HOME[1] + 0.0015, "alt": 30.0, "hold_s": 0.0}])
+    v.upload(p, {"lat": HOME[0], "lon": HOME[1]})
+    v.start_mission(p)
+    out = {}
+    for _ in range(int(600 / v.DT)):
+        v._step(v.DT)
+        if v.idx == 1 and v.y > 60 and v.hold_left is None:
+            out["leg1"] = v.hdg
+        if v.idx == 1 and v.hold_left is not None and v.hold_left < 0.1:
+            out["hold1"] = v.hdg
+        if v.idx == 2 and v.x > 60:
+            out["leg2"] = v.hdg
+        if v.mode == "AUTO.RTL" and v.x < 40:
+            out["rtl"] = v.hdg
+        if not v.armed:
+            break
+    return out
+
+
+def test_sim_heading_keep_and_route():
+    def near(a, b):
+        return abs((a - b + 180) % 360 - 180) < 2
+    keep = _sim_headings("keep")
+    assert near(keep["leg1"], 0) and near(keep["hold1"], 200) and near(keep["leg2"], 200) and near(keep["rtl"], 200), keep
+    route = _sim_headings("route")
+    assert near(route["leg1"], 0) and near(route["hold1"], 200) and near(route["leg2"], 90), route
+    assert 180 < route["rtl"] < 270                                         # к точке взлёта: на юго-запад
+
+
 def test_recorder_keeps_impact_peaks_and_builds_log():
     r = Recorder(0.0)
     snap = {"in_air": True, "lat": HOME[0], "lon": HOME[1], "alt_rel": 10.0, "speed": 5.0, "battery_pct": 90.0, "mode": "AUTO.MISSION"}
@@ -242,6 +277,101 @@ def test_log_kept_in_outbox_when_server_unreachable(rig):
     assert wait(lambda: ag.state == "idle" and ag.outbox.pending() == ["run-11.json"], 30)
     api.offline = False
     assert ag._flush_outbox() and 11 in api.logs and not ag.outbox.pending()
+
+
+class SlowApi(FakeApi):
+    """Сервер, отвечающий на журнал с задержкой (импорт на Pi занимает секунды)."""
+
+    def __init__(self, delay=0.3):
+        super().__init__()
+        self.delay, self.uploads = delay, []
+
+    def upload_log(self, run_id, body):
+        self.uploads.append(run_id)
+        time.sleep(self.delay)
+        return super().upload_log(run_id, body)
+
+
+def test_parallel_flush_of_same_log_does_not_crash(tmp_path):
+    """Поток полёта и фоновый повтор отправляют журналы одновременно: прежде второй не находил файл, падал при переносе
+    в rejected/ — и агент навсегда оставался «Передача журнала» (или умирал фоновый повтор)."""
+    api = SlowApi()
+    ag = Agent(Cfg(tmp_path), SimVehicle(time_scale=60), api)
+    ag.outbox.put(31, {"status": "completed", "flight": None})
+    errors, results = [], []
+
+    def flush():
+        try:
+            results.append(ag._flush_outbox())
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    ths = [threading.Thread(target=flush) for _ in range(2)]
+    for th in ths:
+        th.start()
+    for th in ths:
+        th.join(10)
+    assert not errors and results == [True, True]
+    assert api.uploads == [31] and 31 in api.logs                  # отправлен один раз
+    assert not ag.outbox.pending() and os.listdir(os.path.join(str(tmp_path), "sent")) == ["run-31.json"]
+    assert not os.path.isdir(os.path.join(str(tmp_path), "rejected"))
+
+
+def test_flush_tolerates_log_already_moved(tmp_path):
+    """Файл исчез из outbox во время отправки (перенесён другим процессом): это не «повреждённый журнал»."""
+    api = FakeApi()
+    ag = Agent(Cfg(tmp_path), SimVehicle(time_scale=60), api)
+    ag.outbox.put(32, {"status": "completed", "flight": None})
+    orig = api.upload_log
+
+    def upload_and_move(run_id, body):
+        orig(run_id, body)
+        ag.outbox.done("run-%d.json" % run_id)              # «другой поток» успел перенести файл
+    api.upload_log = upload_and_move
+    assert ag._flush_outbox() is True and 32 in api.logs
+    assert not os.path.isdir(os.path.join(str(tmp_path), "rejected"))
+
+
+def test_outbox_retry_survives_unexpected_errors(tmp_path):
+    ag = Agent(Cfg(tmp_path), SimVehicle(time_scale=60), FakeApi())
+    ag.outbox.put(33, {"status": "completed", "flight": None})
+
+    def boom():
+        raise RuntimeError("сбой")
+    ag._flush_outbox = boom
+    ag._outbox_tick()                                       # исключение не выходит наружу — поток повтора жив
+
+
+def test_flight_returns_to_idle_when_log_upload_fails_unexpectedly(rig):
+    ag, api, v = rig
+
+    def boom(run_id, body):
+        raise RuntimeError("неожиданная ошибка отправки")
+    api.upload_log = boom
+    p = make_plan(run_id=34, waypoints=[{"lat": HOME[0] + 0.0005, "lon": HOME[1], "alt": 20.0, "hold_s": 0.0}])
+    api.active_run = 34
+    api.send("prepare", {"plan": p}, run_id=34, ttl=120)
+    assert wait(lambda: ag.state == "ready")
+    api.send("start", {"run_id": 34, "plan_hash": p["plan_hash"]}, run_id=34)
+    assert wait(lambda: ag.state == "idle" and ag.run_id is None, 30), (ag.state, ag.detail)
+    assert "передан позже" in ag.detail and ag.outbox.pending() == ["run-34.json"]   # журнал сохранён на борту
+    del api.upload_log                                      # связь восстановилась: обычная отправка
+    assert ag._flush_outbox() and 34 in api.logs and not ag.outbox.pending()
+
+
+def test_landing_before_route_end_is_not_reported_completed(rig):
+    """Борт сел сам посреди маршрута (без команды оператора и перехвата пилотом): прежде журнал — «миссия выполнена»
+    даже при 0 достигнутых точек (так было с полётом R45)."""
+    ag, api, v = rig
+    p = make_plan(run_id=35)
+    api.active_run = 35
+    api.send("prepare", {"plan": p}, run_id=35, ttl=120)
+    assert wait(lambda: ag.state == "ready")
+    api.send("start", {"run_id": 35, "plan_hash": p["plan_hash"]}, run_id=35)
+    assert wait(lambda: v.snapshot()["alt_rel"] > 10)
+    v.land()                                                # посадка не по команде агента
+    assert wait(lambda: 35 in api.logs, 30)
+    log = api.logs[35]
+    assert log["status"] == "aborted" and "достигнуто точек 0 из 2" in log["reason"], log["reason"]
 
 
 def test_long_flight_track_is_thinned_not_lost():

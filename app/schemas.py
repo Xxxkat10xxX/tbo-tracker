@@ -210,6 +210,8 @@ class WaypointIn(BaseModel):
     lon: float = Field(ge=-180, le=180)
     alt: float = Field(ge=0.5, le=500)          # нижняя граница по типу навигации — autopilot.validate
     hold_s: float = Field(0, ge=0, le=600)
+    # курс в точке, ° по часовой от «верха» карты: GPS — от севера, локально — от носа дрона при взлёте; None — не задан
+    yaw_deg: float | None = Field(None, ge=0, le=360)
 
 
 class MissionIn(BaseModel):
@@ -222,6 +224,8 @@ class MissionIn(BaseModel):
     return_home: bool = True
     # global — точки по GPS (широта/долгота); local — метры от точки взлёта (Optical Flow / ArUco, без GPS)
     frame: Literal["global", "local"] = "global"
+    # курс дрона: keep — не меняется (поворот только в точках с курсом), route — нос по линии маршрута
+    yaw_mode: Literal["keep", "route"] = "keep"
     waypoints: list[WaypointIn] = Field(default_factory=list, max_length=200)
     notes: str | None = None
 

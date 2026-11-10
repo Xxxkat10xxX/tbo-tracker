@@ -8,3 +8,7 @@ class Navigate:
 
 class NavigateGlobal:
     pass
+
+
+class SetYaw:
+    pass

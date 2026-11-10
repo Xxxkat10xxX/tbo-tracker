@@ -97,6 +97,11 @@ DRONE_MIN_BATTERY_PCT = _int("TBO_DRONE_MIN_BATTERY_PCT", 50, 10, 100)       # �
 DRONE_LOCAL_MAX_ALT_M = _int("TBO_DRONE_LOCAL_MAX_ALT_M", 3, 1, 10)
 DRONE_LOCAL_MAX_DIST_M = _int("TBO_DRONE_LOCAL_MAX_DIST_M", 20, 2, 100)
 DRONE_LOCAL_MAX_SPEED_MS = 2.0
+# Видео с борта: web_video_server образа Technic (порт 8080) через сервер — браузер не ходит на борт напрямую
+# (политика безопасности страниц: картинки только с этого сайта). 0 — видео выключено.
+DRONE_VIDEO_PORT = _int("TBO_DRONE_VIDEO_PORT", 8080, 0, 65535)
+DRONE_VIDEO_MAX = _int("TBO_DRONE_VIDEO_MAX", 3, 1, 20)                      # одновременных просмотров на сервер
+DRONE_VIDEO_MAX_MIN = _int("TBO_DRONE_VIDEO_MAX_MIN", 30, 1, 240)             # один просмотр — не дольше, мин
 
 # Допуск на расхождение часов при проверке «полёт в будущем», минуты
 FUTURE_TOLERANCE_MIN = 10

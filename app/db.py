@@ -86,7 +86,7 @@ EXTRA_COLUMNS = {
     "component_types": {"spec_fields": "JSON"},
     "maintenance_rules": {"interval_events": "INTEGER", "warn_events": "INTEGER"},
     "mission_runs": {"source": "VARCHAR(20)"},
-    "missions": {"frame": "VARCHAR(10)"},
+    "missions": {"frame": "VARCHAR(10)", "yaw_mode": "VARCHAR(10)"},
 }
 
 

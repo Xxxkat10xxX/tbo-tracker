@@ -203,21 +203,44 @@ def plan_hash(plan: dict) -> str:
     return hashlib.sha256(json.dumps(body, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
 
 
+def _plan_wp(w: dict) -> dict:
+    out = {"lat": float(w["lat"]), "lon": float(w["lon"]), "alt": float(w["alt"]), "hold_s": float(w.get("hold_s") or 0)}
+    if w.get("yaw_deg") is not None:
+        out["yaw_deg"] = float(w["yaw_deg"]) % 360.0
+    return out
+
+
+def plan_uses_yaw(plan: dict) -> bool:
+    return plan.get("yaw_mode") == "route" or any("yaw_deg" in w for w in plan["waypoints"])
+
+
 def plan_for(m: Mission, a: Aircraft, run_id: int) -> dict:
+    """План для борта (tbo-plan/1). Курс — только если задан (yaw_mode=route, yaw_deg точек): план миссии без курса
+    тот же, что у прежних версий, и его выполняет агент любой версии."""
     frame = m.frame or "global"
     md = {"name": m.name, "home_lat": m.home_lat, "home_lon": m.home_lon, "takeoff_alt": m.takeoff_alt,
-          "speed_ms": m.speed_ms, "return_home": m.return_home, "frame": frame, "waypoints": m.waypoints or []}
+          "speed_ms": m.speed_ms, "return_home": m.return_home, "frame": frame, "yaw_mode": m.yaw_mode or "keep",
+          "waypoints": m.waypoints or []}
     autopilot.validate(md)
     check_limits(md)
     lim = {k: v for k, v in limits_for(frame).items() if k != "env"}
     plan = {"format": "tbo-plan/1", "run_id": run_id, "frame": frame, "mission": {"id": m.id, "name": m.name},
             "aircraft": {"serial": a.serial, "name": a.name}, "home": {"lat": float(m.home_lat), "lon": float(m.home_lon)},
             "takeoff_alt": float(m.takeoff_alt), "speed_ms": float(m.speed_ms), "return_home": bool(m.return_home),
-            "waypoints": [{"lat": float(w["lat"]), "lon": float(w["lon"]), "alt": float(w["alt"]),
-                           "hold_s": float(w.get("hold_s") or 0)} for w in m.waypoints],
-            "limits": lim}
+            "waypoints": [_plan_wp(w) for w in m.waypoints], "limits": lim}
+    if md["yaw_mode"] == "route":
+        plan["yaw_mode"] = "route"
     plan["plan_hash"] = plan_hash(plan)
     return plan
+
+
+def check_agent_features(link: DroneLink, plan: dict):
+    """Курс в плане — только агенту, который его выполняет: прежний агент молча летел бы без курса."""
+    if plan_uses_yaw(plan) and "yaw" not in ((link.agent or {}).get("features") or []):
+        ver = (link.agent or {}).get("version") or "неизвестна"
+        raise DomainError(f"Агент на борту (версия {ver}) не поддерживает курс дрона в миссии — обновите агент "
+                          "(deploy/field/deploy.sh --drone-only) или уберите курс: «Курс дрона» — «Не менять», "
+                          "курс в точках — пусто")
 
 
 # ------------------------------------------------------------------ команды пользователя
@@ -272,6 +295,7 @@ def prepare(s: Session, link: DroneLink, mission_id: int, actor: str) -> tuple[M
     s.add(run)
     s.flush()
     plan = plan_for(m, a, run.id)
+    check_agent_features(link, plan)
     run.summary = {"mission_name": m.name, "aircraft_name": a.name, "plan_hash": plan["plan_hash"], "prepared_by": actor,
                    "prepared_at": iso(now), "waypoints": len(plan["waypoints"])}
     _supersede(s, link, tuple(TTL_S), "заменена новой подготовкой", now)
