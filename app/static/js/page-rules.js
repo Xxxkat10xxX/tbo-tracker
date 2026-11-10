@@ -4,8 +4,8 @@
 // ------------------------------------------------------------------ Регламенты
 async function pageRules() {
   const [rules, m] = await Promise.all([GET("/api/rules"), meta()]);
-  const lim = (r) => [r.interval_hours && `${num(r.interval_hours, 1)} ч`, r.interval_cycles && `${r.interval_cycles} цикл.`, r.interval_days && `${r.interval_days} дн.`, r.interval_events && `${r.interval_events} падение/столкн.`].filter(Boolean).join(" / ");
-  const warn = (r) => [r.warn_hours != null && `${num(r.warn_hours, 1)} ч`, r.warn_cycles != null && `${r.warn_cycles} ц.`, r.warn_days != null && `${r.warn_days} дн.`].filter(Boolean).join(" / ") || "10 % интервала";
+  const lim = (r) => [r.interval_hours && `${num(r.interval_hours, 2)} ч`, r.interval_cycles && `${r.interval_cycles} цикл.`, r.interval_days && `${r.interval_days} дн.`, r.interval_events && `${r.interval_events} падение/столкн.`].filter(Boolean).join(" / ");
+  const warn = (r) => [r.warn_hours != null && `${num(r.warn_hours, 2)} ч`, r.warn_cycles != null && `${r.warn_cycles} ц.`, r.warn_days != null && `${r.warn_days} дн.`].filter(Boolean).join(" / ") || "10 % интервала";
   view().innerHTML = `<div class="page-head"><div><h1>Регламенты ТО</h1><div class="sub">Правила и пороги планового обслуживания для типов аппаратов и узлов. Срабатывает первый достигнутый порог.</div></div>
     <button class="primary" id="add">+ Новый регламент</button></div>
     <div class="card"><div class="table-wrap"><table><thead><tr><th>Код</th><th>Регламент</th><th>Применяется к</th><th>Вид</th><th>Интервал</th><th>Предупреждать за</th><th></th></tr></thead><tbody>
@@ -22,11 +22,11 @@ async function pageRules() {
     <div class="field"><label>Описание</label><textarea name="description" rows="2">${esc(r.description || "")}</textarea></div>
     <div class="row2"><div class="field"><label>Объект</label><select name="target"><option value="component" ${r.target !== "aircraft" ? "selected" : ""}>Узел</option><option value="aircraft" ${r.target === "aircraft" ? "selected" : ""}>Борт</option></select></div>
     <div class="field"><label>Тип</label><select name="type"></select></div></div>
-    <div class="row3"><div class="field"><label>Интервал, ч</label><input type="number" step="0.1" min="0" name="interval_hours" value="${r.interval_hours ?? ""}"></div>
+    <div class="row3"><div class="field"><label>Интервал, ч</label><input type="number" step="0.01" min="0" name="interval_hours" value="${r.interval_hours ?? ""}"></div>
     <div class="field"><label>Интервал, циклы</label><input type="number" min="0" name="interval_cycles" value="${r.interval_cycles ?? ""}"></div>
     <div class="field"><label>Интервал, дни</label><input type="number" min="0" name="interval_days" value="${r.interval_days ?? ""}"></div></div>
     <div class="row3"><div class="field"><label>Падений/столкновений (датчики)</label><input type="number" min="0" name="interval_events" value="${r.interval_events ?? ""}" placeholder="напр. 1"></div><div></div><div></div></div>
-    <div class="row3"><div class="field"><label>Предупреждать за, ч</label><input type="number" step="0.1" min="0" name="warn_hours" value="${r.warn_hours ?? ""}"></div>
+    <div class="row3"><div class="field"><label>Предупреждать за, ч</label><input type="number" step="0.01" min="0" name="warn_hours" value="${r.warn_hours ?? ""}"></div>
     <div class="field"><label>за, циклов</label><input type="number" min="0" name="warn_cycles" value="${r.warn_cycles ?? ""}"></div>
     <div class="field"><label>за, дней</label><input type="number" min="0" name="warn_days" value="${r.warn_days ?? ""}"></div></div>
     <div class="hint">Пустой порог не используется. Если порог предупреждения не задан — 10 % интервала.</div>

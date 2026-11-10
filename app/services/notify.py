@@ -37,8 +37,13 @@ lock = threading.RLock()          # общая блокировка: прове�
 METRIC_NAMES = {"hours": "Часы", "cycles": "Циклы", "days": "Календарь", "events": "Падения/столкновения"}
 
 
-def _num(v) -> str:
-    return (f"{v:.1f}".rstrip("0").rstrip(".") if isinstance(v, float) else str(v)).replace(".", ",")
+def _num(v, d: int = 1) -> str:
+    return (f"{v:.{d}f}".rstrip("0").rstrip(".") if isinstance(v, float) else str(v)).replace(".", ",")
+
+
+def _used(d: dict) -> str:
+    """Израсходовано по метрике: часы — всегда до сотых, как в интерфейсе."""
+    return f"{float(d['used']):.2f}".replace(".", ",") if d["metric"] == "hours" else _num(d["used"])
 
 
 def _entity_href(e: dict) -> str:
@@ -56,7 +61,7 @@ def current(s: Session, now: datetime | None = None) -> dict[str, dict]:
         if e["kind"] == "component" and e.get("location"):
             where = f" · {e['location']['aircraft_name']} ({e['location']['position']})"
         d = it["driver"]
-        detail = f"{METRIC_NAMES.get(d['metric'], d['metric'])}: {_num(d['used'])} из {_num(d['limit'])} {d['unit']}" if d else ""
+        detail = f"{METRIC_NAMES.get(d['metric'], d['metric'])}: {_used(d)} из {_num(d['limit'], 2)} {d['unit']}" if d else ""
         out[f"{cat}|{it['key']}"] = {"category": cat, "title": f"{e.get('serial')}{where} — {it['rule']['name']}",
                                      "text": detail, "href": _entity_href(e)}
     since = now - timedelta(days=SENSOR_WINDOW_DAYS)
@@ -119,14 +124,26 @@ def _http_post(url: str, payload: dict, timeout: float = 10) -> str:
         return f"ошибка: {getattr(e, 'reason', e)}"
 
 
+MESSAGE_MAX = 3800      # Telegram отклоняет сообщения длиннее 4096 символов (HTTP 400) — пакет не дошёл бы никогда
+
+
 def format_message(events: list[dict], conf: dict) -> str:
-    lines = [f"tbo-tracker: {'новое уведомление' if len(events) == 1 else f'новых уведомлений: {len(events)}'}"]
-    for e in events[:20]:
-        lines.append(f"{ICONS.get(e['category'], '•')} {e['title']}" + (f" ({e['text']})" if e.get("text") else ""))
-    if len(events) > 20:
-        lines.append(f"… и ещё {len(events) - 20}")
-    if conf.get("public_url"):
-        lines.append(conf["public_url"].rstrip("/") + "/#/maintenance")
+    head = f"tbo-tracker: {'новое уведомление' if len(events) == 1 else f'новых уведомлений: {len(events)}'}"
+    tail = conf["public_url"].rstrip("/") + "/#/maintenance" if conf.get("public_url") else ""
+    lines, size = [head], len(head) + len(tail) + 40
+    for i, e in enumerate(events[:20]):
+        line = f"{ICONS.get(e['category'], '•')} {e['title']}" + (f" ({e['text']})" if e.get("text") else "")
+        line = line[:600]
+        if size + len(line) + 1 > MESSAGE_MAX:
+            lines.append(f"… и ещё {len(events) - i}")
+            break
+        lines.append(line)
+        size += len(line) + 1
+    else:
+        if len(events) > 20:
+            lines.append(f"… и ещё {len(events) - 20}")
+    if tail:
+        lines.append(tail)
     return "\n".join(lines)
 
 

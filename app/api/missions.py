@@ -9,11 +9,10 @@ from sqlalchemy.orm import Session
 
 from ..db import get_session
 from ..errors import DomainError, NotFound
-from ..models import AIRCRAFT_STATUSES, Aircraft, LogImport, Mission, MissionRun
+from ..models import Aircraft, LogImport, Mission, MissionRun
 from ..schemas import MissionEstimateIn, MissionIn, MissionRunIn
 from ..services import autopilot, logs
-from ..services.maintenance import due_items
-from ..services.usage import current_installations
+from ..services.airworthy import preflight
 from ..timeutil import iso, utcnow
 
 router = APIRouter(prefix="/api")
@@ -22,12 +21,15 @@ router = APIRouter(prefix="/api")
 def _mdict(m: Mission) -> dict:
     return {"id": m.id, "name": m.name, "aircraft_id": m.aircraft_id, "aircraft_name": m.aircraft.name if m.aircraft else None,
             "home_lat": m.home_lat, "home_lon": m.home_lon, "takeoff_alt": m.takeoff_alt, "speed_ms": m.speed_ms,
-            "return_home": m.return_home, "waypoints": m.waypoints or [], "notes": m.notes, "updated_at": iso(m.updated_at)}
+            "return_home": m.return_home, "frame": m.frame or "global", "waypoints": m.waypoints or [], "notes": m.notes,
+            "updated_at": iso(m.updated_at)}
 
 
 def _rdict(r: MissionRun, with_track=False) -> dict:
+    from ..services.drones import RUN_LABELS
     d = {"id": r.id, "mission_id": r.mission_id, "aircraft_id": r.aircraft_id, "import_id": r.import_id,
-         "started_at": iso(r.started_at), "ended_at": iso(r.ended_at), "status": r.status, "summary": r.summary}
+         "started_at": iso(r.started_at), "ended_at": iso(r.ended_at), "status": r.status,
+         "status_label": RUN_LABELS.get(r.status, r.status), "source": r.source or "sim", "summary": r.summary}
     if with_track:
         d["track"] = r.track
     return d
@@ -38,21 +40,6 @@ def _get(s, mid) -> Mission:
     if m is None:
         raise NotFound("Миссия не найдена")
     return m
-
-
-def preflight(s: Session, a: Aircraft) -> list[str]:
-    """Предполётная проверка допуска: статус, комплектность обязательных позиций, просроченные работы."""
-    problems = []
-    if a.status != "active":
-        problems.append(f"борт в статусе «{AIRCRAFT_STATUSES.get(a.status, a.status)}», а не «В эксплуатации»")
-    filled = {i.position for i in current_installations(s).values() if i.aircraft_id == a.id}
-    empty = [sl["label"] for sl in a.type.slots or [] if sl.get("required", True) and sl["position"] not in filled]
-    if empty:
-        problems.append("не установлены узлы: " + ", ".join(empty))
-    for it in due_items(s, aircraft_id=a.id, statuses={"overdue"}):
-        who = it["entity"]["name"] if it["entity"]["kind"] == "aircraft" else it["entity"]["serial"]
-        problems.append(f"просрочено: {it['rule']['name']} ({who})")
-    return problems
 
 
 @router.get("/missions")
@@ -115,6 +102,9 @@ def update_mission(mid: int, data: MissionIn, s: Session = Depends(get_session))
 @router.delete("/missions/{mid}")
 def delete_mission(mid: int, s: Session = Depends(get_session)):
     m = _get(s, mid)
+    from ..services.drones import ACTIVE_RUN
+    if s.scalar(select(MissionRun.id).where(MissionRun.mission_id == mid, MissionRun.status.in_(ACTIVE_RUN)).limit(1)):
+        raise DomainError("Миссия готовится к полёту или выполняется на борту — удалить её можно после посадки")
     for r in s.scalars(select(MissionRun).where(MissionRun.mission_id == mid)):
         s.delete(r)
     s.delete(m)
@@ -168,6 +158,9 @@ def export_mission(mid: int, fmt: str = "plan", firmware: str = "ardupilot", s: 
     m = _get(s, mid)
     if not m.waypoints:
         raise DomainError("В миссии нет точек")
+    if (m.frame or "global") == "local":
+        raise DomainError("Локальная миссия (метры от точки взлёта, без GPS) не переносится в QGroundControl: "
+                          "в файлах .plan и .waypoints только координаты GPS")
     import json
     md = _mdict(m)
     safe = "".join(ch if ch.isalnum() else "_" for ch in m.name)[:40] or "mission"

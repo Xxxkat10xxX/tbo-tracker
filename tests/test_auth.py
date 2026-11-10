@@ -53,7 +53,12 @@ def test_every_route_has_an_access_rule():
                 (public_reads if m == "GET" else public_writes).append(path)
             if path.startswith(("/api/server/", "/api/auth/users", "/api/audit", "/api/demo/", "/api/scenarios")):
                 assert role == "admin", (m, path)
-            if m in ("POST", "PUT", "PATCH", "DELETE") and path not in PUBLIC_EXACT and path not in ANY_ROLE_WRITE:
+            # бортовой агент — только токен устройства; подключение бортов (токены) — только администратор
+            assert (role == "device") == path.startswith("/api/agent/"), (m, path)
+            if path.startswith("/api/drones") and m != "GET" and not path.endswith(("/prepare", "/start", "/rtl", "/land", "/cancel")):
+                assert role == "admin", (m, path)
+            if m in ("POST", "PUT", "PATCH", "DELETE") and path not in PUBLIC_EXACT and path not in ANY_ROLE_WRITE \
+                    and not path.startswith("/api/agent/"):
                 assert role in ("engineer", "admin"), (m, path)
     assert total > 80
     assert sorted(set(public_writes)) == ["/api/auth/login", "/api/auth/setup"]

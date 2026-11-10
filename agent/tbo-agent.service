@@ -1,0 +1,26 @@
+[Unit]
+Description=tbo-agent — бортовой агент tbo-tracker (план полёта, телеметрия, журналы полётов)
+After=network-online.target technic.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=orangepi
+ExecStart=/opt/tbo-agent/run-agent.sh run
+Restart=always
+RestartSec=5
+TimeoutStopSec=45
+Environment=PYTHONUNBUFFERED=1
+Environment=ROS_HOME=/var/lib/tbo-agent/ros
+Environment=ROS_LOG_DIR=/var/lib/tbo-agent/ros/log
+# дополнительные переменные ROS (ROS_MASTER_URI, ROS_HOSTNAME), если нужны
+EnvironmentFile=-/etc/tbo-agent/ros.env
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=read-only
+PrivateTmp=true
+ReadWritePaths=/var/lib/tbo-agent
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

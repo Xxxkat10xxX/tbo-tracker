@@ -18,6 +18,7 @@ from ..models import (
     Setting,
 )
 from ..timeutil import iso, parse_dt, utcnow
+from . import sensors
 from .maintenance import STATUS_ORDER, Evaluator, due_items, resource_rule
 from .usage import component_totals, component_usage, current_installations, installation_usage
 
@@ -88,8 +89,8 @@ def analytics(s: Session, now: datetime | None = None) -> dict:
         tsn = totals[cid].hours
         if tsn - ob_h > 0.05:
             hidden_rows.append({"component_id": cid, "serial": c.serial, "type": c.type.name,
-                                "aircraft": inst.aircraft.name, "tsn_hours": round(tsn, 1),
-                                "on_board_hours": round(ob_h, 1), "hidden_hours": round(tsn - ob_h, 1),
+                                "aircraft": inst.aircraft.name, "tsn_hours": round(tsn, 2),
+                                "on_board_hours": round(ob_h, 2), "hidden_hours": round(tsn - ob_h, 2),
                                 "installed_at": iso(inst.installed_at)})
     hidden_rows.sort(key=lambda r: -r["hidden_hours"])
 
@@ -107,12 +108,17 @@ def analytics(s: Session, now: datetime | None = None) -> dict:
         u = component_usage(s, [inst.component_id], since=naive_base, aircraft_id=inst.aircraft_id).get(inst.component_id)
         nh, nc = (u.hours, u.cycles) if u else (0.0, 0)
         nd = (now - naive_base).total_seconds() / 86400
+        # «по борту» тоже видны удары этого борта с установки узла: без них каждый осмотр после удара
+        # засчитывался бы как предотвращённый пропуск (раздувая KPI и оценку эффекта)
+        ne = sensors.count_events(s, "aircraft", inst.aircraft_id, since=naive_base, before=now + timedelta(seconds=1)) \
+            if getattr(rule, "interval_events", None) else 0
         naive = _status([(rule.interval_hours, rule.warn_hours, nh), (rule.interval_cycles, rule.warn_cycles, nc),
-                         (rule.interval_days, rule.warn_days, nd)])
+                         (rule.interval_days, rule.warn_days, nd),
+                         (getattr(rule, "interval_events", None), getattr(rule, "warn_events", None) or 0, ne)])
         if STATUS_ORDER[naive] > STATUS_ORDER[it["status"]]:
             prevented.append({"entity": it["entity"], "rule": it["rule"], "real_status": it["status"],
                               "naive_status": naive, "driver": it["driver"],
-                              "naive_hours": round(nh, 1), "naive_cycles": nc})
+                              "naive_hours": round(nh, 2), "naive_cycles": nc})
 
     # --- 3. Перестановки и движение узлов
     installs = list(s.scalars(select(Installation)))
@@ -144,8 +150,8 @@ def analytics(s: Session, now: datetime | None = None) -> dict:
         by_name = defaultdict(float)          # одинаковые названия бортов не затирают друг друга, а суммируются
         for a, h in monthly[m].items():
             by_name[ac_names[a]] += h
-        monthly_series.append({"month": m, "by_aircraft": {n: round(h, 1) for n, h in by_name.items()},
-                               "total": round(sum(monthly[m].values()), 1)})
+        monthly_series.append({"month": m, "by_aircraft": {n: round(h, 2) for n, h in by_name.items()},
+                               "total": round(sum(monthly[m].values()), 2)})
 
     # --- 5. Сводные показатели
     status_counts = {"overdue": 0, "due_soon": 0, "ok": 0}
@@ -166,11 +172,11 @@ def analytics(s: Session, now: datetime | None = None) -> dict:
             "components": len([c for c in comps.values() if c.status != "retired"]),
             "components_installed": len(current),
             "components_reserve": len([c for c in comps.values() if c.status in ("stock", "maintenance")]),
-            "total_flights": total_flights, "total_hours": round(total_hours, 1),
+            "total_flights": total_flights, "total_hours": round(total_hours, 2),
             "flights_90d": flights_90, "maintenance_90d": maint_90,
             "component_operations_90d": ops_90,
             "components_moved": len(moved),
-            "hidden_hours_total": round(sum(r["hidden_hours"] for r in hidden_rows), 1),
+            "hidden_hours_total": round(sum(r["hidden_hours"] for r in hidden_rows), 2),
             "components_with_hidden_hours": len(hidden_rows),
             "prevented_misses": len(prevented),
             "duplicates_blocked": int(dup_blocked), "imports": imports,

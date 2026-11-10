@@ -85,6 +85,8 @@ EXTRA_COLUMNS = {
     "components": {"uid": "VARCHAR(40)", "specs": "JSON"},
     "component_types": {"spec_fields": "JSON"},
     "maintenance_rules": {"interval_events": "INTEGER", "warn_events": "INTEGER"},
+    "mission_runs": {"source": "VARCHAR(20)"},
+    "missions": {"frame": "VARCHAR(10)"},
 }
 
 
@@ -94,7 +96,7 @@ def migrate(eng=None):
     eng = eng or engine
     insp = inspect(eng)
     with eng.begin() as conn:
-        for table in ("aircraft", "components", "component_types", "maintenance_rules"):
+        for table in ("aircraft", "components", "component_types", "maintenance_rules", "mission_runs", "missions"):
             if not insp.has_table(table):
                 continue
             have = {c["name"] for c in insp.get_columns(table)}
@@ -106,6 +108,15 @@ def migrate(eng=None):
             import uuid
             for (cid,) in conn.execute(text("SELECT id FROM components WHERE uid IS NULL")).fetchall():
                 conn.execute(text("UPDATE components SET uid = :u WHERE id = :i"), {"u": uuid.uuid4().hex, "i": cid})
+    if insp.has_table("installations"):        # базам прошлых версий — уникальность открытых установок (models.Installation)
+        for name, cols in (("ux_install_open_component", "component_id"), ("ux_install_open_position", "aircraft_id, position")):
+            try:
+                with eng.begin() as conn:
+                    conn.execute(text(f"CREATE UNIQUE INDEX IF NOT EXISTS {name} ON installations ({cols}) "
+                                      "WHERE removed_at IS NULL"))
+            except Exception as e:  # noqa: BLE001 — в базе уже есть дубли: работаем, но сообщаем
+                log.error("Индекс %s не создан — в истории установок есть одновременные открытые установки: %s",
+                          name, str(e).splitlines()[0][:200])
 
 
 def get_session():

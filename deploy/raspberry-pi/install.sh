@@ -24,6 +24,7 @@ HTTPS=0
 ADMIN='admin'
 UPGRADE=0
 SKIP_APT=0
+EXPLICIT=0          # заданы ли параметры режима (--https/--port/--demo): без них настройки установленной системы не трогаем
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
@@ -46,9 +47,9 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --https) HTTPS=1; shift ;;
-    --port) PORT=${2:?}; shift 2 ;;
-    --demo) DEMO=1; shift ;;
+    --https) HTTPS=1; EXPLICIT=1; shift ;;
+    --port) PORT=${2:?}; EXPLICIT=1; shift 2 ;;
+    --demo) DEMO=1; EXPLICIT=1; shift ;;
     --admin) ADMIN=${2:?}; shift 2 ;;
     --upgrade) UPGRADE=1; shift ;;
     --skip-apt) SKIP_APT=1; shift ;;
@@ -72,10 +73,11 @@ if [[ $SKIP_APT -eq 0 ]]; then
   command -v apt-get >/dev/null || die "Нужен Debian / Raspberry Pi OS (apt-get). Для других систем см. docs/DEPLOY.md → Docker."
   say "Системные пакеты (python3-venv, avahi для адреса <имя>.local, rsync)"
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -qq
+  apt-get update -qq || warn "Список пакетов apt не обновлён (нет интернета?) — ставим из уже известных"
   PKGS=(python3 python3-venv python3-pip avahi-daemon rsync curl ca-certificates)
   [[ $HTTPS -eq 1 ]] && PKGS+=(caddy)
-  apt-get install -y -qq --no-install-recommends "${PKGS[@]}" >/dev/null
+  apt-get install -y -qq --no-install-recommends "${PKGS[@]}" >/dev/null \
+    || die "Не удалось установить системные пакеты (${PKGS[*]}): нет доступа к репозиториям apt. Подключите Pi к интернету на время установки или установите эти пакеты заранее"
 fi
 python3 - <<'PY' || die "Нужен Python 3.10 или новее"
 import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)
@@ -94,25 +96,37 @@ install -d -m 0750 -o root -g "$SVC_USER" "$ETC_DIR"
 # ---------------------------------------------------------------- код и зависимости
 say "Копирование приложения в $APP_DIR"
 rsync -a --delete --exclude '.git' --exclude '.venv' --exclude 'data/' --exclude 'promo/' --exclude 'secrets/' \
-      --exclude '.env' --exclude '__pycache__' --exclude '.pytest_cache' --exclude 'tests/' "$SRC_DIR/" "$APP_DIR/"
+      --exclude '.env' --exclude '__pycache__' --exclude '.pytest_cache' --exclude 'tests/' --exclude 'agent_tests/' \
+      --exclude 'wheels/' "$SRC_DIR/" "$APP_DIR/"
 chown -R root:root "$APP_DIR"
 
 say "Виртуальное окружение Python и зависимости (точные версии из requirements.lock)"
 [[ -x $APP_DIR/.venv/bin/python ]] || python3 -m venv "$APP_DIR/.venv"
-"$APP_DIR/.venv/bin/pip" install -q --upgrade pip
-"$APP_DIR/.venv/bin/pip" install -q --retries 5 --no-deps -r "$APP_DIR/requirements.lock"
+if compgen -G "$SRC_DIR/wheels/*.whl" >/dev/null; then
+  # без интернета: пакеты привёз deploy/field/deploy.sh (скачаны на компьютере, SHA-256 сверены)
+  say "Зависимости — из локальных пакетов $SRC_DIR/wheels (без интернета)"
+  PIP_SRC=(--no-index --find-links "$SRC_DIR/wheels")
+else
+  "$APP_DIR/.venv/bin/pip" install -q --upgrade pip
+  PIP_SRC=(--retries 5)
+fi
+"$APP_DIR/.venv/bin/pip" install -q "${PIP_SRC[@]}" --no-deps -r "$APP_DIR/requirements.lock" \
+  || die "Не удалось установить зависимости Python. Нет интернета на Pi? Запустите установку через deploy/field/deploy.sh — он привезёт пакеты с компьютера"
 "$APP_DIR/.venv/bin/pip" check >/dev/null || die "Конфликт зависимостей (pip check)"
 "$APP_DIR/.venv/bin/python" -m compileall -q "$APP_DIR/app" >/dev/null || true
 
 # ---------------------------------------------------------------- настройки (без паролей)
 HOSTN=$(hostname)
+# Повторный запуск без параметров режима — обновление: настройки (пределы бортов, TBO_ALLOWED_HOSTS, HTTPS…) сохраняются
+if [[ -f $ENV_FILE && $EXPLICIT -eq 0 ]]; then UPGRADE=1; fi
 if [[ $UPGRADE -eq 1 && -f $ENV_FILE ]]; then
   say "Настройки сохранены: $ENV_FILE"
   # старые версии: вход по общему паролю из файла настроек заменён учётными записями
   sed -i '/^TBO_AUTH_USER=/d; /^TBO_AUTH_PASSWORD=/d' "$ENV_FILE"
   sed -i 's/^TBO_AUTO_SEED=/TBO_DEMO_MODE=/' "$ENV_FILE"
 else
-  if [[ -f $ENV_FILE ]]; then cp -a "$ENV_FILE" "$ENV_FILE.bak.$(date +%Y%m%d%H%M%S)"; fi
+  OLD_ENV=""
+  if [[ -f $ENV_FILE ]]; then OLD_ENV="$ENV_FILE.bak.$(date +%Y%m%d%H%M%S)"; cp -a "$ENV_FILE" "$OLD_ENV"; fi
   if [[ $HTTPS -eq 1 ]]; then
     BIND=127.0.0.1; PORT=8000; PUBLIC="https://$HOSTN.local"; TRUSTED=127.0.0.1
   else
@@ -131,6 +145,10 @@ TBO_TRUSTED_PROXIES='$TRUSTED'
 TBO_SCHEDULER='1'
 TBO_LOG_LEVEL='warning'
 EOF
+  if [[ -n $OLD_ENV ]]; then     # свои настройки (не управляемые установщиком) переносятся из прежнего файла
+    grep -vE '^(TBO_HOST|TBO_PORT|TBO_DATA_DIR|TBO_DEMO_MODE|TBO_PUBLIC_URL|TBO_TRUSTED_PROXIES|TBO_SCHEDULER|TBO_LOG_LEVEL)=|^[[:space:]]*(#|$)' \
+      "$OLD_ENV" >>"$ENV_FILE" || true
+  fi
   chown root:"$SVC_USER" "$ENV_FILE"
   chmod 0640 "$ENV_FILE"
   umask 022

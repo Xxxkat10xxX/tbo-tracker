@@ -417,6 +417,8 @@ def create_component(data: ComponentIn, s: Session = Depends(get_session)):
 def patch_component(cid: int, data: ComponentPatch, s: Session = Depends(get_session)):
     c = _get(s, Component, cid, "Узел")
     upd = data.model_dump(exclude_unset=True)
+    if "status" in upd and upd["status"] is None:
+        raise DomainError("Укажите статус узла")
     if "status" in upd and c.status == "installed":
         raise DomainError("Статус установленного узла меняется операцией снятия")
     if "manufactured_at" in upd:
@@ -566,7 +568,7 @@ def delete_flight(fid: int, s: Session = Depends(get_session)):
 
 
 @router.get("/flights")
-def list_flights(aircraft_id: int | None = None, import_id: int | None = None, limit: int = Query(200, le=2000),
+def list_flights(aircraft_id: int | None = None, import_id: int | None = None, limit: int = Query(200, ge=1, le=2000),
                  s: Session = Depends(get_session)):
     q = select(Flight).order_by(Flight.started_at.desc()).limit(limit)
     if aircraft_id:
@@ -721,7 +723,7 @@ def maintenance_due(status: str | None = "overdue,due_soon", aircraft_id: int | 
 
 @router.get("/maintenance/records")
 def maintenance_records(aircraft_id: int | None = None, component_id: int | None = None,
-                        limit: int = Query(300, le=5000), s: Session = Depends(get_session)):
+                        limit: int = Query(300, ge=1, le=5000), s: Session = Depends(get_session)):
     q = records_query(aircraft_id=aircraft_id, component_id=component_id, include_components=True).limit(limit)
     return [record_dict(r) for r in s.scalars(q)]
 

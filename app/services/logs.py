@@ -285,11 +285,9 @@ def import_log(s: Session, content: bytes, filename: str, imported_by: str | Non
                    mission=r["mission"], pilot=r["pilot"])
         s.add(f)
         s.flush()
-        try:
-            evs = sensors.events_for_flight(start, r.get("extra"), end)
-        except ValueError as e:
-            evs = []
-            messages.append(f"запись {r['line']}: данные датчиков не учтены — {e}")
+        evs, warns = sensors.analyze_flight(start, r.get("extra"), end)
+        for w in warns:                     # полёт учитывается; неверная часть данных датчиков — с причиной
+            messages.append(f"запись {r['line']}: данные датчиков не учтены — {w}")
         for ev in evs:
             se = SensorEvent(flight_id=f.id, aircraft_id=ac.id, occurred_at=ev["at"], kind=ev["kind"],
                              peak_g=ev["peak_g"], source=ev["source"], details=ev["details"])

@@ -1,0 +1,23 @@
+/* tbo-tracker · полёт на реальном борту и «Борты на связи» */
+.fl-status { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.tl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; margin: 6px 0 4px; }
+.tl { background: var(--bg, #f5f7fb); border: 1px solid var(--line, #e3e7ef); border-radius: 8px; padding: 7px 10px; }
+.tl > span { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .02em; }
+.tl b { font-size: 15px; }
+.bat { display: inline-block; position: relative; width: 38px; height: 9px; border-radius: 3px; background: #e6eaf1; vertical-align: middle; overflow: hidden; }
+.bat > span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--ok); }
+.bat > span.warn { background: var(--warn); } .bat > span.bad { background: var(--bad); }
+.checks { list-style: none; padding: 0; margin: 8px 0; }
+.checks li { padding: 4px 0 4px 2px; border-bottom: 1px dashed var(--line, #e3e7ef); font-size: 14px; }
+.checks li.ok b { color: var(--ok); } .checks li.bad b { color: var(--bad); } .checks li.warn b { color: var(--warn); }
+.fl-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: 12px 0 6px; }
+.fl-actions .hint, .fl-actions .notice { flex-basis: 100%; margin: 0; }
+button.go { background: var(--ok); border-color: var(--ok); color: #fff; font-weight: 700; font-size: 16px; padding: 10px 26px; }
+button.danger-solid { background: var(--bad); border-color: var(--bad); color: #fff; font-weight: 700; }
+label.chk { display: flex; gap: 8px; align-items: flex-start; margin: 8px 0; cursor: pointer; }
+label.chk input { width: auto; margin-top: 3px; }
+ol.steps { padding-left: 20px; margin: 6px 0; }
+ol.steps li { margin: 6px 0; }
+ol.steps pre { margin: 6px 0; padding: 8px 10px; border-radius: 6px; background: #0f172a; color: #e2e8f0; overflow-x: auto; font-size: 13px; }
+input.mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; }
+@media (max-width: 700px) { .tl-grid { grid-template-columns: repeat(2, 1fr); } button.go { width: 100%; } }

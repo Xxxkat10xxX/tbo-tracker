@@ -1,0 +1,138 @@
+"""Локальный полёт Technic 6S (в помещении, без GPS) и проверки по параметрам PX4 — по документации docs.skyris.ru."""
+import math
+import time
+
+import pytest
+from fakepx4 import FakePX4
+
+from tbo_agent import vehicle_ros
+from tbo_agent.offboard import body_to_ll, body_to_map, map_to_body, plan_offsets
+from tbo_agent.plan import PlanError, effective_limits, plan_hash, validate
+from tbo_agent.vehicle_ros import RosVehicle
+
+HOME = (55.75, 37.6)
+LIM = {"max_alt_m": 120, "max_dist_m": 1000, "max_home_offset_m": 30, "min_battery_pct": 50, "min_sats": 8,
+       "local_max_alt_m": 3.0, "local_max_dist_m": 20.0, "local_max_speed_ms": 2.0}
+
+
+def at(fwd, right):
+    """Точка плана: вперёд/вправо от точки взлёта, м → широта/долгота вокруг «дома» миссии."""
+    return body_to_ll(HOME[0], HOME[1], fwd, -right)
+
+
+def local_plan(**kw):
+    p1, p2 = at(3.0, 0.0), at(3.0, 2.0)
+    p = {"format": "tbo-plan/1", "frame": "local", "run_id": 5, "aircraft": {"serial": "T6S-1"},
+         "home": {"lat": HOME[0], "lon": HOME[1]}, "takeoff_alt": 1.5, "speed_ms": 0.8, "return_home": True,
+         "waypoints": [{"lat": p1[0], "lon": p1[1], "alt": 1.5, "hold_s": 0.0}, {"lat": p2[0], "lon": p2[1], "alt": 2.0, "hold_s": 0.5}],
+         "limits": {"max_alt_m": 3, "max_dist_m": 20, "max_speed_ms": 2.0, "min_battery_pct": 50}}
+    p.update(kw)
+    p["plan_hash"] = plan_hash(p)
+    return p
+
+
+def wait(cond, timeout=15.0):
+    end = time.time() + timeout
+    while time.time() < end:
+        if cond():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def opened(fc):
+    v = RosVehicle("auto", fcu_wait_s=5, tolerance_m=1.0, takeoff_speed=5.0, local_tolerance_m=0.25)
+    v.open()
+    assert wait(lambda: v.snapshot()["local_ok"])
+    return v
+
+
+def test_local_frame_math():
+    for yaw in (0.0, math.radians(90), math.radians(-135)):
+        x, y = body_to_map(1.0, 2.0, yaw, 3.0, -2.0)
+        f, l = map_to_body(1.0, 2.0, yaw, x, y)
+        assert abs(f - 3.0) < 1e-9 and abs(l + 2.0) < 1e-9
+    x, y = body_to_map(0.0, 0.0, math.radians(90), 1.0, 0.0)      # нос дрона на север (ENU) → вперёд = +y кадра map
+    assert abs(x) < 1e-9 and abs(y - 1.0) < 1e-9
+    fwd, left = plan_offsets(local_plan(), local_plan()["waypoints"][1])
+    assert abs(fwd - 3.0) < 1e-3 and abs(left + 2.0) < 1e-3
+
+
+def test_local_plan_limits():
+    eff = effective_limits(local_plan()["limits"], LIM, "local")
+    assert eff["max_alt_m"] == 3.0 and eff["max_speed_ms"] == 2.0
+    validate(local_plan(), "T6S-1", eff)
+    with pytest.raises(PlanError, match="высота"):
+        validate(local_plan(takeoff_alt=4.0), "T6S-1", eff)                  # выше дальномера VL53L1X
+    with pytest.raises(PlanError, match="скорость"):
+        validate(local_plan(speed_ms=2.5), "T6S-1", eff)                     # Optical Flow ограничивает скорость
+    far = at(30.0, 0.0)
+    with pytest.raises(PlanError, match="предел борта"):
+        validate(local_plan(waypoints=[{"lat": far[0], "lon": far[1], "alt": 1.5}]), "T6S-1", eff)
+    glob = effective_limits({"max_alt_m": 120}, LIM, "global")
+    with pytest.raises(PlanError, match="высота"):
+        validate(local_plan(frame="global", takeoff_alt=1.5), "T6S-1", glob)   # по GPS — не ниже 2 м
+
+
+def test_local_flight_in_map_frame_without_gps():
+    fc = FakePX4()
+    try:
+        v = opened(fc)
+        p = local_plan()
+        assert "локальная навигация" in v.upload(p, {"lat": None, "lon": None})
+        names = {c["name"]: c for c in v.extra_checks(p)}
+        assert names["simple_offboard Technic"]["ok"] and "GPS в навигации PX4" not in names
+        assert "OFFBOARD" in v.start_mission(p)
+        assert wait(lambda: v.snapshot()["in_air"])
+        assert wait(lambda: v.snapshot()["wp_reached"] >= 1, 20)
+        s = v.snapshot()
+        assert s["lat"] is not None and s["home"] == HOME and 0.5 < s["alt_rel"] < 2.5      # положение для карты
+        assert wait(lambda: not v.snapshot()["armed"], 30)
+        goals = [c for c in fc.calls if c[0] == "navigate" and c[1] == "map"]
+        assert [round(g[2], 2) for g in goals] == [1.5, 2.0, 2.0]                          # высоты точек и возврата
+        assert ("navigate", "body", 1.5, True) in fc.calls and ("land",) in fc.calls
+        assert not any(c == ("set_mode", "AUTO.RTL") for c in fc.calls)                  # без GPS RTL не используется
+        assert v.snapshot()["wp_reached"] == 2 and abs(fc.x) < 0.3 and abs(fc.y) < 0.3     # сел у точки взлёта
+    finally:
+        fc.stop()
+
+
+def test_local_return_home_command():
+    fc = FakePX4(speed=0.8)
+    try:
+        v = opened(fc)
+        p = local_plan()
+        v.upload(p, {"lat": None, "lon": None})
+        v.start_mission(p)
+        assert wait(lambda: fc.x > 1.0, 20)
+        first = v._fly_thread
+        assert "возврат к точке взлёта" in v.rtl()
+        assert not first.is_alive() and v._fly_thread is not first                          # прежняя программа остановлена
+        assert wait(lambda: not fc.armed, 30)
+        assert abs(fc.x) < 0.3 and abs(fc.y) < 0.3 and ("land",) in fc.calls
+        assert not any(c == ("set_mode", "AUTO.RTL") for c in fc.calls) and ("release",) not in fc.calls
+    finally:
+        fc.stop()
+
+
+def test_px4_params_explain_gps_and_landing(monkeypatch):
+    fc = FakePX4(params={"EKF2_GPS_CTRL": 0, "SYS_HAS_MAG": 0, "COM_DISARM_LAND": -1.0})
+    try:
+        v = opened(fc)
+        gp = local_plan(frame="global")
+        checks = {c["name"]: c for c in v.extra_checks(gp)}
+        assert not checks["GPS в навигации PX4"]["ok"] and "помещени" in checks["GPS в навигации PX4"]["detail"]
+        assert not checks["Магнитометр"]["ok"]
+        warn = checks["Выключение моторов после посадки"]
+        assert warn["ok"] and warn["warn"]
+        fc.params = {"EKF2_GPS_CTRL": 7, "SYS_HAS_MAG": 1, "COM_DISARM_LAND": 2.0}
+        v._params_at = 0.0
+        checks = {c["name"]: c for c in v.extra_checks(gp)}
+        assert checks["GPS в навигации PX4"]["ok"] and "Магнитометр" not in checks and "Выключение моторов после посадки" not in checks
+        monkeypatch.setattr(vehicle_ros, "service_active", lambda name: name == "technic-show")
+        bad = [c for c in v.extra_checks(gp) if not c["ok"]]
+        assert bad and "technic-show" in bad[0]["detail"]
+        info = v.info()
+        assert info["params"]["EKF2_GPS_CTRL"] == 7 and info["technic_show"] is True and info["simulation"] is False
+    finally:
+        fc.stop()

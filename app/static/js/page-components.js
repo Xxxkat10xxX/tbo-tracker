@@ -45,7 +45,7 @@ async function openComponentCreate() {
     <div class="field"><label>Версия ПО</label><input name="firmware"></div></div>
     <div class="row2"><div class="field"><label>Производитель</label><input name="manufacturer" value="tbo-tracker (демо)"></div>
     <div class="field"><label>Дата постановки на учёт</label><input type="datetime-local" name="in_service_at" value="${toLocalInput(new Date())}"></div></div>
-    <div class="row2"><div class="field"><label>Наработка до постановки на учёт, ч</label><input type="number" min="0" step="0.1" name="initial_hours" value="0">
+    <div class="row2"><div class="field"><label>Наработка до постановки на учёт, ч</label><input type="number" min="0" step="0.01" name="initial_hours" value="0">
       <div class="hint">Стендовые испытания, эксплуатация в другом парке (по формуляру)</div></div>
     <div class="field"><label>Циклы до постановки на учёт</label><input type="number" min="0" name="initial_cycles" value="0"></div></div>
     <div class="field"><label>Дата изготовления</label><input type="date" name="manufactured_at" class="maxw-220"></div>

@@ -22,6 +22,7 @@ const routes = [
   [/^#\/audit$/, "audit", pageAudit],
   [/^#\/missions$/, "missions", pageMissions],
   [/^#\/missions\/(\d+)$/, "missions", pageMission],
+  [/^#\/drones$/, "drones", pageDrones],
 ];
 async function router() {
   $$(".modal-bg").forEach((m) => m.remove());     // окна не переживают переход на другую страницу

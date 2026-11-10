@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import re
 from urllib.parse import urlsplit
 
 from starlette.requests import Request
@@ -29,6 +30,10 @@ ADMIN_PREFIX = ("/api/server/", "/api/auth/users", "/api/audit", "/api/demo/", "
 ANY_ROLE_WRITE = {"/api/auth/logout", "/api/auth/password"}
 # При обязательной смене пароля доступно только это
 PASSWORD_CHANGE_ONLY = {"/api/auth/me", "/api/auth/password", "/api/auth/logout", "/api/auth/state"}
+# Бортовой агент: только токен устройства (Authorization: Bearer), без сессии и CSRF
+AGENT_PREFIX = "/api/agent/"
+# Подключения бортов: создание, токен, отключение, удаление — администратор (команды полёта — инженер)
+DRONE_ADMIN = re.compile(r"^/api/drones(?:/[^/]+(?:/token)?)?$")
 
 
 def is_public(path: str) -> bool:
@@ -39,7 +44,11 @@ def required_role(method: str, path: str) -> str | None:
     """None — без входа; 'viewer' — любой вошедший; 'engineer' — изменения данных; 'admin' — администрирование."""
     if is_public(path):
         return None
+    if path.startswith(AGENT_PREFIX):
+        return "device"
     if path.startswith(ADMIN_PREFIX):
+        return "admin"
+    if method not in SAFE_METHODS and DRONE_ADMIN.match(path):
         return "admin"
     if method not in SAFE_METHODS and path not in ANY_ROLE_WRITE:
         return "engineer"
@@ -90,6 +99,11 @@ def cookie_secure(request: Request) -> bool:
 
 def session_token(request: Request) -> str | None:
     return request.cookies.get(COOKIE_SECURE_NAME) or request.cookies.get(COOKIE)
+
+
+def bearer_token(request: Request) -> str | None:
+    h = request.headers.get("authorization", "")
+    return h[7:].strip() if h[:7].lower() == "bearer " else None
 
 
 LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}

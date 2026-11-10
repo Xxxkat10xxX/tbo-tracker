@@ -23,6 +23,7 @@ from ..errors import DomainError
 from ..models import Aircraft, Component, MovementRow
 from ..timeutil import iso, parse_dt
 from . import inventory
+from .usage import current_installation
 
 
 ALIASES = {
@@ -161,11 +162,26 @@ def _date(v):
     if isinstance(v, datetime):
         return v.replace(microsecond=0)
     s = str(v or "").strip()
-    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:[ ,T]+(\d{1,2}):(\d{2}))?$", s)
-    if m:
-        d, mo, y, hh, mm = m.groups()
-        return datetime(int(y), int(mo), int(d), int(hh or 0), int(mm or 0))
-    return parse_dt(s)
+    m = re.match(r"^(\d{1,2})\.(\d{1,2})\.(\d{4})(?:[ ,T]+(\d{1,2}):(\d{2})(?::(\d{2}))?)?$", s)
+    try:
+        if m:
+            d, mo, y, hh, mm, ss = m.groups()
+            return datetime(int(y), int(mo), int(d), int(hh or 0), int(mm or 0), int(ss or 0))
+        return parse_dt(s)
+    except ValueError:
+        raise ValueError(f"дата «{s[:30]}» не распознана (ожидается 07.11.2026 09:30 или ISO-8601)") from None
+
+
+def _check_source(s: Session, comp: Component, src_key: str, fleet: dict):
+    """Борт «откуда» из журнала должен совпадать с тем, где узел числится: иначе строка описывает другую историю."""
+    if not src_key:
+        return
+    expected = fleet.get(src_key.lower())
+    if expected is None:
+        raise DomainError(f"борт «{src_key}» не найден")
+    inst = current_installation(s, comp.id)
+    if inst is not None and inst.aircraft_id != expected.id:
+        raise DomainError(f"узел {comp.serial} числится на борту {inst.aircraft.name}, а в журнале — «{src_key}»")
 
 
 def import_movements(s: Session, tables, imp, dry_run: bool) -> dict:
@@ -213,8 +229,13 @@ def import_movements(s: Session, tables, imp, dry_run: bool) -> dict:
             if comp is None:
                 raise DomainError(f"узел «{serial}» не зарегистрирован")
             reason, by = (str(r.get(k)).strip() if r.get(k) not in (None, "") else None for k in ("reason", "by"))
+            src_key = str(r.get("from") or "").strip()
             if op == "remove":
-                to = STATUSES.get(_norm(r.get("status")) or "резерв", "stock")
+                _check_source(s, comp, src_key or ac_key, fleet)      # при снятии «Борт» — откуда снят
+                st = _norm(r.get("status"))
+                to = STATUSES.get(st) if st else "stock"
+                if to is None:
+                    raise DomainError(f"неизвестное состояние после снятия «{r.get('status')}» (резерв / ремонт / списание)")
                 res = inventory.remove(s, comp, when, to, reason, by)
                 target = None
             else:
@@ -223,8 +244,12 @@ def import_movements(s: Session, tables, imp, dry_run: bool) -> dict:
                     raise DomainError(f"борт «{ac_key}» не найден")
                 if not pos:
                     raise DomainError("не указана позиция")
+                if op == "transfer":
+                    _check_source(s, comp, src_key, fleet)
+                # позиции своих типов могут быть в любом регистре: «esc1» в журнале = «ESC1» у типа
+                slot = next((sl for sl in target.type.slots or [] if str(sl["position"]).upper() == pos), None)
                 fn = inventory.transfer if op == "transfer" else inventory.install
-                res = fn(s, comp, target, pos, when, reason, by)
+                res = fn(s, comp, target, slot["position"] if slot else pos, when, reason, by)
             s.add(MovementRow(key=key, import_id=imp.id))
             s.flush()
             sp.commit()

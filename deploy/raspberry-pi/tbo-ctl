@@ -28,6 +28,10 @@ tbo-ctl — управление tbo-tracker
   user disable ИМЯ | enable ИМЯ
   setup-code                 одноразовый код первичной настройки (если учётных записей ещё нет)
 
+  drone list                 подключённые борты (агент tbo-agent) и их состояние
+  drone add СЕРИЙНЫЙ [ИМЯ]   подключить борт: создать его при необходимости и выпустить токен устройства
+  drone token СЕРИЙНЫЙ       новый токен (прежний перестаёт действовать); --token-only — вывести только токен
+
   backup | backups           резервная копия сейчас / список копий
   restore ИМЯ|ПУТЬ.zip       восстановление из копии (сервис останавливается на время операции)
   update                     обновить из git (перед обновлением — резервная копия)
@@ -111,6 +115,23 @@ case "$cmd" in
     esac
     ;;
   setup-code) admin setup-code ;;
+  drone)
+    sub=${1:-list}; serial=${2:-}
+    only=(); [[ " $* " == *" --token-only "* ]] && only=(--token-only)
+    case "$sub" in
+      list) admin drones ;;
+      add)
+        [[ -n $serial && $serial != --* ]] || die "Укажите серийный номер: sudo tbo-ctl drone add СЕРИЙНЫЙ [ИМЯ]"
+        name=${3:-}; [[ $name == --* ]] && name=""
+        admin drone-add "$serial" --name "${name:-$serial}" "${only[@]}"
+        ;;
+      token)
+        [[ -n $serial && $serial != --* ]] || die "Укажите серийный номер: sudo tbo-ctl drone token СЕРИЙНЫЙ"
+        admin drone-add "$serial" --rotate "${only[@]}"
+        ;;
+      *) die "Неизвестная команда drone $sub (list | add | token)" ;;
+    esac
+    ;;
   password|nopassword)
     die "Общий пароль заменён учётными записями: sudo tbo-ctl user passwd ИМЯ (см. sudo tbo-ctl help)" ;;
   backup) admin backup ;;
@@ -160,7 +181,14 @@ case "$cmd" in
     rm -f "/etc/systemd/system/$SVC.service"; systemctl daemon-reload
     rm -rf "$APP_DIR"
     if [[ ${1:-} == --purge ]]; then
-      rm -rf "$(envget TBO_DATA_DIR)" "$ETC_DIR"; userdel "$SVC_USER" 2>/dev/null || true
+      data=$(envget TBO_DATA_DIR)
+      # удаляем только похожее на каталог данных: абсолютный путь не короче /var/x, не корень и не системный каталог
+      case "$data" in
+        /|/bin*|/boot*|/dev*|/etc|/home|/lib*|/opt|/proc*|/root|/run*|/sbin*|/sys*|/usr*|/var|/var/lib|"") die "TBO_DATA_DIR='$data' — не похоже на каталог данных tbo-tracker, удаление отменено" ;;
+        /*) ;;
+        *) die "TBO_DATA_DIR='$data' — не абсолютный путь, удаление отменено" ;;
+      esac
+      rm -rf -- "$data" "$ETC_DIR"; userdel "$SVC_USER" 2>/dev/null || true
       say "Удалено вместе с данными"
     else
       say "Сервис удалён. Данные сохранены в $(envget TBO_DATA_DIR), настройки — в $ETC_DIR"

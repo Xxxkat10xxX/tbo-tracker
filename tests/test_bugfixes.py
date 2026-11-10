@@ -160,3 +160,134 @@ def test_seed_cli_on_fresh_data_dir(tmp_path):
                        cwd=os.path.dirname(os.path.dirname(__file__)))
     assert r.returncode == 0, r.stderr[-2000:]
     assert (tmp_path / "fresh" / "tbo.db").exists()
+
+
+# ------------------------------------------------------------------ одновременные запросы (двойной щелчок)
+def test_db_rejects_second_open_installation(client):
+    """Проверки «прочитал — записал» в inventory не спасают от двух одновременных запросов: гарантия — индекс БД."""
+    import pytest
+    from sqlalchemy import select
+    from sqlalchemy.exc import IntegrityError
+
+    from app.db import SessionLocal
+    from app.models import Component, Installation
+    from app.timeutil import utcnow
+
+    with SessionLocal() as s:
+        inst = s.scalar(select(Installation).where(Installation.removed_at.is_(None)).limit(1))
+        spare = s.scalar(select(Component).where(Component.status == "stock", Component.type_id == inst.component.type_id).limit(1))
+        cases = [  # тот же узел ещё в одном месте; занятая позиция — ещё один узел
+            dict(component_id=inst.component_id, aircraft_id=inst.aircraft_id, position="X-DUP"),
+            dict(component_id=spare.id, aircraft_id=inst.aircraft_id, position=inst.position),
+        ]
+    for kw in cases:
+        with SessionLocal() as s:
+            s.add(Installation(installed_at=utcnow(), **kw))
+            with pytest.raises(IntegrityError):
+                s.commit()
+
+
+def _xlsx(rows):
+    import io
+
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Дата", "Операция", "Узел", "Борт", "Позиция", "Состояние после снятия", "С борта"])
+    for r in rows:
+        ws.append(r)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_movement_log_positions_sources_statuses_dates(client):
+    meta = client.get("/api/meta").json()
+    spare = next(c for c in client.get("/api/components?status=stock").json())
+    ctype = spare["type"]["code"]
+    tid = client.post("/api/aircraft-types", json={"code": "MV-LOW", "name": "Тип с позициями в нижнем регистре",
+                                                   "slots": [{"position": "slot1", "label": "Место 1", "component_type": ctype}]}).json()["id"]
+    assert meta["aircraft_types"]
+    client.post("/api/aircraft", json={"serial": "MV-1", "name": "Борт МВ", "type_id": tid, "in_service_at": "2026-01-01T00:00:00Z"})
+    rows = [
+        ["05.11.2026 09:00:30", "Установка", spare["serial"], "MV-1", "SLOT1", "", ""],     # регистр позиции и секунды
+        ["05.11.2026 10:00", "Снятие", spare["serial"], "Борт 01", "", "", ""],            # снимают не с того борта
+        ["05.11.2026 10:30", "Снятие", spare["serial"], "", "", "утилизация", ""],         # неизвестное состояние
+        ["31.02.2026 10:00", "Снятие", spare["serial"], "", "", "", ""],                   # несуществующая дата
+    ]
+    r = client.post("/api/imports", files={"file": ("mv.xlsx", _xlsx(rows))}).json()
+    msgs = " | ".join(r["messages"])
+    assert r["flights_new"] == 1 and r["flights_rejected"] == 3, msgs
+    assert "числится на борту Борт МВ" in msgs and "неизвестное состояние" in msgs and "не распознана" in msgs
+    c = next(x for x in client.get("/api/components").json() if x["serial"] == spare["serial"])
+    assert c["status"] == "installed" and c["location"]["position"] == "slot1"
+
+
+def test_generator_does_not_overlap_its_own_flights(client):
+    r = client.post("/api/log-generator", json={"aircraft_serials": ["TBT-M4-001"], "date_from": "2026-10-10T00:00:00Z",
+                                                "date_to": "2026-10-13T00:00:00Z", "fly_probability": 1, "flights_min": 4,
+                                                "flights_max": 4, "duration_min": 500, "duration_max": 600, "seed": 3}).json()
+    iv = sorted((f["start"], f["end"]) for f in r["preview"])
+    assert len(iv) >= 4 and all(a[1] <= b[0] for a, b in zip(iv, iv[1:]))            # полёты не пересекаются
+
+
+def test_analytics_does_not_count_crash_inspection_as_prevented_miss(client):
+    client.post("/api/demo-logs/07_TBT-VT2-011_padenie.json/import")
+    an = client.get("/api/analytics").json()
+    shock = [p for p in an["prevented"] if p["rule"]["code"] == "IMU-SHOCK" and p["entity"]["serial"] == "IMU3-0204"]
+    assert shock == []                       # удар был на этом же борту — учёт «по борту» его тоже видит
+
+
+def test_notification_message_fits_telegram_limit():
+    from app.services.notify import format_message
+    ev = [{"category": "overdue", "title": f"КОМПОНЕНТ-{i} · Борт {i} (ESC{i}) — " + "Очень длинное название регламента " * 8,
+           "text": "Часы: 120 из 100 ч"} for i in range(25)]
+    msg = format_message(ev, {"public_url": "https://tbo.example.ru"})
+    assert len(msg) <= 4096 and "… и ещё" in msg and msg.endswith("/#/maintenance")
+    assert format_message(ev[:2], {}).count("\n") == 2                     # короткий пакет — целиком
+
+
+def test_restore_of_broken_or_inconsistent_backup_is_clear_and_harmless(client):
+    import io
+    import json as js
+    import zipfile
+
+    b = client.post("/api/server/backups").json()
+    src = zipfile.ZipFile(io.BytesIO(client.get(f"/api/server/backups/{b['name']}").content))
+    flights_before = len(client.get("/api/flights?limit=2000").json())
+
+    def patched(table, data):
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for n in src.namelist():
+                z.writestr(n, data if n == f"tables/{table}.json" else src.read(n))
+        up = client.post("/api/server/backups/upload", files={"file": ("x.zip", buf.getvalue())}).json()
+        return client.post(f"/api/server/backups/{up['name']}/restore")
+
+    r = patched("flights", b'[{"id": 1, "aircr')                              # обрезанный файл в архиве
+    assert r.status_code == 400 and "Повреждена таблица flights" in r.json()["detail"]
+    inst = js.loads(src.read("tables/installations.json"))
+    open_ = next(i for i in inst if i["removed_at"] is None)
+    dup = dict(open_, id=max(i["id"] for i in inst) + 1, position="DUP")       # узел «открыт» в двух местах
+    r = patched("installations", js.dumps(inst + [dup]).encode())
+    assert r.status_code == 400 and "не восстановлена" in r.json()["detail"]
+    assert len(client.get("/api/flights?limit=2000").json()) == flights_before  # база прежняя
+
+
+def test_mission_files_keep_takeoff_alt_and_convert_amsl():
+    import json as js
+
+    from app.services.autopilot import parse_mission_file, to_plan, to_waypoints
+    m = {"name": "M", "home_lat": 55.0, "home_lon": 37.0, "takeoff_alt": 20.0, "speed_ms": 6.0, "return_home": True,
+         "waypoints": [{"lat": 55.001, "lon": 37.0, "alt": 35.0, "hold_s": 2}, {"lat": 55.001, "lon": 37.002, "alt": 40.0, "hold_s": 0}]}
+    for name, body in (("m.plan", js.dumps(to_plan(m, "px4")).encode()), ("m.waypoints", to_waypoints(m).encode())):
+        back = parse_mission_file(body, name)
+        assert back["takeoff_alt"] == 20.0, name                              # прежде — высота первой точки (35)
+        assert [w["alt"] for w in back["waypoints"]] == [35.0, 40.0], name
+    # точки в кадре 0 (над уровнем моря) — от высоты «дома»; кадр 3 — как есть
+    wpl = ("QGC WPL 110\n0\t1\t0\t16\t0\t0\t0\t0\t55.0\t37.0\t150.0\t1\n"
+           "1\t0\t0\t16\t0\t0\t0\t0\t55.001\t37.0\t180.0\t1\n2\t0\t3\t16\t0\t0\t0\t0\t55.001\t37.002\t40.0\t1\n")
+    assert [w["alt"] for w in parse_mission_file(wpl.encode(), "a.waypoints")["waypoints"]] == [30.0, 40.0]
+    plan = {"fileType": "Plan", "mission": {"plannedHomePosition": [55.0, 37.0, 150.0], "items": [
+        {"type": "SimpleItem", "command": 16, "frame": 0, "params": [0, 0, 0, None, 55.001, 37.0, 175.0]}]}}
+    assert parse_mission_file(js.dumps(plan).encode(), "b.plan")["waypoints"][0]["alt"] == 25.0

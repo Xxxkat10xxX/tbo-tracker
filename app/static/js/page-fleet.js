@@ -59,7 +59,7 @@ async function openAircraftCreate() {
       <div class="hint">Нужен свой тип с позициями узлов? <a href="#/types" data-close>Типы бортов и узлов →</a></div></div>
     <div class="field"><label>Дата ввода в эксплуатацию</label><input type="datetime-local" name="in_service_at" value="${toLocalInput(new Date())}"></div></div>
     <div class="row2"><div class="field"><label>Эксплуатант</label><input name="operator"></div><div class="field"><label>Место базирования</label><input name="base"></div></div>
-    <div class="row2"><div class="field"><label>Начальный налёт, ч</label><input type="number" step="0.1" min="0" name="initial_hours" value="0"></div>
+    <div class="row2"><div class="field"><label>Начальный налёт, ч</label><input type="number" step="0.01" min="0" name="initial_hours" value="0"></div>
     <div class="field"><label>Начальные циклы</label><input type="number" min="0" name="initial_cycles" value="0"></div></div>
     ${resourceFields()}`, {
     okText: "Создать",
@@ -243,7 +243,7 @@ function openUsageEntryModal({ component, onDone }) {
     <div class="row2"><div class="field"><label>Вид</label><select name="kind"><option value="bench">Стендовый прогон</option><option value="test">Испытания / проверка</option>
       <option value="correction">Корректировка по формуляру</option></select><div class="hint">Стенд и испытания нельзя записать на период, когда узел стоял на борту.</div></div>
     <div class="field"><label>Дата и время</label><input type="datetime-local" name="started_at" value="${toLocalInput(new Date())}"></div></div>
-    <div class="row2"><div class="field"><label>Часы</label><input type="number" min="0" step="0.1" name="hours" value="1"></div>
+    <div class="row2"><div class="field"><label>Часы</label><input type="number" min="0" step="0.01" name="hours" value="1"></div>
     <div class="field"><label>Циклы</label><input type="number" min="0" name="cycles" value="0"></div></div>
     <div class="row2"><div class="field"><label>Примечание</label><input name="note" placeholder="Напр.: прогон после замены разъёма"></div>
     <div class="field"><label>Исполнитель</label><input name="created_by"></div></div>`;

@@ -43,7 +43,7 @@ def _n(v, d=1) -> str:
 
 
 def _h(v) -> str:
-    return f"{_n(v, 1)} ч"
+    return f"{_n(v, 2)} ч"
 
 
 def _dur(sec) -> str:

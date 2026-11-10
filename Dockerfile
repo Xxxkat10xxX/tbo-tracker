@@ -28,6 +28,8 @@ RUN groupadd --system --gid 10001 tbo \
 COPY --from=build /opt/venv /opt/venv
 WORKDIR /app
 COPY app ./app
+# бортовой агент — для скачивания с сервера (/api/downloads/tbo-agent.tar.gz) и установки на борт
+COPY agent ./agent
 RUN python -m compileall -q /app/app
 USER 10001:10001
 VOLUME ["/data"]

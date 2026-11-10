@@ -27,7 +27,10 @@ async function api(method, url, body, isForm, global = false, retried = false) {
     if (isForm) opt.body = body;
     else { opt.body = JSON.stringify(body); opt.headers["Content-Type"] = "application/json"; }
   }
-  const r = await fetch(url, opt);
+  let r;
+  try { r = await fetch(url, opt); } catch (_) {
+    throw new Error("Нет связи с сервером — проверьте сеть и что сервер tbo-tracker запущен");
+  }
   let data = null;
   try { data = await r.json(); } catch (_) { /* пусто */ }
   const code = data && data.code;
@@ -58,7 +61,10 @@ function toast(msg, isErr) {
 
 const nf = (d) => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: d, minimumFractionDigits: 0 });
 const num = (v, d = 1) => (v === null || v === undefined ? "—" : nf(d).format(v));
-const hrs = (v) => `${num(v, 1)} ч`;
+// часы наработки/налёта — всегда до сотых (0,25 ч = 15 мин): короткие полёты видны в сумме
+const nfH = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const hnum = (v) => (v === null || v === undefined ? "—" : nfH.format(v));
+const hrs = (v) => `${hnum(v)} ч`;
 const rub = (v) => `${nf(0).format(Math.round(v))} ₽`;
 function fmtDT(iso) {
   if (!iso) return "—";
@@ -94,16 +100,17 @@ function eventsTable(list) {
   return `<div class="table-wrap"><table><thead><tr><th>Когда</th><th>Событие</th><th class="num">Пиковая перегрузка</th><th>Источник</th><th>Полёт</th></tr></thead><tbody>
     ${list.map((e) => `<tr><td class="nowrap">${fmtDT(e.occurred_at)}</td><td><span class="badge ${EV_BADGE[e.kind]}">${esc(e.kind_label)}</span></td>
       <td class="num">${e.peak_g != null ? num(e.peak_g, 1) + " g" : "—"}</td><td class="small">${esc(e.details || e.source)}</td><td class="small">№${e.flight_id}</td></tr>`).join("")}</tbody></table></div>
-    <div class="hint">Падение — невесомость |a| &lt; 0,35 g не менее 0,2 с и затем удар ≥ 3 g; столкновение — удар ≥ 4 g без невесомости (анализ акселерометра ИНС/ПК).</div>`;
+    <div class="hint">Падение — невесомость |a| &lt; 0,35 g не менее 0,2 с и затем удар ≥ 3 g (или запись оборвалась в невесомости — удар не записан); столкновение — удар ≥ 4 g без невесомости, кроме касания земли при посадке (последние 8 с полёта, слабее 10 g); отскоки в пределах 1 с — одно событие (анализ акселерометра ИНС/ПК).</div>`;
 }
 
 function metricHTML(m) {
   const cls = m.status === "overdue" ? "bad" : m.status === "due_soon" ? "warn" : "";
   const w = Math.min(100, m.ratio * 100);
-  const rem = m.remaining < 0 ? `<b class="c-bad">превышено на ${num(-m.remaining, 1)} ${m.unit}</b>`
+  const h = m.metric === "hours", f = (v) => (h ? hnum(v) : num(v, 1));
+  const rem = m.remaining < 0 ? `<b class="c-bad">превышено на ${f(-m.remaining)} ${m.unit}</b>`
     : m.remaining === 0 ? '<b class="c-bad">порог достигнут</b>'
-    : `осталось ${num(m.remaining, 1)} ${m.unit}`;
-  return `<div class="metric"><div class="mt"><span>${METRIC[m.metric]}: <b>${num(m.used, 1)}</b> / ${num(m.limit, 0)} ${m.unit}</span><span class="muted">${rem}</span></div>
+    : `осталось ${f(m.remaining)} ${m.unit}`;
+  return `<div class="metric"><div class="mt"><span>${METRIC[m.metric]}: <b>${f(m.used)}</b> / ${num(m.limit, h ? 2 : 1)} ${m.unit}</span><span class="muted">${rem}</span></div>
     <div class="bar"><span class="${cls}" data-w="${w}"></span></div></div>`;
 }
 

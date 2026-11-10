@@ -47,7 +47,8 @@ function importResultHTML(r) {
 }
 
 async function pageImports() {
-  const [list, demo] = await Promise.all([GET("/api/imports"), GET("/api/demo-logs")]);
+  // демо-журналы есть только в демо-режиме: в рабочем /api/demo-logs отвечает 404 — страница не должна из-за этого падать
+  const [list, demo] = await Promise.all([GET("/api/imports"), AUTH.demo ? GET("/api/demo-logs") : Promise.resolve(null)]);
   view().innerHTML = `<div class="page-head"><div><h1>Импорт журналов эксплуатации</h1><div class="sub">Наработка автоматически начисляется борту и всем узлам, стоявшим на нём в момент каждого полёта</div></div></div>
     <div class="grid g2">
       <div class="card"><div class="card-head"><h2>Загрузить файл</h2><a class="small" href="/api/templates/movements.xlsx" download>⇩ Шаблон журнала движения узлов (Excel)</a></div>
@@ -57,10 +58,10 @@ async function pageImports() {
         <div id="fname" class="small my-8"></div>
         <div class="actions"><button id="check" disabled>Проверить без записи</button><button class="primary" id="go" disabled>Импортировать</button></div>
         <div class="hint">Защита от двойного начисления: повторная загрузка того же файла (SHA-256) и полёты, уже учтённые из других выгрузок (по ID и пересечению по времени), не начисляются.</div></div>
-      <div class="card"><h2>Демонстрационные журналы</h2><div class="small muted mb-8">Сгенерированы относительно даты заполнения демо-данных. Можно скачать и загрузить вручную или импортировать сразу.</div>
+      ${demo ? `      <div class="card"><h2>Демонстрационные журналы</h2><div class="small muted mb-8">Сгенерированы относительно даты заполнения демо-данных. Можно скачать и загрузить вручную или импортировать сразу.</div>
         <table><tbody>${demo.map((d) => `<tr><td><b>${esc(d.title)}</b><div class="small muted">${esc(d.description)}</div><div class="mono small">${esc(d.file)}</div></td>
           <td class="nowrap"><a class="btn sm" href="/api/demo-logs/${encodeURIComponent(d.file)}" download>Скачать</a>
-          <button class="sm primary" data-demo="${esc(d.file)}">Импорт</button></td></tr>`).join("")}</tbody></table></div>
+          <button class="sm primary" data-demo="${esc(d.file)}">Импорт</button></td></tr>`).join("")}</tbody></table></div>` : ""}
     </div>
     <div class="card" id="result" hidden></div>
     <div class="card"><h2>Журнал импортов</h2><div id="hist">${importsTable(list)}</div></div>`;

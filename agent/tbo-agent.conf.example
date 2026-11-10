@@ -1,0 +1,43 @@
+; tbo-agent — бортовой агент tbo-tracker. Файл: /etc/tbo-agent/agent.conf (создаёт install.sh)
+; Токена здесь нет: он хранится в отдельном файле с правами 600 (token_file).
+
+[server]
+; адрес сервера tbo-tracker, доступный с борта (Wi-Fi). Лучше HTTPS: токен и команды не идут открытым текстом
+url = https://tbo.local
+token_file = /etc/tbo-agent/token
+; корневой сертификат сервера, если HTTPS через Caddy «tls internal» (скопируйте root.crt на борт)
+ca_file =
+timeout_s = 15
+
+[vehicle]
+; auto — миссия PX4 (если в MAVROS включён плагин waypoint), иначе программа на борту (OFFBOARD, simple_offboard)
+; mission — только миссия PX4 (AUTO.MISSION); offboard — только программа на борту (navigate_global)
+executor = auto
+; сколько ждать полётный контроллер при запуске, с
+fcu_wait_s = 60
+; программа на борту: точность прилёта в точку по GPS и локально (Optical Flow / ArUco), м; скорость взлёта, м/с
+offboard_tolerance_m = 1.5
+local_tolerance_m = 0.25
+takeoff_speed_ms = 1.0
+
+[limits]
+; собственные пределы борта: действует более строгое из этих и серверных значений
+max_alt_m = 120
+max_dist_m = 1000
+; борт должен стоять не дальше этого от точки взлёта миссии
+max_home_offset_m = 30
+min_battery_pct = 50
+min_sats = 8
+; если контроллер не сообщает заряд в процентах — по напряжению: элементов батареи и минимум на элемент
+cells = 6
+min_cell_v = 3.75
+; «Готов к старту» дольше — план снимается с борта
+ready_timeout_min = 10
+; локальная навигация (в помещении, без GPS): дальномер VL53L1X меряет до 4 м, Optical Flow ограничивает скорость
+local_max_alt_m = 3
+local_max_dist_m = 20
+local_max_speed_ms = 2
+
+[agent]
+state_dir = /var/lib/tbo-agent
+log_level = info

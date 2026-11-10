@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/static/css/app.css">
   <link rel="stylesheet" href="/static/css/utilities.css">
   <link rel="stylesheet" href="/static/css/auth.css">
+  <link rel="stylesheet" href="/static/css/drones.css">
 </head>
 <body class="auth-mode">
 <div id="auth-screen" class="auth-screen"><div class="loading">Загрузка…</div></div>
@@ -20,9 +21,10 @@
       <a href="#/aircraft" data-r="aircraft"><span class="ico">✈</span>Парк БПЛА</a>
       <a href="#/board" data-r="board"><span class="ico">⇄</span>Перестановка узлов</a>
       <a href="#/missions" data-r="missions"><span class="ico">⌖</span>Миссии и автономный полёт</a>
+      <a href="#/drones" data-r="drones"><span class="ico">⌁</span>Борты на связи</a>
       <a href="#/imports" data-r="imports"><span class="ico">⇪</span>Импорт журналов</a>
       <a href="#/generator" data-r="generator" data-need="engineer"><span class="ico">⚙</span>Генератор журналов</a>
-      <a href="#/maintenance" data-r="maintenance"><span class="ico">🔔</span>ТО и уведомления <span class="count" id="nav-notif" hidden></span></a>
+      <a href="#/maintenance" data-r="maintenance"><span class="ico">⚑</span>ТО и уведомления <span class="count" id="nav-notif" hidden></span></a>
       <a href="#/rules" data-r="rules"><span class="ico">☰</span>Регламенты</a>
       <a href="#/analytics" data-r="analytics"><span class="ico">▤</span>Статистика</a>
       <div class="sep" data-need="admin"></div>
@@ -50,6 +52,8 @@
 <script defer src="/static/js/page-components.js"></script>
 <script defer src="/static/js/page-types.js"></script>
 <script defer src="/static/js/page-missions.js"></script>
+<script defer src="/static/js/page-flight.js"></script>
+<script defer src="/static/js/page-drones.js"></script>
 <script defer src="/static/js/page-imports.js"></script>
 <script defer src="/static/js/page-generator.js"></script>
 <script defer src="/static/js/page-maintenance.js"></script>

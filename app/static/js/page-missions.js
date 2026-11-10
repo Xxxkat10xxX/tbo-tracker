@@ -5,7 +5,8 @@
 const R_EARTH = 6371000;
 const toXY = (h, lat, lon) => [((lon - h.lon) * Math.PI / 180) * R_EARTH * Math.cos(h.lat * Math.PI / 180), ((lat - h.lat) * Math.PI / 180) * R_EARTH];
 const toLL = (h, x, y) => [h.lat + (y / R_EARTH) * 180 / Math.PI, h.lon + (x / (R_EARTH * Math.cos(h.lat * Math.PI / 180))) * 180 / Math.PI];
-const PHASE_RU = { takeoff: "Взлёт", mission: "Полёт по маршруту", hold: "Удержание на точке", rtl: "Возврат домой", land: "Посадка", crash: "Аварийное завершение" };
+const PHASE_RU = { takeoff: "Взлёт", mission: "Полёт по маршруту", hold: "Удержание на точке", rtl: "Возврат домой", land: "Посадка", crash: "Аварийное завершение", manual: "Ручное управление (пульт)" };
+const runBadge = (r) => `<span class="badge ${RUN_CLS[r.status] || ""}">${esc(r.status_label || r.status)}</span>`;
 
 const fmtDur = (s) => `${Math.floor(s / 60)} мин ${String(Math.round(s % 60)).padStart(2, "0")} с`;
 
@@ -16,11 +17,11 @@ async function pageMissions() {
     <div class="actions"><label class="btn m-0">⇪ Импорт .plan / .waypoints<input type="file" id="m-imp" accept=".plan,.waypoints,.txt,.json" hidden></label>
     <button class="primary" id="m-new">+ Новая миссия</button></div></div>
     <div class="card">${list.length ? `<div class="table-wrap"><table><thead><tr><th>Миссия</th><th>Борт</th><th class="num">Точек</th><th class="num">Маршрут</th><th class="num">Время (оценка)</th><th>Последний полёт</th></tr></thead><tbody>
-      ${list.map((m) => `<tr><td><a href="#/missions/${m.id}"><b>${esc(m.name)}</b></a><div class="small muted">${esc(m.notes || "")}</div></td>
+      ${list.map((m) => `<tr><td><a href="#/missions/${m.id}"><b>${esc(m.name)}</b></a>${m.frame === "local" ? ' <span class="badge blue">локальная</span>' : ""}<div class="small muted">${esc(m.notes || "")}</div></td>
         <td>${m.aircraft_id ? `<a href="#/aircraft/${m.aircraft_id}">${esc(m.aircraft_name)}</a>` : '<span class="muted">не назначен</span>'}</td>
         <td class="num">${m.waypoints.length}</td><td class="num">${m.stats ? num(m.stats.distance_m / 1000, 2) + " км" : "—"}</td>
         <td class="num">${m.stats ? fmtDur(m.stats.duration_s) : "—"}</td>
-        <td>${m.last_run ? `<span class="badge ${m.last_run.status === "completed" ? "ok" : "bad"}">${m.last_run.status === "completed" ? "выполнена" : "прервана"}</span> <span class="small muted">${fmtDT(m.last_run.ended_at)}</span>` : '<span class="muted small">не выполнялась</span>'}</td></tr>`).join("")}
+        <td>${m.last_run ? `${runBadge(m.last_run)} <span class="small muted">${m.last_run.source === "drone" ? "борт · " : ""}${fmtDT(m.last_run.ended_at)}</span>` : '<span class="muted small">не выполнялась</span>'}</td></tr>`).join("")}
       </tbody></table></div>` : '<div class="empty-state">Миссий пока нет</div>'}</div>`;
   $("#m-new").onclick = async () => {
     const base = list[0] || { home_lat: 54.9512, home_lon: 38.2034 };
@@ -36,7 +37,8 @@ async function pageMissions() {
 
 async function pageMission(id) {
   const [m, fleet] = await Promise.all([GET(`/api/missions/${id}`), aircraftList(true)]);
-  const st = { ...m, waypoints: m.waypoints.map((w) => ({ ...w })) };
+  const st = { ...m, frame: m.frame || "global", waypoints: m.waypoints.map((w) => ({ ...w })) };
+  const isLocal = () => st.frame === "local";
   const W = 760, H = 520;
   let view = null;         // {cx, cy, span} в метрах
   const home = () => ({ lat: +st.home_lat, lon: +st.home_lon });
@@ -44,7 +46,7 @@ async function pageMission(id) {
     const pts = [[0, 0]].concat(st.waypoints.map((w) => toXY(home(), w.lat, w.lon)));
     const xs = pts.map((p) => p[0]), ys = pts.map((p) => p[1]);
     const cx = (Math.min(...xs) + Math.max(...xs)) / 2, cy = (Math.min(...ys) + Math.max(...ys)) / 2;
-    const span = Math.max(300, (Math.max(...xs) - Math.min(...xs)) * 1.3, (Math.max(...ys) - Math.min(...ys)) * 1.3 * W / H);
+    const span = Math.max(isLocal() ? 12 : 300, (Math.max(...xs) - Math.min(...xs)) * 1.3, (Math.max(...ys) - Math.min(...ys)) * 1.3 * W / H);
     view = { cx, cy, span };
   };
   fit();
@@ -55,23 +57,28 @@ async function pageMission(id) {
 
   view_().innerHTML = `<div class="crumbs"><a href="#/missions">Миссии</a> / ${esc(m.name)}</div>
     <div class="page-head"><div><h1>${esc(m.name)}</h1><div class="sub">Щелчок по карте — новая точка, перетаскивание — перенос точки. Координаты WGS-84, высоты относительно точки взлёта.</div></div>
-    <div class="actions"><button id="m-save" class="primary">Сохранить</button><button id="m-exp-plan">⇩ .plan (ArduPilot)</button><button id="m-exp-px4">⇩ .plan (PX4)</button><button id="m-exp-wpl">⇩ .waypoints</button><button class="danger" id="m-del">Удалить</button></div></div>
+    <div class="actions"><button id="m-save" class="primary">Сохранить</button><button id="m-exp-plan" data-exp>⇩ .plan (ArduPilot)</button><button id="m-exp-px4" data-exp>⇩ .plan (PX4)</button><button id="m-exp-wpl" data-exp>⇩ .waypoints</button><button class="danger" id="m-del">Удалить</button></div></div>
     <div class="mission-grid">
       <div class="card p-12"><div class="map-wrap"><svg id="map" viewBox="0 0 ${W} ${H}"></svg>
         <div class="map-tools"><button class="sm" id="z-in">+</button><button class="sm" id="z-out">−</button><button class="sm" id="z-fit">Вписать</button></div>
         <div class="telemetry" id="telemetry" hidden></div></div>
         <div class="small muted mt-8" id="m-stats"></div></div>
       <div>
+        <div class="card" id="flight-panel"></div>
         <div class="card"><h2>Параметры миссии</h2>
           <div class="field"><label>Название</label><input name="name" value="${esc(st.name)}"></div>
           <div class="row2"><div class="field"><label>Борт</label><select name="aircraft_id"><option value="">— не назначен —</option>${fleet.map((a) => `<option value="${a.id}" ${a.id === st.aircraft_id ? "selected" : ""}>${esc(a.name)} · ${esc(a.serial)}</option>`).join("")}</select></div>
-          <div class="field"><label>Крейсерская скорость, м/с</label><input type="number" min="0.5" max="40" step="0.5" name="speed_ms" value="${st.speed_ms}"></div></div>
-          <div class="row3"><div class="field"><label>Точка взлёта: широта</label><input type="number" step="0.000001" name="home_lat" value="${st.home_lat}"></div>
-          <div class="field"><label>долгота</label><input type="number" step="0.000001" name="home_lon" value="${st.home_lon}"></div>
-          <div class="field"><label>Высота взлёта, м</label><input type="number" min="2" max="500" name="takeoff_alt" value="${st.takeoff_alt}"></div></div>
-          <label><input type="checkbox" name="return_home" ${st.return_home ? "checked" : ""} class="w-auto"> Возврат в точку взлёта (RTL) и посадка</label></div>
+          <div class="field"><label>Крейсерская скорость, м/с</label><input type="number" min="0.2" max="40" step="0.1" name="speed_ms" value="${st.speed_ms}"></div></div>
+          <div class="field"><label>Навигация</label><select name="frame">
+            <option value="global" ${isLocal() ? "" : "selected"}>GPS: широта и долгота (полёт на улице)</option>
+            <option value="local" ${isLocal() ? "selected" : ""}>Локальная: метры от точки взлёта (в помещении, Optical Flow / ArUco, без GPS)</option></select>
+            <div class="hint" id="frame-hint"></div></div>
+          <div class="row3"><div class="field ll-field"><label>Точка взлёта: широта</label><input type="number" step="0.000001" name="home_lat" value="${st.home_lat}"></div>
+          <div class="field ll-field"><label>долгота</label><input type="number" step="0.000001" name="home_lon" value="${st.home_lon}"></div>
+          <div class="field"><label>Высота взлёта, м</label><input type="number" min="0.5" max="500" step="0.1" name="takeoff_alt" value="${st.takeoff_alt}"></div></div>
+          <label><input type="checkbox" name="return_home" ${st.return_home ? "checked" : ""} class="w-auto"> <span id="rtl-label">Возврат в точку взлёта (RTL) и посадка</span></label></div>
         <div class="card"><div class="card-head"><h2>Точки маршрута</h2><span class="small muted" id="wp-count"></span></div><div id="wp-table"></div></div>
-        <div class="card"><h2>Автономный полёт</h2>
+        <div class="card"><h2>Симулятор автопилота</h2>
           <div class="row3"><div class="field"><label>Ветер, м/с</label><input type="number" min="0" max="20" step="0.5" name="wind_ms" value="3"></div>
           <div class="field"><label>Ветер откуда, °</label><input type="number" min="0" max="360" name="wind_from" value="250"></div>
           <div class="field"><label>Отказ (проверка)</label><select name="fault"><option value="">без отказов</option></select></div></div>
@@ -84,7 +91,7 @@ async function pageMission(id) {
   const map = $("#map");
   function drawMap(track, dronePos) {
     const h = home();
-    const step = [10, 20, 50, 100, 200, 500, 1000, 2000].find((s) => view.span / s <= 12) || 5000;
+    const step = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000].find((s) => view.span / s <= 12) || 5000;
     let g = "";
     const x0 = Math.floor(wx(0) / step) * step, x1 = wx(W), y0 = Math.floor(wy(H) / step) * step, y1 = wy(0);
     for (let x = x0; x <= x1; x += step) g += `<line x1="${sx(x)}" y1="0" x2="${sx(x)}" y2="${H}" class="grid"/>`;
@@ -97,11 +104,11 @@ async function pageMission(id) {
     const sb = step;
     map.innerHTML = `<rect width="${W}" height="${H}" class="map-bg"/>${g}
       <polyline class="route" points="${path}"/>${back}${tr}
-      <g transform="translate(${sx(0)},${sy(0)})"><rect x="-11" y="-11" width="22" height="22" rx="4" class="home"/><text y="5" class="home-t">H</text></g>
+      <g transform="translate(${sx(0)},${sy(0)})"><rect x="-11" y="-11" width="22" height="22" rx="4" class="home"/><text y="5" class="home-t">${isLocal() ? "Т" : "H"}</text></g>
       ${pts.map((p, i) => `<g class="wp" data-i="${i}" transform="translate(${sx(p[0])},${sy(p[1])})"><circle r="13"/><text y="4.5">${i + 1}</text>
         <text class="wp-alt" y="-19">${num(st.waypoints[i].alt, 0)} м${+st.waypoints[i].hold_s ? ` · ${st.waypoints[i].hold_s} с` : ""}</text></g>`).join("")}
       ${dronePos ? `<g transform="translate(${dronePos[0]},${dronePos[1]})"><circle r="9" class="drone"/><circle r="17" class="drone-ring"/></g>` : ""}
-      <g transform="translate(${W - 30},34)"><path d="M0,-16 L7,6 L0,1 L-7,6 Z" class="north"/><text y="22" class="north-t">С</text></g>
+      <g transform="translate(${W - 30},34)"><path d="M0,-16 L7,6 L0,1 L-7,6 Z" class="north"/><text y="22" class="north-t">${isLocal() ? "нос" : "С"}</text></g>
       <g transform="translate(16,${H - 18})"><line x1="0" y1="0" x2="${sb / view.span * W}" y2="0" class="scale"/><text x="0" y="-6" class="scale-t">${sb >= 1000 ? sb / 1000 + " км" : sb + " м"}</text></g>`;
     bindDrag();
   }
@@ -121,17 +128,30 @@ async function pageMission(id) {
     if (suppressClick) { suppressClick = false; return; }
     if (e.target.closest(".wp")) return;
     const [px, py] = svgPt(e); const [lat, lon] = toLL(home(), wx(px), wy(py));
-    const alt = st.waypoints.length ? st.waypoints[st.waypoints.length - 1].alt : +st.takeoff_alt;
+    const alt = st.waypoints.length ? st.waypoints[st.waypoints.length - 1].alt : (isLocal() ? Math.min(+st.takeoff_alt, 1.5) : +st.takeoff_alt);
     st.waypoints.push({ lat: +lat.toFixed(7), lon: +lon.toFixed(7), alt, hold_s: 0 });
     drawAll();
   });
   function drawTable() {
     $("#wp-count").textContent = `${st.waypoints.length} точек`;
-    $("#wp-table").innerHTML = st.waypoints.length ? `<table class="wp-table"><thead><tr><th>№</th><th>Широта</th><th>Долгота</th><th>Высота, м</th><th>Удерж., с</th><th></th></tr></thead><tbody>
-      ${st.waypoints.map((w, i) => `<tr><td>${i + 1}</td><td><input data-k="lat" data-i="${i}" type="number" step="0.000001" value="${w.lat}"></td><td><input data-k="lon" data-i="${i}" type="number" step="0.000001" value="${w.lon}"></td>
-        <td><input data-k="alt" data-i="${i}" type="number" min="2" max="500" value="${w.alt}"></td><td><input data-k="hold_s" data-i="${i}" type="number" min="0" max="600" value="${w.hold_s || 0}"></td>
+    const loc = isLocal();
+    // локально: «вперёд» — север на карте (нос дрона при взлёте), «вправо» — восток; хранятся те же широта/долгота
+    const xy = (w) => toXY(home(), w.lat, w.lon);
+    $("#wp-table").innerHTML = st.waypoints.length ? `<table class="wp-table"><thead><tr><th>№</th>${loc ? "<th>Вперёд, м</th><th>Вправо, м</th>" : "<th>Широта</th><th>Долгота</th>"}<th>Высота, м</th><th>Удерж., с</th><th></th></tr></thead><tbody>
+      ${st.waypoints.map((w, i) => `<tr><td>${i + 1}</td>${loc
+        ? `<td><input data-k="fwd" data-i="${i}" type="number" step="0.1" value="${xy(w)[1].toFixed(2)}"></td><td><input data-k="right" data-i="${i}" type="number" step="0.1" value="${xy(w)[0].toFixed(2)}"></td>`
+        : `<td><input data-k="lat" data-i="${i}" type="number" step="0.000001" value="${w.lat}"></td><td><input data-k="lon" data-i="${i}" type="number" step="0.000001" value="${w.lon}"></td>`}
+        <td><input data-k="alt" data-i="${i}" type="number" min="${loc ? 0.5 : 2}" max="${loc ? 10 : 500}" step="${loc ? 0.1 : 1}" value="${w.alt}"></td><td><input data-k="hold_s" data-i="${i}" type="number" min="0" max="600" value="${w.hold_s || 0}"></td>
         <td><button class="sm danger" data-rm="${i}">✕</button></td></tr>`).join("")}</tbody></table>` : '<div class="empty-state">Щёлкните по карте, чтобы добавить первую точку</div>';
-    $$("#wp-table input").forEach((inp) => inp.addEventListener("change", () => { st.waypoints[+inp.dataset.i][inp.dataset.k] = +inp.value; drawMap(); drawStats(); }));
+    $$("#wp-table input").forEach((inp) => inp.addEventListener("change", () => {
+      const w = st.waypoints[+inp.dataset.i], k = inp.dataset.k;
+      if (k === "fwd" || k === "right") {
+        const [e, n] = xy(w);
+        const [lat, lon] = toLL(home(), k === "right" ? +inp.value : e, k === "fwd" ? +inp.value : n);
+        w.lat = +lat.toFixed(8); w.lon = +lon.toFixed(8);
+      } else w[k] = +inp.value;
+      drawMap(); drawStats();
+    }));
     $$("#wp-table [data-rm]").forEach((b) => b.addEventListener("click", () => { st.waypoints.splice(+b.dataset.rm, 1); drawAll(); }));
     const f = $('[name="fault"]');
     f.innerHTML = `<option value="">без отказов</option>` + st.waypoints.map((_, i) => `<option value="${i + 1}">столкновение у точки ${i + 1}</option>`).join("");
@@ -143,25 +163,43 @@ async function pageMission(id) {
     clearTimeout(statsTimer);
     statsTimer = setTimeout(async () => {
       const my = ++statsSeq;
-      const s = await POST("/api/missions/estimate", { home_lat: +st.home_lat, home_lon: +st.home_lon, takeoff_alt: +st.takeoff_alt,
+      const s = await POST("/api/missions/estimate", { home_lat: +st.home_lat, home_lon: +st.home_lon, takeoff_alt: +st.takeoff_alt, frame: st.frame,
         speed_ms: +st.speed_ms, return_home: st.return_home, waypoints: st.waypoints.map((w) => ({ lat: +w.lat, lon: +w.lon, alt: +w.alt, hold_s: +w.hold_s || 0 })) })
         .catch(() => null);
       if (!s || my !== statsSeq || !$("#m-stats")) return;
-      $("#m-stats").innerHTML = `Маршрут <b>${num(s.distance_m / 1000, 2)} км</b> · оценка времени <b>${fmtDur(s.duration_s)}</b> · точек ${s.waypoints} · макс. высота ${num(s.max_alt_m, 0)} м`;
+      $("#m-stats").innerHTML = `Маршрут <b>${isLocal() ? num(s.distance_m, 1) + " м" : num(s.distance_m / 1000, 2) + " км"}</b> · оценка времени <b>${fmtDur(s.duration_s)}</b> · точек ${s.waypoints} · макс. высота ${num(s.max_alt_m, 0)} м`;
     }, 120);
   }
-  function drawAll() { drawMap(); drawTable(); drawStats(); }
+  function applyFrame() {
+    const loc = isLocal();
+    $$(".ll-field").forEach((el) => { el.hidden = loc; });
+    $$("[data-exp]").forEach((el) => { el.hidden = loc; });
+    // без GPS у PX4 нет RTL: в помещении к точке взлёта возвращает программа на борту
+    $("#rtl-label").textContent = loc ? "Возврат к точке взлёта и посадка (программой на борту)" : "Возврат в точку взлёта (RTL) и посадка";
+    $("#frame-hint").textContent = loc
+      ? "Technic 6S в помещении: верх карты — вперёд по носу дрона в момент взлёта, вправо — вправо от дрона; высоты от точки взлёта до 3 м (дальномер VL53L1X — до 4 м), скорость до 2 м/с. Точки — в метрах в таблице или щелчком по карте."
+      : "Точки по GPS: на борту нужен модуль GPS с компасом и GPS в навигации PX4 (параметры Technic по умолчанию — для полётов в помещении).";
+  }
+  function drawAll() { applyFrame(); drawMap(); drawTable(); drawStats(); }
   const readForm = () => {
     const r = view_();
     st.name = val(r, "name"); st.aircraft_id = val(r, "aircraft_id") ? +val(r, "aircraft_id") : null; st.speed_ms = +val(r, "speed_ms");
     st.home_lat = +val(r, "home_lat"); st.home_lon = +val(r, "home_lon"); st.takeoff_alt = +val(r, "takeoff_alt");
     st.return_home = $('[name="return_home"]').checked;
+    st.frame = val(r, "frame") || "global";
   };
   ["speed_ms", "home_lat", "home_lon", "takeoff_alt", "return_home"].forEach((n) => $(`[name="${n}"]`).addEventListener("change", () => { readForm(); drawAll(); }));
+  $('[name="frame"]').addEventListener("change", () => {
+    readForm();
+    if (isLocal() && +st.takeoff_alt > 3) { st.takeoff_alt = 1.5; $('[name="takeoff_alt"]').value = 1.5; }
+    if (isLocal() && +st.speed_ms > 2) { st.speed_ms = 0.8; $('[name="speed_ms"]').value = 0.8; }
+    fit(); drawAll();
+    if (isLocal() && st.waypoints.some((w) => +w.alt > 3)) toast("Проверьте высоты точек: для локальной навигации — до 3 м", true);
+  });
   async function save() {
     readForm();
     const body = { name: st.name, aircraft_id: st.aircraft_id, home_lat: st.home_lat, home_lon: st.home_lon, takeoff_alt: st.takeoff_alt,
-      speed_ms: st.speed_ms, return_home: st.return_home, waypoints: st.waypoints, notes: st.notes };
+      speed_ms: st.speed_ms, return_home: st.return_home, frame: st.frame, waypoints: st.waypoints, notes: st.notes };
     await api("PUT", `/api/missions/${id}`, body);
   }
   $("#m-save").onclick = async () => { try { await save(); toast("Миссия сохранена"); } catch (e) { toast(e.message, true); } };
@@ -173,11 +211,13 @@ async function pageMission(id) {
   $("#z-fit").onclick = () => { fit(); drawMap(); };
 
   function drawRuns(runs) {
-    $("#runs").innerHTML = runs.length ? `<table><thead><tr><th>Окончание</th><th>Борт</th><th>Итог</th><th class="num">Длительность</th><th class="num">Путь</th><th class="num">Макс. боковое откл.</th><th>Журнал</th></tr></thead><tbody>
+    $("#runs").innerHTML = runs.length ? `<div class="table-wrap"><table><thead><tr><th>Окончание</th><th>Борт</th><th>Где</th><th>Итог</th><th class="num">Длительность</th><th class="num">Путь</th><th class="num">Макс. высота</th><th>Журнал</th></tr></thead><tbody>
       ${runs.map((r) => `<tr><td class="nowrap">${fmtDT(r.ended_at)}</td><td><a href="#/aircraft/${r.aircraft_id}">${esc(r.summary.aircraft_name || "")}</a></td>
-        <td><span class="badge ${r.status === "completed" ? "ok" : "bad"}">${r.status === "completed" ? "Выполнена" : "Прервана"}</span></td>
-        <td class="num">${fmtDur(r.summary.duration_s || 0)}</td><td class="num">${num((r.summary.distance_m || 0) / 1000, 2)} км</td><td class="num">${num(r.summary.max_xte_m || 0, 1)} м</td>
-        <td class="small">импорт №${r.import_id}</td></tr>`).join("")}</tbody></table>` : '<div class="empty-state">Миссия ещё не выполнялась</div>';
+        <td><span class="badge ${r.source === "drone" ? "blue" : ""}">${r.source === "drone" ? "Борт" : "Симулятор"}</span></td>
+        <td>${runBadge(r)}${r.summary.reason || r.summary.error ? `<div class="small muted">${esc(r.summary.reason || r.summary.error)}</div>` : ""}</td>
+        <td class="num">${r.summary.duration_s ? fmtDur(r.summary.duration_s) : "—"}</td><td class="num">${r.summary.distance_m ? num(r.summary.distance_m / 1000, 2) + " км" : "—"}</td>
+        <td class="num">${r.summary.max_alt_m != null ? num(r.summary.max_alt_m, 0) + " м" : "—"}</td>
+        <td class="small">${r.import_id ? `импорт №${r.import_id}` : "—"}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty-state">Миссия ещё не выполнялась</div>';
   }
   drawRuns(m.runs);
 
@@ -223,5 +263,11 @@ async function pageMission(id) {
     el.scrollIntoView({ behavior: "smooth" });
   }
   drawAll();
+  flightPanel($("#flight-panel"), {
+    missionId: +id, aircraftId: () => st.aircraft_id, waypoints: () => st.waypoints, returnHome: () => st.return_home, save,
+    frame: () => st.frame,
+    drawLive: (track, ll) => { const q = toXY(home(), ll[0], ll[1]); drawMap(track, [sx(q[0]), sy(q[1])]); },
+    onRunsChanged: (runs) => { drawRuns(runs); refreshNavCount(); AIRCRAFT_CACHE = null; },
+  });
 }
 const view_ = () => $("#view");

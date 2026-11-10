@@ -12,6 +12,9 @@
     python -m app.admin reset-demo                   пересоздать демо-данные (только при TBO_DEMO_MODE=1)
     python -m app.admin init                         создать/обновить структуру базы
     python -m app.admin tick | notify-test           фоновая проверка / тестовое уведомление
+    python -m app.admin drone-add СЕРИЙНЫЙ --name ИМЯ   подключить борт (агент tbo-agent): создать борт при необходимости,
+                                                     выпустить токен устройства (--rotate — новый токен, --token-only — только токен)
+    python -m app.admin drones                       подключённые борты и их состояние
 
 Пароль никогда не передаётся аргументом командной строки (его видно в списке процессов и истории оболочки).
 """
@@ -24,7 +27,8 @@ import sys
 from pathlib import Path
 
 COMMANDS = ["status", "users", "create-user", "passwd", "unlock", "disable", "enable", "setup-code", "backup", "backups",
-            "restore", "reset-demo", "init", "tick", "notify-test"]
+            "restore", "reset-demo", "init", "tick", "notify-test", "drone-add", "drones"]
+DRONE_TYPE = {"code": "SKYRIS-T6S", "name": "Skyris Technic 6S", "category": "multirotor", "manufacturer": "Skyris"}
 
 
 def _fmt_size(n: int | None) -> str:
@@ -58,6 +62,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--name", default="", help="отображаемое имя (create-user)")
     ap.add_argument("--password-stdin", action="store_true", help="прочитать пароль из стандартного ввода (одна строка)")
     ap.add_argument("--temporary", action="store_true", help="пароль временный — сменить при первом входе")
+    ap.add_argument("--rotate", action="store_true", help="drone-add: борт уже подключён — выпустить новый токен")
+    ap.add_argument("--token-only", action="store_true", help="drone-add: вывести только токен (для скрипта развёртывания)")
     a = ap.parse_args(argv)
 
     from . import models  # noqa: F401 — регистрирует таблицы перед create_all
@@ -166,6 +172,26 @@ def main(argv: list[str] | None = None) -> int:
             print("База готова")
         elif a.command == "tick":
             print(json.dumps(scheduler.tick(), ensure_ascii=False))
+        elif a.command == "drone-add":
+            token, msg = _drone_add(SessionLocal, a)
+            if a.token_only:
+                print(token)
+            else:
+                print(msg)
+                print(f"Токен устройства (показывается один раз): {token}")
+        elif a.command == "drones":
+            from .services import drones
+            from .models import DroneLink
+            with SessionLocal() as s:
+                rows = [drones.link_dict(s, link) for link in s.query(DroneLink).order_by(DroneLink.id)]
+            if a.json:
+                print(json.dumps(rows, ensure_ascii=False))
+            for r in rows if not a.json else []:
+                t = r["telemetry"]
+                print(f"{r['aircraft']['serial']:<20} {r['state_label']:<28} последний обмен: {r['last_seen_at'] or '—'}  "
+                      f"агент: {r['agent'].get('version', '—')} {r['agent'].get('executor', '')}  батарея: {t.get('battery_pct', '—')}")
+            if not rows and not a.json:
+                print("Подключённых бортов нет: python -m app.admin drone-add СЕРИЙНЫЙ --name ИМЯ")
         elif a.command == "notify-test":
             res = notify.send([{"category": "overdue", "title": "Проверка канала уведомлений tbo-tracker", "text": "тест",
                                 "href": "#/maintenance"}], serverconf.load())
@@ -174,6 +200,50 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Ошибка: {e.message}", file=sys.stderr)
         return 1
     return 0
+
+
+def _drone_add(SessionLocal, a) -> tuple[str, str]:
+    """Борт для агента: тип «Skyris Technic 6S» и борт создаются при необходимости, затем — токен устройства."""
+    from sqlalchemy import select
+
+    from .errors import DomainError
+    from .models import Aircraft, AircraftType, DroneLink
+    from .services import auth, drones
+    from .timeutil import utcnow
+    serial = (a.target or "").strip()
+    if not serial or len(serial) > 100:
+        raise DomainError("Укажите серийный номер борта: drone-add СЕРИЙНЫЙ --name ИМЯ")
+    with SessionLocal() as s:
+        ac = s.scalar(select(Aircraft).where(Aircraft.serial == serial))
+        link = s.scalar(select(DroneLink).where(DroneLink.aircraft_id == ac.id)) if ac is not None else None
+        if a.rotate and link is None:        # новый токен — только подключённому борту: опечатка не создаёт лишний борт
+            raise DomainError(f"Борт {serial} не подключён: сначала drone-add {serial} --name ИМЯ")
+        created = ac is None
+        if created:
+            t = s.scalar(select(AircraftType).where(AircraftType.code == DRONE_TYPE["code"]))
+            if t is None:
+                t = AircraftType(**DRONE_TYPE, slots=[])
+                s.add(t)
+                s.flush()
+            ac = Aircraft(serial=serial, name=(a.name or serial)[:200], type_id=t.id, status="active", in_service_at=utcnow(),
+                          initial_hours=0.0, initial_cycles=0, notes="Создан командой drone-add (агент tbo-agent)")
+            s.add(ac)
+            s.flush()
+        if link is None:
+            link, token = drones.create_link(s, ac.id, "tbo-ctl")
+            action = "drone_link_created"
+        elif a.rotate:
+            token = drones.rotate_token(s, link)
+            action = "drone_token_rotated"
+        else:
+            raise DomainError(f"Борт {ac.name} уже подключён. Новый токен: drone-add {serial} --rotate")
+        s.commit()
+        name = ac.name
+    auth.audit(action, "tbo-ctl", None, target=name, details="командная строка сервера")
+    auth.flush_audit(5)
+    msg = (f"Борт {name} ({serial}) {'создан и ' if created else ''}подключён. "
+           "Агент на борту: sudo ./install.sh (адрес сервера и этот токен).")
+    return token, msg
 
 
 if __name__ == "__main__":

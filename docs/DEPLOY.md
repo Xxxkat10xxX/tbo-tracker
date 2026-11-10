@@ -144,6 +144,9 @@ docker build --secret id=pip_ca,src=/путь/к/proxy-ca.pem -t tbo-tracker:lat
 | `TBO_DATABASE_PASSWORD_FILE` | — | файл с паролем БД (Docker secret) |
 | `TBO_PUBLIC_URL` | — | внешний адрес `https://…`: включает Secure-cookie, HSTS, проверку Origin |
 | `TBO_TRUSTED_PROXIES` | — | IP или сети обратных прокси, которым доверяем `X-Forwarded-For` / `-Proto` |
+| `TBO_DRONE_MAX_ALT_M` / `TBO_DRONE_MAX_DIST_M` | 120 / 2000 | пределы реального полёта: высота точек и удаление от точки взлёта (агент на борту проверяет и свои) |
+| `TBO_DRONE_MAX_HOME_OFFSET_M` / `TBO_DRONE_MIN_BATTERY_PCT` | 50 / 50 | борт не дальше от точки взлёта миссии; минимальный заряд для старта |
+| `TBO_DRONE_LOCAL_MAX_ALT_M` / `TBO_DRONE_LOCAL_MAX_DIST_M` | 3 / 20 | пределы локальной миссии в помещении (Optical Flow / ArUco): высота и удаление от точки взлёта; скорость — до 2 м/с |
 | `TBO_ALLOWED_HOSTS` | — (любые) | имена сайта через запятую, допустимые в заголовке `Host` (защита от DNS rebinding); `localhost` и имя из `TBO_PUBLIC_URL` разрешены всегда |
 | `TBO_DEMO_MODE` | `0` | демо-данные, сценарии, «Сбросить демо-данные» |
 | `TBO_SESSION_IDLE_MIN` / `TBO_SESSION_MAX_HOURS` | 120 / 12 | выход после бездействия / предельный срок сессии |
