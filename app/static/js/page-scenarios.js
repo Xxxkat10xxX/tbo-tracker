@@ -74,7 +74,7 @@ function diffTable(rows) {
       const dh = r.after.hours - r.before.hours, dc = r.after.cycles - r.before.cycles;
       const label = r.href ? `<a href="${esc(r.href)}"><b>${esc(r.label)}</b></a>` : `<b>${esc(r.label)}</b>`;
       return `<tr><td>${label}${r.sub ? ` <span class="small muted">${esc(r.sub)}</span>` : ""}</td><td class="num">${hrs(r.before.hours)} · ${r.before.cycles} ц.</td><td class="num">${hrs(r.after.hours)} · ${r.after.cycles} ц.</td>
-        <td class="num ${dh || dc ? "delta-up" : "muted"}">${dh || dc ? `+${num(dh, 2)} ч · +${dc} ц.` : "без изменений"}</td></tr>`;
+        <td class="num ${dh || dc ? "delta-up" : "muted"}">${dh || dc ? `+${hrs(dh)} · +${dc} ц.` : "без изменений"}</td></tr>`;
     }).join("")}</tbody></table>`;
 }
 function readinessHTML(r) { return `<span class="dot ${r.level === "ok" ? "" : r.level}"></span>${esc(r.text)}`; }

@@ -58,7 +58,7 @@ async function openPhotoPicker(a, onDone) {
 const fmtUid = (u) => u ? `${u.slice(0, 8)}-${u.slice(8, 12)}-${u.slice(12, 16)}-${u.slice(16, 20)}-${u.slice(20, 32)}`.toUpperCase() : "—";
 function residualText(r, short) {
   if (!r) return short ? "—" : "назначенный ресурс не задан";
-  const parts = [r.hours != null && `${num(Math.max(0, r.hours), 1)} ч`, r.cycles != null && `${num(Math.max(0, r.cycles), 0)} цикл.`, r.days != null && `${num(Math.max(0, r.days), 0)} дн.`].filter(Boolean);
+  const parts = [r.hours != null && hrs(Math.max(0, r.hours)), r.cycles != null && `${num(Math.max(0, r.cycles), 0)} цикл.`, r.days != null && `${num(Math.max(0, r.days), 0)} дн.`].filter(Boolean);
   return parts.join(" / ") || "—";
 }
 function residualBar(r) {
@@ -129,7 +129,7 @@ function openPassportModal(c, onDone) {
 // ------------------------------------------------------------------ ресурс и свои типы
 const RES_HINT = "Максимальный износ конкретного экземпляра (по паспорту, формуляру, решению эксплуатанта). Считается от начала эксплуатации, работами не обнуляется; срабатывает первый достигнутый порог. Пустое поле — порог не задан.";
 function resourceFields(r = {}) {
-  return `<div class="row3"><div class="field"><label>Ресурс, ч</label><input type="number" min="0" step="0.1" name="resource_hours" value="${r.hours ?? ""}" placeholder="не задан"></div>
+  return `<div class="row3"><div class="field"><label>Ресурс, ч</label><input type="number" min="0" step="0.01" name="resource_hours" value="${r.hours ?? ""}" placeholder="не задан"></div>
     <div class="field"><label>Ресурс, циклы</label><input type="number" min="0" name="resource_cycles" value="${r.cycles ?? ""}" placeholder="не задан"></div>
     <div class="field"><label>Ресурс, дни</label><input type="number" min="0" name="resource_days" value="${r.days ?? ""}" placeholder="не задан"></div></div>
     <div class="hint mtn-6">${RES_HINT}</div>`;
@@ -139,7 +139,7 @@ function readResource(root) {
   return { resource_hours: n("resource_hours"), resource_cycles: n("resource_cycles", 1), resource_days: n("resource_days", 1) };
 }
 function resourceText(r) {
-  const parts = [r && r.hours && `${num(r.hours, 1)} ч`, r && r.cycles && `${num(r.cycles, 0)} цикл.`, r && r.days && `${num(r.days, 0)} дн.`].filter(Boolean);
+  const parts = [r && r.hours && `${num(r.hours, 2)} ч`, r && r.cycles && `${num(r.cycles, 0)} цикл.`, r && r.days && `${num(r.days, 0)} дн.`].filter(Boolean);
   return parts.length ? parts.join(" / ") : null;
 }
 function openResourceModal({ kind, entity, onDone }) {

@@ -61,7 +61,10 @@ function toast(msg, isErr) {
 
 const nf = (d) => new Intl.NumberFormat("ru-RU", { maximumFractionDigits: d, minimumFractionDigits: 0 });
 const num = (v, d = 1) => (v === null || v === undefined ? "—" : nf(d).format(v));
-const hrs = (v) => `${num(v, 1)} ч`;
+// часы наработки/налёта — всегда до сотых (0,25 ч = 15 мин): короткие полёты видны в сумме
+const nfH = new Intl.NumberFormat("ru-RU", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const hnum = (v) => (v === null || v === undefined ? "—" : nfH.format(v));
+const hrs = (v) => `${hnum(v)} ч`;
 const rub = (v) => `${nf(0).format(Math.round(v))} ₽`;
 function fmtDT(iso) {
   if (!iso) return "—";
@@ -103,10 +106,11 @@ function eventsTable(list) {
 function metricHTML(m) {
   const cls = m.status === "overdue" ? "bad" : m.status === "due_soon" ? "warn" : "";
   const w = Math.min(100, m.ratio * 100);
-  const rem = m.remaining < 0 ? `<b class="c-bad">превышено на ${num(-m.remaining, 1)} ${m.unit}</b>`
+  const h = m.metric === "hours", f = (v) => (h ? hnum(v) : num(v, 1));
+  const rem = m.remaining < 0 ? `<b class="c-bad">превышено на ${f(-m.remaining)} ${m.unit}</b>`
     : m.remaining === 0 ? '<b class="c-bad">порог достигнут</b>'
-    : `осталось ${num(m.remaining, 1)} ${m.unit}`;
-  return `<div class="metric"><div class="mt"><span>${METRIC[m.metric]}: <b>${num(m.used, 1)}</b> / ${num(m.limit, 1)} ${m.unit}</span><span class="muted">${rem}</span></div>
+    : `осталось ${f(m.remaining)} ${m.unit}`;
+  return `<div class="metric"><div class="mt"><span>${METRIC[m.metric]}: <b>${f(m.used)}</b> / ${num(m.limit, h ? 2 : 1)} ${m.unit}</span><span class="muted">${rem}</span></div>
     <div class="bar"><span class="${cls}" data-w="${w}"></span></div></div>`;
 }
 

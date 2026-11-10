@@ -35,7 +35,7 @@ async function pageAnalytics() {
           <td class="num">${hrs(r.on_board_hours)}</td><td class="num">${hrs(r.tsn_hours)}</td><td class="num"><b>${hrs(r.hidden_hours)}</b></td></tr>`).join("")}</tbody></table>` : '<div class="empty-state">Нет</div>'}</div>
       <div class="card"><h2>Налёт парка по месяцам${d.monthly.length ? `, ${d.monthly[0].month.slice(0, 4) === d.monthly[d.monthly.length - 1].month.slice(0, 4) ? d.monthly[0].month.slice(0, 4) : `${d.monthly[0].month.slice(0, 4)}–${d.monthly[d.monthly.length - 1].month.slice(0, 4)}`} г.` : ""}</h2>
         <div class="chart">${d.monthly.map((mo) => `<div class="col"><div class="tot">${num(mo.total, 0)}</div>
-          ${names.map((n, i) => mo.by_aircraft[n] ? `<div class="seg" title="${esc(n)}: ${num(mo.by_aircraft[n], 1)} ч" data-h="${Math.round((mo.by_aircraft[n] / maxTotal) * 170)}" data-bg="${PALETTE[i % PALETTE.length]}"></div>` : "").reverse().join("")}
+          ${names.map((n, i) => mo.by_aircraft[n] ? `<div class="seg" title="${esc(n)}: ${hrs(mo.by_aircraft[n])}" data-h="${Math.round((mo.by_aircraft[n] / maxTotal) * 170)}" data-bg="${PALETTE[i % PALETTE.length]}"></div>` : "").reverse().join("")}
           <div class="lbl">${MONTHS[+mo.month.slice(5) - 1]}<span class="yr">${mo.month.slice(0, 4)}</span></div></div>`).join("")}</div>
         <div class="legend">${names.map((n, i) => `<span><i data-bg="${PALETTE[i % PALETTE.length]}"></i>${esc(n)}</span>`).join("")}</div>
         <div class="small muted mt-8">Часы налёта, загруженные из журналов эксплуатации.</div></div>

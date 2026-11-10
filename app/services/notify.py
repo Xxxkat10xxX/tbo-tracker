@@ -37,8 +37,13 @@ lock = threading.RLock()          # общая блокировка: прове�
 METRIC_NAMES = {"hours": "Часы", "cycles": "Циклы", "days": "Календарь", "events": "Падения/столкновения"}
 
 
-def _num(v) -> str:
-    return (f"{v:.1f}".rstrip("0").rstrip(".") if isinstance(v, float) else str(v)).replace(".", ",")
+def _num(v, d: int = 1) -> str:
+    return (f"{v:.{d}f}".rstrip("0").rstrip(".") if isinstance(v, float) else str(v)).replace(".", ",")
+
+
+def _used(d: dict) -> str:
+    """Израсходовано по метрике: часы — всегда до сотых, как в интерфейсе."""
+    return f"{float(d['used']):.2f}".replace(".", ",") if d["metric"] == "hours" else _num(d["used"])
 
 
 def _entity_href(e: dict) -> str:
@@ -56,7 +61,7 @@ def current(s: Session, now: datetime | None = None) -> dict[str, dict]:
         if e["kind"] == "component" and e.get("location"):
             where = f" · {e['location']['aircraft_name']} ({e['location']['position']})"
         d = it["driver"]
-        detail = f"{METRIC_NAMES.get(d['metric'], d['metric'])}: {_num(d['used'])} из {_num(d['limit'])} {d['unit']}" if d else ""
+        detail = f"{METRIC_NAMES.get(d['metric'], d['metric'])}: {_used(d)} из {_num(d['limit'], 2)} {d['unit']}" if d else ""
         out[f"{cat}|{it['key']}"] = {"category": cat, "title": f"{e.get('serial')}{where} — {it['rule']['name']}",
                                      "text": detail, "href": _entity_href(e)}
     since = now - timedelta(days=SENSOR_WINDOW_DAYS)
