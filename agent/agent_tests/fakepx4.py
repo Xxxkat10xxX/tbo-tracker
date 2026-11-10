@@ -22,7 +22,7 @@ class FakePX4:
     TECHNIC_INDOOR = {"EKF2_GPS_CTRL": 0, "SYS_HAS_MAG": 0, "EKF2_MAG_TYPE": 5, "COM_DISARM_LAND": 2.0}
 
     def __init__(self, lat=55.75, lon=37.6, mission_plugin=True, technic=True, refuse_arm=None, speed=40.0, params=None,
-                 target_lag_s=0.0, hover_offset=0.0):
+                 target_lag_s=0.0, hover_offset=0.0, tel_delay=None, map_spike_every=0):
         """target_lag_s — кадр navigate_target показывает прежнюю цель столько секунд после команды (TF отстаёт);
         hover_offset — в OFFBOARD борт устанавливается в стольких метрах от цели (оптический поток «плавает»)."""
         rospy.reset()
@@ -32,6 +32,8 @@ class FakePX4:
         self.items, self.seq, self.target = [], 0, None
         self.refuse_arm, self.speed = refuse_arm, speed
         self.target_lag_s, self.hover_offset = target_lag_s, hover_offset
+        # перегруженный борт: get_telemetry отвечает с задержкой (по кадрам), каждый N-й запрос кадра map — 6 с
+        self.tel_delay, self.map_spike_every, self._map_calls = dict(tel_delay or {}), map_spike_every, 0
         self._prev_target, self._target_at = None, 0.0
         self.calls = []
         self.params = dict(self.TECHNIC_INDOOR if params is None else params)
@@ -99,6 +101,12 @@ class FakePX4:
         self._prev_target, self._target_at, self.target = self.target, time.time(), target
 
     def _telemetry(self, frame_id=""):
+        if self.tel_delay.get(frame_id):
+            time.sleep(self.tel_delay[frame_id])
+        if frame_id == "map" and self.map_spike_every:
+            self._map_calls += 1
+            if self._map_calls % self.map_spike_every == 0:
+                time.sleep(6.0)
         if frame_id == "navigate_target":
             tgt = self.target
             if self._prev_target is not None and time.time() - self._target_at < self.target_lag_s:

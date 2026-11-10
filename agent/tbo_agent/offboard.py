@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import logging
 import math
 import threading
 import time
@@ -18,10 +19,14 @@ import time
 from .plan import R_EARTH, dist_m, to_xy
 from .vehicle import VehicleError
 
+log = logging.getLogger("tbo_agent")
+
 NAN = float("nan")
 ARRIVE_DWELL = 3        # отсчётов подряд (через ~0,2 с) в допуске — точка достигнута
 SETTLE_S = 3.0          # держится не дальше 2× допуска столько секунд — тоже достигнута (шум оптического потока)
 TARGET_LAG_S = 1.0      # столько ждать признака новой цели в кадре navigate_target (TF может отставать от команды)
+TEL_TIMEOUT_S = 5.0     # один запрос get_telemetry (на загруженном Orange Pi бывает > 3 с)
+TEL_LOST_S = 15.0       # без единого ответа телеметрии столько секунд — сбой (одна задержка — не повод садиться)
 
 
 class Stop(Exception):
@@ -100,8 +105,23 @@ class OffboardMixin:
             except VehicleError:
                 pass
 
-    def _tel(self, frame: str):
-        return self._call(self._get_telemetry, 3, "телеметрия", frame_id=frame)
+    def _tel(self, frame: str, tries: int = 3):
+        """get_telemetry с повтором: на загруженном борту ответ бывает дольше 3 с, и одна задержка прежде
+        обрывала программу полёта (посадка на месте)."""
+        err = None
+        for _ in range(max(1, tries)):
+            try:
+                return self._call(self._get_telemetry, TEL_TIMEOUT_S, "телеметрия", frame_id=frame)
+            except VehicleError as e:
+                err = e
+        raise err
+
+    def _nav(self, srv, timeout: float, what: str, **kw):
+        """navigate / navigate_global: отказ simple_offboard (success=False) — ошибка сразу, а не тайм-аут ожидания."""
+        r = self._call(srv, timeout, what, **kw)
+        if getattr(r, "success", True) is False:
+            raise VehicleError("%s: %s" % (what, getattr(r, "message", "") or "отказ simple_offboard"))
+        return r
 
     def _guard(self, ev):
         if ev.is_set():
@@ -138,10 +158,16 @@ class OffboardMixin:
         start = time.monotonic()
         end = start + timeout
         fresh = expect is None or expect <= 2 * tol
-        run, near_since, d = 0, None, None
+        run, near_since, d, last_ok, tel_err = 0, None, None, start, None
         while True:
             self._guard(ev)
-            d = dist()
+            try:
+                d = dist()
+                last_ok = time.monotonic()
+            except VehicleError as e:           # задержка телеметрии — пропуск отсчёта, а не обрыв маршрута
+                d, tel_err = None, e
+                if time.monotonic() - last_ok > TEL_LOST_S:
+                    raise VehicleError("нет телеметрии %.0f с: %s" % (TEL_LOST_S, tel_err))
             now = time.monotonic()
             if d is not None:
                 h, v = d
@@ -166,8 +192,17 @@ class OffboardMixin:
             ev.wait(0.2)
 
     def _takeoff(self, ev, alt: float):
-        self._call(self._navigate, 5, "взлёт (navigate)", x=0.0, y=0.0, z=float(alt), yaw=NAN,
-                   speed=self.takeoff_speed, frame_id="body", auto_arm=True)
+        # цель взлёта — в кадре map (быстрый запрос); navigate_target на загруженном борту отвечает до секунд
+        target = None
+        try:
+            p = self._tel("map")
+            xyz = (_fin(p.x), _fin(p.y), _fin(p.z))
+            if None not in xyz:
+                target = (xyz[0], xyz[1], xyz[2] + float(alt))
+        except VehicleError:
+            pass
+        self._nav(self._navigate, 5, "взлёт (navigate)", x=0.0, y=0.0, z=float(alt), yaw=NAN,
+                  speed=self.takeoff_speed, frame_id="body", auto_arm=True)
         end = time.monotonic() + 8                 # simple_offboard включает OFFBOARD и арминг
         while not (self._s.get("mode") == "OFFBOARD" and self._s.get("armed")):
             if ev.is_set():
@@ -175,7 +210,11 @@ class OffboardMixin:
             if time.monotonic() > end:
                 raise VehicleError("контроллер не перешёл в OFFBOARD с включёнными моторами%s" % self._why())
             time.sleep(0.1)
-        self._wait_arrival(ev, float(alt) / self.takeoff_speed * 2 + 30, 0.3 if alt < 5 else 0.5, expect=float(alt))
+        tol, timeout = (0.3 if alt < 5 else 0.5), float(alt) / self.takeoff_speed * 2 + 30
+        if target is not None:
+            self._wait_arrival(ev, timeout, tol, dist=self._dist_map(*target))
+        else:
+            self._wait_arrival(ev, timeout, tol, expect=float(alt))
 
     def _reached(self, i: int):
         with self._lock:
@@ -197,8 +236,8 @@ class OffboardMixin:
             speed = float(plan["speed_ms"])
             for i, w in enumerate(plan["waypoints"], 1):
                 d = dist_m(lat0, lon0, w["lat"], w["lon"])
-                self._call(self._navigate_global, 5, "полёт к точке %d (navigate_global)" % i, lat=float(w["lat"]),
-                           lon=float(w["lon"]), z=z0 + float(w["alt"]), yaw=NAN, speed=speed, frame_id="map", auto_arm=False)
+                self._nav(self._navigate_global, 5, "полёт к точке %d (navigate_global)" % i, lat=float(w["lat"]),
+                          lon=float(w["lon"]), z=z0 + float(w["alt"]), yaw=NAN, speed=speed, frame_id="map", auto_arm=False)
                 self._wait_arrival(ev, d / speed * 2 + 60, self.tol, expect=d)
                 self._reached(i)
                 lat0, lon0 = w["lat"], w["lon"]
@@ -214,6 +253,7 @@ class OffboardMixin:
             self._fly_error = str(e) or None            # команда оператора или пульт: режимы не трогаем
         except Exception as e:  # noqa: BLE001 — сбой программы в воздухе → безопасный возврат домой
             self._fly_error = str(e)
+            log.error("программа полёта прервана, возврат домой: %s", e)
             if self._s.get("armed") and self._s.get("mode") == "OFFBOARD":
                 try:
                     self._call(self._release, 3, "остановка setpoint")
@@ -240,7 +280,7 @@ class OffboardMixin:
         cur = self._tel("map")
         cx, cy, cz = _fin(cur.x), _fin(cur.y), _fin(cur.z)
         d = 0.0 if None in (cx, cy, cz) else math.hypot(math.hypot(x - cx, y - cy), z - cz)
-        self._call(self._navigate, 5, what, x=x, y=y, z=z, yaw=NAN, speed=speed, frame_id="map", auto_arm=False)
+        self._nav(self._navigate, 5, what, x=x, y=y, z=z, yaw=NAN, speed=speed, frame_id="map", auto_arm=False)
         lc["alt"] = float(alt)
         # прибытие — по своей цели в кадре map, а не по navigate_target (он может ещё показывать прежнюю цель)
         self._wait_arrival(ev, d / max(speed, 0.1) * 2 + 20, self.tol_local, dist=self._dist_map(x, y, z))
@@ -263,8 +303,10 @@ class OffboardMixin:
             self._phase = "land"
         except Stop as e:
             self._fly_error = str(e) or None
+            log.info("программа полёта остановлена: %s", self._fly_error or "команда оператора")
         except Exception as e:  # noqa: BLE001 — сбой в помещении: безопаснее сесть на месте, чем лететь «домой»
             self._fly_error = str(e)
+            log.error("программа полёта прервана, посадка: %s", e)
             if self._s.get("armed") and self._s.get("mode") == "OFFBOARD":
                 try:
                     self._call(self._land_srv, 5, "посадка (land)")
@@ -281,8 +323,10 @@ class OffboardMixin:
             self._phase = "land"
         except Stop as e:
             self._fly_error = str(e) or None
+            log.info("программа полёта остановлена: %s", self._fly_error or "команда оператора")
         except Exception as e:  # noqa: BLE001
             self._fly_error = str(e)
+            log.error("программа полёта прервана, посадка: %s", e)
             try:
                 self._call(self._land_srv, 5, "посадка (land)")
                 self._phase = "land"

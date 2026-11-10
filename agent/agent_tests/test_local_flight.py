@@ -141,6 +141,21 @@ def test_hovering_off_target_near_takeoff_point_does_not_abort():
         fc.stop()
 
 
+def test_slow_telemetry_does_not_land_drone_mid_route():
+    """Перегруженный Orange Pi (узлы камеры перезапускались ~15 раз/с): get_telemetry('navigate_target') отвечал
+    до 6 с. Прежде одна задержка дольше 3 с обрывала программу — посадка после 0–1 точки («миссия выполнена»)."""
+    fc = FakePX4(speed=2.0, tel_delay={"navigate_target": 4.0}, map_spike_every=7)
+    try:
+        far1, far2 = at(2.0, 0.0), at(2.0, 1.5)
+        p = local_plan(waypoints=[{"lat": far1[0], "lon": far1[1], "alt": 1.5, "hold_s": 0.0},
+                                  {"lat": far2[0], "lon": far2[1], "alt": 1.5, "hold_s": 0.0}])
+        v, ok = _fly(fc, p, lambda v: not fc.armed, 90)
+        assert ok and v._fly_error is None, v._fly_error
+        assert v.snapshot()["wp_reached"] == 2 and ("land",) in fc.calls and abs(fc.x) < 0.4
+    finally:
+        fc.stop()
+
+
 def test_local_return_home_command():
     fc = FakePX4(speed=0.8)
     try:

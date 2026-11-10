@@ -376,6 +376,14 @@ class Agent:
                 self.abort_kind, "прервана: управление перехватил пилот")
         else:
             status, reason = "completed", "миссия выполнена"
+            wps = (self.plan or {}).get("waypoints") or []
+            reached = max(rec.wp_reached, int(snap.get("wp_reached") or 0))
+            if wps and all(w is not None for w in wps) and reached < len(wps):
+                # борт сел сам до конца маршрута (сбой программы, PX4, оценка высоты…): не «выполнена»
+                err = getattr(v, "_fly_error", None)
+                status = "aborted"
+                reason = "прервана: посадка до конца маршрута — достигнуто точек %d из %d%s" % (
+                    reached, len(wps), "; " + str(err)[:200] if err else "")
         extra = {"executor": v.executor, "agent_version": VERSION, "wp_total": len((self.plan or {}).get("waypoints") or [])}
         saved = False
         try:

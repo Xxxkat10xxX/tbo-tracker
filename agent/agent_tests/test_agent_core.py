@@ -323,6 +323,22 @@ def test_flight_returns_to_idle_when_log_upload_fails_unexpectedly(rig):
     assert ag._flush_outbox() and 34 in api.logs and not ag.outbox.pending()
 
 
+def test_landing_before_route_end_is_not_reported_completed(rig):
+    """Борт сел сам посреди маршрута (без команды оператора и перехвата пилотом): прежде журнал — «миссия выполнена»
+    даже при 0 достигнутых точек (так было с полётом R45)."""
+    ag, api, v = rig
+    p = make_plan(run_id=35)
+    api.active_run = 35
+    api.send("prepare", {"plan": p}, run_id=35, ttl=120)
+    assert wait(lambda: ag.state == "ready")
+    api.send("start", {"run_id": 35, "plan_hash": p["plan_hash"]}, run_id=35)
+    assert wait(lambda: v.snapshot()["alt_rel"] > 10)
+    v.land()                                                # посадка не по команде агента
+    assert wait(lambda: 35 in api.logs, 30)
+    log = api.logs[35]
+    assert log["status"] == "aborted" and "достигнуто точек 0 из 2" in log["reason"], log["reason"]
+
+
 def test_long_flight_track_is_thinned_not_lost():
     from tbo_agent import recorder
     r = Recorder(0.0)
