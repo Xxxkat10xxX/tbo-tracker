@@ -48,14 +48,26 @@ class Outbox:
         with open(os.path.join(self.path, name), encoding="utf-8") as f:
             return json.load(f)
 
-    def done(self, name: str, folder: str = "sent"):
+    def done(self, name: str, folder: str = "sent") -> bool:
+        """Перенести журнал в sent/ или rejected/. False — файла уже нет в outbox (его перенёс другой поток)."""
         dst = os.path.join(os.path.dirname(self.path), folder)
         os.makedirs(dst, mode=0o700, exist_ok=True)
-        os.replace(os.path.join(self.path, name), os.path.join(dst, name))
+        try:
+            os.replace(os.path.join(self.path, name), os.path.join(dst, name))
+        except FileNotFoundError:
+            return False
         # хранить 30 последних по времени (по имени «run-10» шло бы раньше «run-9» — удалялись бы свежие журналы)
-        old = sorted(os.listdir(dst), key=lambda f: os.path.getmtime(os.path.join(dst, f)))[:-30]
-        for f in old:
-            os.unlink(os.path.join(dst, f))
+        def mtime(f):
+            try:
+                return os.path.getmtime(os.path.join(dst, f))
+            except OSError:
+                return 0.0
+        for f in sorted(os.listdir(dst), key=mtime)[:-30]:
+            try:
+                os.unlink(os.path.join(dst, f))
+            except OSError:
+                pass
+        return True
 
 
 class Agent:
@@ -70,6 +82,9 @@ class Agent:
         self.recorder, self.abort_kind, self.flight_thread = None, None, None
         self.stop_ev, self.wake = threading.Event(), threading.Event()
         self._post_lock = threading.Lock()     # состояние отправляется строго по очереди — последним приходит актуальное
+        # журналы отправляет один поток за раз: поток полёта сразу после посадки и фоновый повтор раз в 30 с
+        # иначе брали один файл одновременно, второй не находил его и падал (агент навсегда оставался в «uploading»)
+        self._flush_lock = threading.Lock()
         os.makedirs(cfg.state_dir, mode=0o700, exist_ok=True)
         self.outbox = Outbox(os.path.join(cfg.state_dir, "outbox"))
         self.ckpt_path = os.path.join(cfg.state_dir, "current.json")
@@ -317,15 +332,23 @@ class Agent:
         rec, v = self.recorder, self.v
         period = max(0.005, 0.1 / v.time_scale())
         ground_since, last_ckpt, snap = None, 0.0, v.snapshot()
+        last_err = 0.0
         while not self.stop_ev.is_set():
-            t, snap = v.now(), v.snapshot()
-            mode = (snap.get("mode") or "").upper()
-            st = self.state
-            if st in ("starting", "in_flight") and mode == "AUTO.RTL":
-                self._set("returning", "возврат домой (PX4)")
-            elif st in ("starting", "in_flight", "returning") and mode in ("AUTO.LAND", "AUTO.PRECLAND"):
-                self._set("landing", "посадка")
-            rec.sample(t, snap, v.drain_imu(), self.state)
+            try:
+                t, snap = v.now(), v.snapshot()
+                mode = (snap.get("mode") or "").upper()
+                st = self.state
+                if st in ("starting", "in_flight") and mode == "AUTO.RTL":
+                    self._set("returning", "возврат домой (PX4)")
+                elif st in ("starting", "in_flight", "returning") and mode in ("AUTO.LAND", "AUTO.PRECLAND"):
+                    self._set("landing", "посадка")
+                rec.sample(t, snap, v.drain_imu(), self.state)
+            except Exception:  # noqa: BLE001 — сбой одного отсчёта не должен останавливать наблюдение (иначе «в полёте» навсегда)
+                if time.monotonic() - last_err > 10:
+                    last_err = time.monotonic()
+                    log.exception("наблюдение за полётом")
+                time.sleep(period)
+                continue
             if rec.took_off and not snap.get("in_air"):
                 ground_since = ground_since if ground_since is not None else t
                 if not snap.get("armed") or t - ground_since > 10:
@@ -354,14 +377,22 @@ class Agent:
         else:
             status, reason = "completed", "миссия выполнена"
         extra = {"executor": v.executor, "agent_version": VERSION, "wp_total": len((self.plan or {}).get("waypoints") or [])}
-        body = rec.build(end_wall, status, reason, extra)
-        self.outbox.put(self.run_id, body)
-        self._set("landed", "посадка выполнена: " + reason)
-        self._set("uploading", "передача журнала полёта")
-        sent = self._flush_outbox()
-        self._drop_ckpt()
-        self._set("idle", "полёт завершён — %s" % ("журнал принят сервером" if sent else "журнал будет передан при появлении связи"),
-                  run_id=None, plan=None, checks=[])
+        saved = False
+        try:
+            body = rec.build(end_wall, status, reason, extra)
+            self.outbox.put(self.run_id, body)
+            saved = True
+            self._set("landed", "посадка выполнена: " + reason)
+            self._set("uploading", "передача журнала полёта")
+            sent = self._flush_outbox()
+            detail = "полёт завершён — %s" % ("журнал принят сервером" if sent else "журнал будет передан при появлении связи")
+        except Exception as e:  # noqa: BLE001 — сбой при сохранении/передаче журнала не должен оставлять борт «на передаче»
+            log.exception("журнал полёта R%s", self.run_id)
+            detail = ("полёт завершён — журнал сохранён на борту и будет передан позже (%s)" % e if saved
+                      else "полёт завершён — журнал не сохранён: %s" % e)
+        if saved:
+            self._drop_ckpt()            # без сохранённого журнала контрольная точка нужна: по ней журнал восстановится
+        self._set("idle", detail, run_id=None, plan=None, checks=[])
         self.recorder = None
 
     def _recover(self):
@@ -420,28 +451,47 @@ class Agent:
             self.wake.wait(interval)
             self.wake.clear()
 
+    def _move(self, name: str, folder: str):
+        try:
+            self.outbox.done(name, folder)
+        except OSError as e:
+            log.error("журнал %s: не удалось перенести в %s/: %s", name, folder, e)
+
     def _flush_outbox(self) -> bool:
-        ok = True
-        for name in self.outbox.pending():
-            run_id = int(name[4:-5])
-            try:
-                self.api.upload_log(run_id, self.outbox.load(name))
-                self.outbox.done(name)
-                log.info("журнал полёта R%d принят сервером", run_id)
-            except ApiError as e:
-                ok = False
-                if e.status in (400, 404, 409, 422):
-                    log.error("журнал R%d отклонён сервером: %s (сохранён в rejected/)", run_id, e.message)
-                    self.outbox.done(name, "rejected")
-                else:
+        """Отправить журналы из outbox. True — всё отправлено (или outbox пуст)."""
+        with self._flush_lock:
+            ok = True
+            for name in self.outbox.pending():
+                try:
+                    run_id = int(name[4:-5])
+                    body = self.outbox.load(name)
+                except FileNotFoundError:
+                    continue                     # уже отправлен и перенесён
+                except (OSError, ValueError) as e:
+                    log.error("журнал %s повреждён: %s (перенесён в rejected/)", name, e)
+                    self._move(name, "rejected")
+                    continue
+                try:
+                    self.api.upload_log(run_id, body)
+                except ApiError as e:
+                    ok = False
+                    if e.status in (400, 404, 409, 422):
+                        log.error("журнал R%d отклонён сервером: %s (сохранён в rejected/)", run_id, e.message)
+                        self._move(name, "rejected")
+                        continue
                     log.warning("журнал R%d не передан: %s — повтор позже", run_id, e.message)
                     break
-            except (OSError, ValueError) as e:
-                log.error("журнал %s повреждён: %s", name, e)
-                self.outbox.done(name, "rejected")
-        return ok
+                self._move(name, "sent")
+                log.info("журнал полёта R%d принят сервером", run_id)
+            return ok
+
+    def _outbox_tick(self):
+        try:
+            if self.state not in FLYING and self.outbox.pending():
+                self._flush_outbox()
+        except Exception:  # noqa: BLE001 — фоновый повтор не должен останавливаться навсегда
+            log.exception("повторная отправка журналов")
 
     def _outbox_loop(self):
         while not self.stop_ev.wait(30):
-            if self.state not in FLYING and self.outbox.pending():
-                self._flush_outbox()
+            self._outbox_tick()

@@ -244,6 +244,85 @@ def test_log_kept_in_outbox_when_server_unreachable(rig):
     assert ag._flush_outbox() and 11 in api.logs and not ag.outbox.pending()
 
 
+class SlowApi(FakeApi):
+    """Сервер, отвечающий на журнал с задержкой (импорт на Pi занимает секунды)."""
+
+    def __init__(self, delay=0.3):
+        super().__init__()
+        self.delay, self.uploads = delay, []
+
+    def upload_log(self, run_id, body):
+        self.uploads.append(run_id)
+        time.sleep(self.delay)
+        return super().upload_log(run_id, body)
+
+
+def test_parallel_flush_of_same_log_does_not_crash(tmp_path):
+    """Поток полёта и фоновый повтор отправляют журналы одновременно: прежде второй не находил файл, падал при переносе
+    в rejected/ — и агент навсегда оставался «Передача журнала» (или умирал фоновый повтор)."""
+    api = SlowApi()
+    ag = Agent(Cfg(tmp_path), SimVehicle(time_scale=60), api)
+    ag.outbox.put(31, {"status": "completed", "flight": None})
+    errors, results = [], []
+
+    def flush():
+        try:
+            results.append(ag._flush_outbox())
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    ths = [threading.Thread(target=flush) for _ in range(2)]
+    for th in ths:
+        th.start()
+    for th in ths:
+        th.join(10)
+    assert not errors and results == [True, True]
+    assert api.uploads == [31] and 31 in api.logs                  # отправлен один раз
+    assert not ag.outbox.pending() and os.listdir(os.path.join(str(tmp_path), "sent")) == ["run-31.json"]
+    assert not os.path.isdir(os.path.join(str(tmp_path), "rejected"))
+
+
+def test_flush_tolerates_log_already_moved(tmp_path):
+    """Файл исчез из outbox во время отправки (перенесён другим процессом): это не «повреждённый журнал»."""
+    api = FakeApi()
+    ag = Agent(Cfg(tmp_path), SimVehicle(time_scale=60), api)
+    ag.outbox.put(32, {"status": "completed", "flight": None})
+    orig = api.upload_log
+
+    def upload_and_move(run_id, body):
+        orig(run_id, body)
+        ag.outbox.done("run-%d.json" % run_id)              # «другой поток» успел перенести файл
+    api.upload_log = upload_and_move
+    assert ag._flush_outbox() is True and 32 in api.logs
+    assert not os.path.isdir(os.path.join(str(tmp_path), "rejected"))
+
+
+def test_outbox_retry_survives_unexpected_errors(tmp_path):
+    ag = Agent(Cfg(tmp_path), SimVehicle(time_scale=60), FakeApi())
+    ag.outbox.put(33, {"status": "completed", "flight": None})
+
+    def boom():
+        raise RuntimeError("сбой")
+    ag._flush_outbox = boom
+    ag._outbox_tick()                                       # исключение не выходит наружу — поток повтора жив
+
+
+def test_flight_returns_to_idle_when_log_upload_fails_unexpectedly(rig):
+    ag, api, v = rig
+
+    def boom(run_id, body):
+        raise RuntimeError("неожиданная ошибка отправки")
+    api.upload_log = boom
+    p = make_plan(run_id=34, waypoints=[{"lat": HOME[0] + 0.0005, "lon": HOME[1], "alt": 20.0, "hold_s": 0.0}])
+    api.active_run = 34
+    api.send("prepare", {"plan": p}, run_id=34, ttl=120)
+    assert wait(lambda: ag.state == "ready")
+    api.send("start", {"run_id": 34, "plan_hash": p["plan_hash"]}, run_id=34)
+    assert wait(lambda: ag.state == "idle" and ag.run_id is None, 30), (ag.state, ag.detail)
+    assert "передан позже" in ag.detail and ag.outbox.pending() == ["run-34.json"]   # журнал сохранён на борту
+    del api.upload_log                                      # связь восстановилась: обычная отправка
+    assert ag._flush_outbox() and 34 in api.logs and not ag.outbox.pending()
+
+
 def test_long_flight_track_is_thinned_not_lost():
     from tbo_agent import recorder
     r = Recorder(0.0)
