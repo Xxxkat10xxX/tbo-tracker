@@ -1,13 +1,15 @@
 """Локальный полёт Technic 6S (в помещении, без GPS) и проверки по параметрам PX4 — по документации docs.skyris.ru."""
 import math
 import time
+from types import SimpleNamespace as NS
 
 import pytest
 from fakepx4 import FakePX4
 
-from tbo_agent import vehicle_ros
-from tbo_agent.offboard import body_to_ll, body_to_map, map_to_body, plan_offsets
+from tbo_agent import offboard, vehicle_ros
+from tbo_agent.offboard import body_to_ll, body_to_map, heading_to_yaw, map_to_body, plan_offsets, yaw_to_heading
 from tbo_agent.plan import PlanError, effective_limits, plan_hash, validate
+from tbo_agent.vehicle import VehicleError
 from tbo_agent.vehicle_ros import RosVehicle
 
 HOME = (55.75, 37.6)
@@ -172,6 +174,121 @@ def test_local_return_home_command():
         assert not any(c == ("set_mode", "AUTO.RTL") for c in fc.calls) and ("release",) not in fc.calls
     finally:
         fc.stop()
+
+
+def _deg(a):
+    """Угол в градусах в (-180, 180] — для сравнения курсов."""
+    return (a + 180.0) % 360.0 - 180.0
+
+
+def _near(a, b, tol=1.5):
+    return abs(_deg(a - b)) <= tol
+
+
+def test_heading_math():
+    up = math.radians(90)                                   # нос при взлёте — на +y кадра map
+    assert _near(math.degrees(heading_to_yaw(up, 0)), 90) and _near(math.degrees(heading_to_yaw(up, 90)), 0)   # 90° — вправо
+    assert _near(math.degrees(heading_to_yaw(math.pi / 2, 180)), -90)                                         # GPS: юг
+    for h in (0.0, 45.0, 90.0, 213.7, 359.0):
+        assert _near(yaw_to_heading(up, heading_to_yaw(up, h)), h, 1e-6)
+
+
+def test_local_route_mode_nose_along_route():
+    """Режим «по линии маршрута»: на каждом отрезке нос — по направлению полёта; при повороте больше 30° — сначала
+    разворот на месте (set_yaw), затем полёт. Нос при взлёте смотрит на +y кадра map (90°)."""
+    fc = FakePX4(speed=2.0, yaw=math.radians(90))
+    try:
+        v, ok = _fly(fc, local_plan(yaw_mode="route"), lambda v: not fc.armed and v.snapshot()["wp_reached"] == 2, 40)
+        assert ok and v._fly_error is None and ("land",) in fc.calls and abs(fc.x) < 0.3 and abs(fc.y) < 0.3
+        # кадр map при носе на +y: x — вправо, y — вперёд. Точка 1 — (0, 3), точка 2 — (2, 3), взлёт — (0, 0)
+        back = math.degrees(math.atan2(-3.0, -2.0))          # от точки 2 к точке взлёта: −123,7°
+        nav = [y for s, y in fc.yaw_cmds if s == "navigate"]
+        turns = [y for s, y in fc.yaw_cmds if s == "set_yaw"]
+        # отрезки: вперёд (курс взлёта — без разворота), вправо (90° → разворот), назад к взлёту (разворот)
+        assert len(nav) == 3 and _near(nav[0], 90) and _near(nav[1], 0) and _near(nav[2], back), fc.yaw_cmds
+        assert len(turns) == 2 and _near(turns[0], 0) and _near(turns[1], back), fc.yaw_cmds
+    finally:
+        fc.stop()
+
+
+def test_local_route_vertical_leg_keeps_heading():
+    """Точка прямо над точкой взлёта (отрезок только по высоте): курс не меняется — встроенный yaw=+inf simple_offboard
+    развернул бы борт на 0°."""
+    fc = FakePX4(speed=2.0, yaw=math.radians(40))
+    try:
+        up = at(0.0, 0.0)
+        p = local_plan(yaw_mode="route", return_home=False, waypoints=[{"lat": up[0], "lon": up[1], "alt": 2.0, "hold_s": 0.0}])
+        v, ok = _fly(fc, p, lambda v: not fc.armed, 30)
+        assert ok and v._fly_error is None and fc.yaw_cmds == [] and _near(math.degrees(fc.yaw), 40)
+    finally:
+        fc.stop()
+
+
+def test_local_waypoint_heading_keep_mode():
+    """Курс в точке: после прилёта разворот на месте (set_yaw), затем удержание; в режиме «не менять» курс сохраняется
+    до конца полёта (navigate с yaw=NaN), а карта показывает курс от «верха» (нос при взлёте)."""
+    fc = FakePX4(speed=2.0, yaw=math.radians(30))
+    try:
+        p1, p2 = at(2.0, 0.0), at(2.0, 1.5)
+        p = local_plan(waypoints=[{"lat": p1[0], "lon": p1[1], "alt": 1.5, "hold_s": 1.0, "yaw_deg": 90.0},
+                                  {"lat": p2[0], "lon": p2[1], "alt": 1.5, "hold_s": 0.0}])
+        v = opened(fc)
+        assert "заданный курс в 1 точке" in v.upload(p, {"lat": None, "lon": None})
+        v.start_mission(p)
+        assert wait(lambda: v.snapshot()["wp_reached"] >= 1, 20)
+        assert wait(lambda: v.snapshot()["heading"] is not None and _near(v.snapshot()["heading"], 90, 3), 10)
+        assert wait(lambda: not fc.armed, 30) and v._fly_error is None and v.snapshot()["wp_reached"] == 2
+        assert fc.yaw_cmds == [("set_yaw", -60.0)]                         # 30° (нос при взлёте) − 90° вправо
+        assert _near(math.degrees(fc.yaw), -60)                            # курс сохранился до посадки
+    finally:
+        fc.stop()
+
+
+def test_turn_not_reached_does_not_land_drone(monkeypatch):
+    """Борт не разворачивается (например, курс не оценивается): предупреждение и полёт дальше, а не посадка."""
+    monkeypatch.setattr(offboard, "YAW_TIMEOUT_S", 1.0)
+    fc = FakePX4(speed=2.0, yaw_rate=0.0)
+    try:
+        p = local_plan(waypoints=[dict(local_plan()["waypoints"][0], yaw_deg=180.0)])
+        v, ok = _fly(fc, p, lambda v: not fc.armed, 30)
+        assert ok and v._fly_error is None and v.snapshot()["wp_reached"] == 1 and ("land",) in fc.calls
+        assert len(fc.yaw_cmds) == 1 and fc.yaw_cmds[0][0] == "set_yaw" and _near(fc.yaw_cmds[0][1], 180)
+    finally:
+        fc.stop()
+
+
+def test_set_yaw_refused_does_not_land_drone():
+    """simple_offboard отказал в set_yaw: предупреждение и полёт дальше, а не посадка посреди маршрута."""
+    import rospy
+    fc = FakePX4(speed=2.0)
+    refused = []
+    rospy._services["/set_yaw"] = lambda yaw, frame_id: refused.append(yaw) or NS(success=False, message="Busy")
+    try:
+        p = local_plan(waypoints=[dict(local_plan()["waypoints"][0], yaw_deg=90.0)])
+        v, ok = _fly(fc, p, lambda v: not fc.armed, 30)
+        assert ok and v._fly_error is None and v.snapshot()["wp_reached"] == 1 and len(refused) == 1
+        assert ("land",) in fc.calls and abs(fc.x) < 0.3 and abs(fc.y) < 0.3                 # долетел и вернулся
+    finally:
+        fc.stop()
+
+
+def test_heading_needs_set_yaw_and_valid_plan():
+    fc = FakePX4(set_yaw=False)
+    try:
+        v = opened(fc)
+        with pytest.raises(VehicleError, match="set_yaw"):
+            v.upload(local_plan(yaw_mode="route"), {"lat": None, "lon": None})
+        assert "курс" not in v.upload(local_plan(), {"lat": None, "lon": None})        # без курса — как прежде
+    finally:
+        fc.stop()
+    eff = effective_limits(local_plan()["limits"], LIM, "local")
+    validate(local_plan(yaw_mode="route", waypoints=[dict(local_plan()["waypoints"][0], yaw_deg=359.5)]), "T6S-1", eff)
+    with pytest.raises(PlanError, match="курс"):
+        validate(local_plan(waypoints=[dict(local_plan()["waypoints"][0], yaw_deg=400)]), "T6S-1", eff)
+    with pytest.raises(PlanError, match="курс"):
+        validate(local_plan(waypoints=[dict(local_plan()["waypoints"][0], yaw_deg="север")]), "T6S-1", eff)
+    with pytest.raises(PlanError, match="режим курса"):
+        validate(local_plan(yaw_mode="spin"), "T6S-1", eff)
 
 
 def test_px4_params_explain_gps_and_landing(monkeypatch):

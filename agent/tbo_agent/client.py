@@ -15,7 +15,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
-from . import VERSION
+from . import FEATURES, VERSION
 
 
 class ApiError(Exception):
@@ -99,7 +99,8 @@ class Api:
 
     # --- методы API
     def hello(self, executor: str, vehicle: dict):
-        return self.call("POST", "/api/agent/hello", {"agent_version": VERSION, "executor": executor, "vehicle": vehicle})
+        return self.call("POST", "/api/agent/hello", {"agent_version": VERSION, "executor": executor, "vehicle": vehicle,
+                                                      "features": list(FEATURES)})
 
     def next_command(self, wait: int = 8):
         return self.call("GET", "/api/agent/commands?wait=%d" % wait, timeout=wait + self.timeout, sync_clock=False).get("command")

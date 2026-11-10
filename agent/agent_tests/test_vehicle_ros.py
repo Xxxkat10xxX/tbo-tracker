@@ -98,6 +98,52 @@ def test_offboard_flight_as_in_technic_examples(px4_no_mission):
     assert ("set_mode", "AUTO.RTL") in fc.calls and v._fly_error is None
 
 
+def test_mission_items_heading_param4():
+    """Миссия PX4: курс точки — param4 (градусы от севера). «Не менять» — курс борта на земле (компас), после точки
+    с заданным курсом — он; «по линии маршрута» — NaN (PX4 по MPC_YAW_MODE направляет нос к точке)."""
+    import math
+    fc = FakePX4(heading=45.0)
+    try:
+        v = opened()
+        assert wait(lambda: v.snapshot()["heading"] == 45.0)
+        p = plan()
+        p["waypoints"][1]["yaw_deg"] = 270.0
+        p["waypoints"].append(dict(p["waypoints"][0]))
+        assert "заданный курс в 1 точке" in v.upload(p, {"lat": HOME[0], "lon": HOME[1]})
+        assert [round(w.param4, 1) for w in fc.items if w.command == 16] == [45.0, 270.0, 270.0]
+        p["yaw_mode"] = "route"
+        assert "нос по линии маршрута" in v.upload(p, {"lat": HOME[0], "lon": HOME[1]})
+        y = [w.param4 for w in fc.items if w.command == 16]
+        assert math.isnan(y[0]) and y[1] == 270.0 and math.isnan(y[2])
+        fc.heading = None
+        v._s.pop("heading")
+        p["yaw_mode"] = "keep"
+        v.upload(p, {"lat": HOME[0], "lon": HOME[1]})
+        y = [w.param4 for w in fc.items if w.command == 16]
+        assert math.isnan(y[0]) and y[1] == 270.0 and y[2] == 270.0          # компаса нет — до точки с курсом как в PX4
+    finally:
+        fc.stop()
+
+
+def test_offboard_gps_route_mode_and_point_heading():
+    """Программа на борту по GPS: «по линии маршрута» — разворот на месте и navigate_global с курсом отрезка
+    (кадр map: 0 — восток, 90° — север); курс точки (компас 180° — юг) — разворот после прилёта."""
+    fc = FakePX4(mission_plugin=False)
+    try:
+        v = opened()
+        p = plan()
+        p["yaw_mode"] = "route"
+        p["waypoints"][1]["yaw_deg"] = 180.0
+        v.upload(p, {"lat": HOME[0], "lon": HOME[1]})
+        v.start_mission(p)
+        assert wait(lambda: not v.snapshot()["armed"] and v.snapshot()["wp_reached"] == 2, 30)
+        assert v._fly_error is None and ("set_mode", "AUTO.RTL") in fc.calls
+        got = [(s, round(y)) for s, y in fc.yaw_cmds]
+        assert got == [("set_yaw", 90), ("navigate_global", 90), ("set_yaw", 0), ("navigate_global", 0), ("set_yaw", -90)], got
+    finally:
+        fc.stop()
+
+
 def test_offboard_route_not_skipped_when_target_frame_lags():
     """Кадр navigate_target отстаёт от navigate_global: прежде точка 1 «достигалась» по старой цели (точке взлёта),
     и борт летел сразу к точке 2, минуя точку 1."""

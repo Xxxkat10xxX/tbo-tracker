@@ -16,6 +16,7 @@ function droneTelemetryHTML(d) {
   return `<div class="tl-grid">
     ${cell("Режим", esc(t.mode || "—"))}${cell("Моторы", t.armed ? '<span class="c-bad">включены</span>' : "выключены")}
     ${cell("Высота", t.alt_rel != null ? `${num(t.alt_rel, 1)} м` : "—")}${cell("Скорость", t.speed != null ? `${num(t.speed, 1)} м/с` : "—")}
+    ${cell("Курс", t.heading != null ? `${num(((t.heading % 360) + 360) % 360, 0)}°` : "—")}
     ${cell("Батарея", bat)}${cell("GPS", t.sats != null || t.gps_fix != null ? `${t.gps_fix >= 3 ? "3D" : "нет фикс."} · ${t.sats ?? "—"} спутн.` : "—")}
     ${cell("До точки взлёта", t.home_dist_m != null ? `${num(t.home_dist_m, 0)} м` : "—")}${cell("Точка маршрута", t.wp_total ? `${t.wp_current || 0} из ${t.wp_total}` : "—")}
     ${cell("Время полёта", t.flight_time_s != null ? fmtDur(t.flight_time_s) : "—")}${cell("Обмен", d.telemetry_age_s != null ? `${num(d.telemetry_age_s, 0)} с назад` : "—")}
@@ -177,7 +178,7 @@ async function flightPanel(root, ctx) {
     if (s) s.onchange = () => { lid = +s.value; track = []; watch = null; result = null; refresh(); };
     $$("[data-fl]", root).forEach((b) => b.addEventListener("click", () => act(b.dataset.fl)));
     const t = d.telemetry || {};
-    if (t.lat != null && t.lon != null && (mine || DRONE_FLYING.includes(d.state))) ctx.drawLive(track, [t.lat, t.lon]);
+    if (t.lat != null && t.lon != null && (mine || DRONE_FLYING.includes(d.state))) ctx.drawLive(track, [t.lat, t.lon], t.heading);
   }
 
   async function act(kind) {

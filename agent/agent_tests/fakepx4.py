@@ -22,12 +22,17 @@ class FakePX4:
     TECHNIC_INDOOR = {"EKF2_GPS_CTRL": 0, "SYS_HAS_MAG": 0, "EKF2_MAG_TYPE": 5, "COM_DISARM_LAND": 2.0}
 
     def __init__(self, lat=55.75, lon=37.6, mission_plugin=True, technic=True, refuse_arm=None, speed=40.0, params=None,
-                 target_lag_s=0.0, hover_offset=0.0, tel_delay=None, map_spike_every=0):
+                 target_lag_s=0.0, hover_offset=0.0, tel_delay=None, map_spike_every=0, yaw=0.0, yaw_rate=720.0,
+                 set_yaw=True, heading=None):
         """target_lag_s — кадр navigate_target показывает прежнюю цель столько секунд после команды (TF отстаёт);
-        hover_offset — в OFFBOARD борт устанавливается в стольких метрах от цели (оптический поток «плавает»)."""
+        hover_offset — в OFFBOARD борт устанавливается в стольких метрах от цели (оптический поток «плавает»);
+        yaw — начальный курс в кадре map (ENU, рад), yaw_rate — скорость разворота, °/с; set_yaw=False — сервиса нет;
+        heading — компас (°), публикуется в /mavros/global_position/compass_hdg."""
         rospy.reset()
         self.lat0, self.lon0 = lat, lon
         self.x = self.y = self.z = 0.0
+        self.yaw, self.yaw_sp, self.yaw_rate, self.heading = float(yaw), float(yaw), math.radians(yaw_rate), heading
+        self.yaw_cmds = []                       # (служба, yaw в кадре map) — навигация с курсом и развороты
         self.armed, self.mode, self.landed_state = False, "POSCTL", 1
         self.items, self.seq, self.target = [], 0, None
         self.refuse_arm, self.speed = refuse_arm, speed
@@ -47,6 +52,8 @@ class FakePX4:
         if technic:
             s.update({"/get_telemetry": self._telemetry, "/navigate": self._navigate, "/navigate_global": self._navigate_global,
                       "/land": self._land, "/simple_offboard/release": self._release})
+            if set_yaw:
+                s["/set_yaw"] = self._set_yaw
         self.thread = threading.Thread(target=self._loop, daemon=True)
         self.thread.start()
 
@@ -115,19 +122,36 @@ class FakePX4:
                 return NS(x=float("nan"), y=float("nan"), z=float("nan"))
             return NS(x=tgt[0] - self.x, y=tgt[1] - self.y, z=tgt[2] - self.z)
         lat, lon = self.ll()
-        return NS(x=self.x, y=self.y, z=self.z, yaw=0.0, lat=lat, lon=lon, armed=self.armed, mode=self.mode, connected=True)
+        return NS(x=self.x, y=self.y, z=self.z, yaw=self.yaw, lat=lat, lon=lon, armed=self.armed, mode=self.mode, connected=True)
+
+    def _yaw_cmd(self, srv, yaw, frame_id, reset=False):
+        """Курс как у simple_offboard: конечный — новая цель (кадр map; body — от текущего), NaN — прежняя цель
+        (после арминга — текущий курс)."""
+        if math.isfinite(yaw):
+            self.yaw_sp = yaw + (self.yaw if frame_id == "body" else 0.0)
+            self.yaw_cmds.append((srv, round(math.degrees(self.yaw_sp), 1)))
+        elif reset:
+            self.yaw_sp = self.yaw
 
     def _navigate(self, x, y, z, yaw, speed, frame_id, auto_arm):
         self.calls.append(("navigate", frame_id, z, auto_arm))
+        reset = auto_arm and not (self.mode == "OFFBOARD" and self.armed)
         if auto_arm:
             self.mode, self.armed = "OFFBOARD", True
+        self._yaw_cmd("navigate", yaw, frame_id, reset)
         self._set_target((self.x + x, self.y + y, self.z + z) if frame_id == "body" else (x, y, z))
         return NS(success=True, message="")
 
     def _navigate_global(self, lat, lon, z, yaw, speed, frame_id, auto_arm):
         self.calls.append(("navigate_global", round(lat, 6), round(lon, 6), z, frame_id))
+        self._yaw_cmd("navigate_global", yaw, frame_id)
         tx, ty = self.xy(lat, lon)
         self._set_target((tx, ty, z))
+        return NS(success=True, message="")
+
+    def _set_yaw(self, yaw, frame_id):
+        self.calls.append(("set_yaw", frame_id))
+        self._yaw_cmd("set_yaw", yaw, frame_id)
         return NS(success=True, message="")
 
     def _land(self):
@@ -158,6 +182,8 @@ class FakePX4:
         if not self.armed:
             self.landed_state = 1
             return
+        err = (self.yaw_sp - self.yaw + math.pi) % (2 * math.pi) - math.pi
+        self.yaw += max(-self.yaw_rate * dt, min(self.yaw_rate * dt, err))
         if self.mode == "AUTO.MISSION" and self.seq < len(self.items):
             it = self.items[self.seq]
             if it.command == 22:
@@ -203,7 +229,10 @@ class FakePX4:
             p("/mavros/global_position/rel_alt", Float64(data=self.z))
             p("/mavros/local_position/velocity_local", TwistStamped(twist=NS(linear=NS(x=0.0, y=0.0, z=0.0))))
             p("/mavros/local_position/pose", PoseStamped(pose=NS(position=NS(x=self.x, y=self.y, z=self.z),
-                                                                 orientation=NS(x=0.0, y=0.0, z=0.0, w=1.0))))
+                                                                 orientation=NS(x=0.0, y=0.0, z=math.sin(self.yaw / 2),
+                                                                                w=math.cos(self.yaw / 2)))))
+            if self.heading is not None:
+                p("/mavros/global_position/compass_hdg", Float64(data=self.heading))
             p("/mavros/battery", BatteryState(percentage=0.9, voltage=24.6))
             p("/mavros/home_position/home", HomePosition(geo=NS(latitude=self.lat0, longitude=self.lon0)))
             p("/mavros/imu/data", Imu(linear_acceleration=NS(x=0.0, y=0.0, z=9.80665)))

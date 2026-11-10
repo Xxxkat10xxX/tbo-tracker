@@ -60,6 +60,41 @@ def test_preflight_checks():
     assert bad == {"GPS", "Заряд батареи"}
 
 
+def _sim_headings(mode):
+    """Шаги модели вручную (без потока): курс на отрезке 1 (на север), в конце удержания в точке 1 (курс 200°),
+    на отрезке 2 (на восток) и на возврате."""
+    v = SimVehicle(home=HOME)
+    p = make_plan(yaw_mode=mode, waypoints=[
+        {"lat": HOME[0] + 0.001, "lon": HOME[1], "alt": 25.0, "hold_s": 2.0, "yaw_deg": 200.0},
+        {"lat": HOME[0] + 0.001, "lon": HOME[1] + 0.0015, "alt": 30.0, "hold_s": 0.0}])
+    v.upload(p, {"lat": HOME[0], "lon": HOME[1]})
+    v.start_mission(p)
+    out = {}
+    for _ in range(int(600 / v.DT)):
+        v._step(v.DT)
+        if v.idx == 1 and v.y > 60 and v.hold_left is None:
+            out["leg1"] = v.hdg
+        if v.idx == 1 and v.hold_left is not None and v.hold_left < 0.1:
+            out["hold1"] = v.hdg
+        if v.idx == 2 and v.x > 60:
+            out["leg2"] = v.hdg
+        if v.mode == "AUTO.RTL" and v.x < 40:
+            out["rtl"] = v.hdg
+        if not v.armed:
+            break
+    return out
+
+
+def test_sim_heading_keep_and_route():
+    def near(a, b):
+        return abs((a - b + 180) % 360 - 180) < 2
+    keep = _sim_headings("keep")
+    assert near(keep["leg1"], 0) and near(keep["hold1"], 200) and near(keep["leg2"], 200) and near(keep["rtl"], 200), keep
+    route = _sim_headings("route")
+    assert near(route["leg1"], 0) and near(route["hold1"], 200) and near(route["leg2"], 90), route
+    assert 180 < route["rtl"] < 270                                         # к точке взлёта: на юго-запад
+
+
 def test_recorder_keeps_impact_peaks_and_builds_log():
     r = Recorder(0.0)
     snap = {"in_air": True, "lat": HOME[0], "lon": HOME[1], "alt_rel": 10.0, "speed": 5.0, "battery_pct": 90.0, "mode": "AUTO.MISSION"}

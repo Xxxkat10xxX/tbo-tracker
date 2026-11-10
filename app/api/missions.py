@@ -21,8 +21,8 @@ router = APIRouter(prefix="/api")
 def _mdict(m: Mission) -> dict:
     return {"id": m.id, "name": m.name, "aircraft_id": m.aircraft_id, "aircraft_name": m.aircraft.name if m.aircraft else None,
             "home_lat": m.home_lat, "home_lon": m.home_lon, "takeoff_alt": m.takeoff_alt, "speed_ms": m.speed_ms,
-            "return_home": m.return_home, "frame": m.frame or "global", "waypoints": m.waypoints or [], "notes": m.notes,
-            "updated_at": iso(m.updated_at)}
+            "return_home": m.return_home, "frame": m.frame or "global", "yaw_mode": m.yaw_mode or "keep",
+            "waypoints": m.waypoints or [], "notes": m.notes, "updated_at": iso(m.updated_at)}
 
 
 def _rdict(r: MissionRun, with_track=False) -> dict:

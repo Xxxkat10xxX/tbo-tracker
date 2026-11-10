@@ -37,7 +37,7 @@ async function pageMissions() {
 
 async function pageMission(id) {
   const [m, fleet] = await Promise.all([GET(`/api/missions/${id}`), aircraftList(true)]);
-  const st = { ...m, frame: m.frame || "global", waypoints: m.waypoints.map((w) => ({ ...w })) };
+  const st = { ...m, frame: m.frame || "global", yaw_mode: m.yaw_mode || "keep", waypoints: m.waypoints.map((w) => ({ ...w })) };
   const isLocal = () => st.frame === "local";
   const W = 760, H = 520;
   let view = null;         // {cx, cy, span} в метрах
@@ -78,6 +78,10 @@ async function pageMission(id) {
           <div class="row3"><div class="field ll-field"><label>Точка взлёта: широта</label><input type="number" step="0.000001" name="home_lat" value="${st.home_lat}"></div>
           <div class="field ll-field"><label>долгота</label><input type="number" step="0.000001" name="home_lon" value="${st.home_lon}"></div>
           <div class="field"><label>Высота взлёта, м</label><input type="number" min="0.5" max="500" step="0.1" name="takeoff_alt" value="${st.takeoff_alt}"></div></div>
+          <div class="field"><label>Курс дрона (поворот вокруг своей оси)</label><select name="yaw_mode">
+            <option value="keep" ${st.yaw_mode === "route" ? "" : "selected"}>Не менять — поворот только в точках с заданным курсом</option>
+            <option value="route" ${st.yaw_mode === "route" ? "selected" : ""}>По линии маршрута — нос по направлению полёта</option></select>
+            <div class="hint" id="yaw-hint"></div></div>
           <label><input type="checkbox" name="return_home" ${st.return_home ? "checked" : ""} class="w-auto"> <span id="rtl-label">Возврат в точку взлёта (RTL) и посадка</span></label></div>
         <div class="card"><div class="card-head"><h2>Точки маршрута</h2><span class="small muted" id="wp-count"></span></div><div id="wp-table"></div></div>
         <div class="card"><h2>Симулятор автопилота</h2>
@@ -91,7 +95,26 @@ async function pageMission(id) {
     <div class="card"><h2>История выполнения</h2><div id="runs"></div></div>`;
 
   const map = $("#map");
-  function drawMap(track, dronePos) {
+  // курс: градусы по часовой стрелке от верха карты (SVG rotate — тоже по часовой); пусто — не задан
+  const hasYaw = (w) => w.yaw_deg !== null && w.yaw_deg !== undefined && w.yaw_deg !== "";
+  const yaw360 = (v) => ((+v % 360) + 360) % 360;
+  function legMarks(list) {      // «по линии маршрута»: шевроны посередине отрезков — нос по направлению полёта
+    let out = "";
+    for (let k = 1; k < list.length; k++) {
+      const ax = sx(list[k - 1][0]), ay = sy(list[k - 1][1]), bx = sx(list[k][0]), by = sy(list[k][1]);
+      if (Math.hypot(bx - ax, by - ay) < 40) continue;
+      out += `<path class="leg-dir" transform="translate(${(ax + bx) / 2},${(ay + by) / 2}) rotate(${Math.atan2(bx - ax, ay - by) * 180 / Math.PI})" d="M-6,4 L0,-4 L6,4"/>`;
+    }
+    return out;
+  }
+  function wpMark(p, i) {
+    const w = st.waypoints[i], yaw = hasYaw(w) ? yaw360(w.yaw_deg) : null;
+    const below = yaw !== null && (yaw < 60 || yaw > 300);          // стрелка вверх — подпись под точкой
+    return `<g class="wp${i === selected ? " sel" : ""}" data-i="${i}" transform="translate(${sx(p[0])},${sy(p[1])})">
+      ${yaw !== null ? `<path class="wp-yaw" transform="rotate(${yaw})" d="M0,-27 L6.5,-14 L-6.5,-14 Z"/>` : ""}<circle r="13"/><text y="4.5">${i + 1}</text><title>Точка ${i + 1}${yaw !== null ? `, курс ${num(yaw, 0)}°` : ""}: щелчок — выбрать, правый щелчок — удалить</title>
+      <text class="wp-alt" y="${below ? 30 : -19}">${num(w.alt, 0)} м${+w.hold_s ? ` · ${w.hold_s} с` : ""}${yaw !== null ? ` · ${num(yaw, 0)}°` : ""}</text></g>`;
+  }
+  function drawMap(track, dronePos, heading) {
     const h = home();
     const step = [1, 2, 5, 10, 20, 50, 100, 200, 500, 1000, 2000].find((s) => view.span / s <= 12) || 5000;
     let g = "";
@@ -101,15 +124,15 @@ async function pageMission(id) {
     const pts = st.waypoints.map((w) => toXY(h, w.lat, w.lon));
     const path = [[0, 0]].concat(pts).map((p) => `${sx(p[0])},${sy(p[1])}`).join(" ");
     const back = pts.length && st.return_home ? `<line x1="${sx(pts[pts.length - 1][0])}" y1="${sy(pts[pts.length - 1][1])}" x2="${sx(0)}" y2="${sy(0)}" class="rtl"/>` : "";
+    const legs = st.yaw_mode === "route" && pts.length ? legMarks([[0, 0]].concat(pts, st.return_home ? [[0, 0]] : [])) : "";
     let tr = "";
     if (track && track.length) tr = `<polyline class="flown" points="${track.map((p) => { const q = toXY(h, p[1], p[2]); return `${sx(q[0])},${sy(q[1])}`; }).join(" ")}"/>`;
     const sb = step;
     map.innerHTML = `<rect width="${W}" height="${H}" class="map-bg"/>${g}
-      <polyline class="route" points="${path}"/>${back}${tr}
+      <polyline class="route" points="${path}"/>${back}${legs}${tr}
       <g class="home-g" transform="translate(${sx(0)},${sy(0)})"><rect x="-11" y="-11" width="22" height="22" rx="4" class="home"/><text y="5" class="home-t">${isLocal() ? "Т" : "H"}</text><title>Точка взлёта</title></g>
-      ${pts.map((p, i) => `<g class="wp${i === selected ? " sel" : ""}" data-i="${i}" transform="translate(${sx(p[0])},${sy(p[1])})"><circle r="13"/><text y="4.5">${i + 1}</text><title>Точка ${i + 1}: щелчок — выбрать, правый щелчок — удалить</title>
-        <text class="wp-alt" y="-19">${num(st.waypoints[i].alt, 0)} м${+st.waypoints[i].hold_s ? ` · ${st.waypoints[i].hold_s} с` : ""}</text></g>`).join("")}
-      ${dronePos ? `<g transform="translate(${dronePos[0]},${dronePos[1]})"><circle r="9" class="drone"/><circle r="17" class="drone-ring"/></g>` : ""}
+      ${pts.map(wpMark).join("")}
+      ${dronePos ? `<g transform="translate(${dronePos[0]},${dronePos[1]})">${heading != null ? `<path class="drone-hdg" transform="rotate(${yaw360(heading)})" d="M0,-31 L8,-14 L-8,-14 Z"><title>Курс ${num(yaw360(heading), 0)}°</title></path>` : ""}<circle r="9" class="drone"/><circle r="17" class="drone-ring"/></g>` : ""}
       <g transform="translate(${W - 30},34)"><path d="M0,-16 L7,6 L0,1 L-7,6 Z" class="north"/><text y="22" class="north-t">${isLocal() ? "нос" : "С"}</text></g>
       <g transform="translate(16,${H - 18})"><line x1="0" y1="0" x2="${sb / view.span * W}" y2="0" class="scale"/><text x="0" y="-6" class="scale-t">${sb >= 1000 ? sb / 1000 + " км" : sb + " м"}</text></g>`;
     bindDrag();
@@ -184,11 +207,12 @@ async function pageMission(id) {
     const loc = isLocal();
     // локально: «вперёд» — север на карте (нос дрона при взлёте), «вправо» — восток; хранятся те же широта/долгота
     const xy = (w) => toXY(home(), w.lat, w.lon);
-    $("#wp-table").innerHTML = st.waypoints.length ? `<table class="wp-table"><thead><tr><th>№</th>${loc ? "<th>Вперёд, м</th><th>Вправо, м</th>" : "<th>Широта</th><th>Долгота</th>"}<th>Высота, м</th><th>Удерж., с</th><th></th></tr></thead><tbody>
+    $("#wp-table").innerHTML = st.waypoints.length ? `<table class="wp-table"><thead><tr><th>№</th>${loc ? "<th>Вперёд, м</th><th>Вправо, м</th>" : "<th>Широта</th><th>Долгота</th>"}<th>Высота, м</th><th>Удерж., с</th><th title="Курс в точке: градусы по часовой стрелке от верха карты (${loc ? "0° — вперёд по носу при взлёте, 90° — вправо" : "0° — север, 90° — восток"}). Пусто — не задан">Курс, °</th><th></th></tr></thead><tbody>
       ${st.waypoints.map((w, i) => `<tr${i === selected ? ' class="sel"' : ""}><td>${i + 1}</td>${loc
         ? `<td><input data-k="fwd" data-i="${i}" type="number" step="0.1" value="${xy(w)[1].toFixed(2)}"></td><td><input data-k="right" data-i="${i}" type="number" step="0.1" value="${xy(w)[0].toFixed(2)}"></td>`
         : `<td><input data-k="lat" data-i="${i}" type="number" step="0.000001" value="${w.lat}"></td><td><input data-k="lon" data-i="${i}" type="number" step="0.000001" value="${w.lon}"></td>`}
         <td><input data-k="alt" data-i="${i}" type="number" min="${loc ? 0.5 : 2}" max="${loc ? 10 : 500}" step="${loc ? 0.1 : 1}" value="${w.alt}"></td><td><input data-k="hold_s" data-i="${i}" type="number" min="0" max="600" value="${w.hold_s || 0}"></td>
+        <td><input data-k="yaw_deg" data-i="${i}" type="number" min="0" max="359" step="1" placeholder="—" value="${hasYaw(w) ? w.yaw_deg : ""}"></td>
         <td><button class="sm danger" data-rm="${i}">✕</button></td></tr>`).join("")}</tbody></table>` : '<div class="empty-state">Щёлкните по карте, чтобы добавить первую точку</div>';
     $$("#wp-table input").forEach((inp) => inp.addEventListener("change", () => {
       const w = st.waypoints[+inp.dataset.i], k = inp.dataset.k;
@@ -196,6 +220,10 @@ async function pageMission(id) {
         const [e, n] = xy(w);
         const [lat, lon] = toLL(home(), k === "right" ? +inp.value : e, k === "fwd" ? +inp.value : n);
         w.lat = +lat.toFixed(8); w.lon = +lon.toFixed(8);
+      } else if (k === "yaw_deg") {                 // пусто — курс не задан; иначе 0–359,9° (−90 → 270, 360 → 0)
+        const y = inp.value.trim() === "" || !Number.isFinite(+inp.value) ? null : +yaw360(+inp.value).toFixed(1);
+        w.yaw_deg = y === null ? null : y % 360;
+        inp.value = w.yaw_deg === null ? "" : w.yaw_deg;
       } else w[k] = +inp.value;
       drawMap(); drawStats();
     }));
@@ -211,7 +239,8 @@ async function pageMission(id) {
     statsTimer = setTimeout(async () => {
       const my = ++statsSeq;
       const s = await POST("/api/missions/estimate", { home_lat: +st.home_lat, home_lon: +st.home_lon, takeoff_alt: +st.takeoff_alt, frame: st.frame,
-        speed_ms: +st.speed_ms, return_home: st.return_home, waypoints: st.waypoints.map((w) => ({ lat: +w.lat, lon: +w.lon, alt: +w.alt, hold_s: +w.hold_s || 0 })) })
+        speed_ms: +st.speed_ms, return_home: st.return_home, yaw_mode: st.yaw_mode,
+        waypoints: st.waypoints.map((w) => ({ lat: +w.lat, lon: +w.lon, alt: +w.alt, hold_s: +w.hold_s || 0, yaw_deg: hasYaw(w) ? +w.yaw_deg : null })) })
         .catch(() => null);
       if (!s || my !== statsSeq || !$("#m-stats")) return;
       $("#m-stats").innerHTML = `Маршрут <b>${isLocal() ? num(s.distance_m, 1) + " м" : num(s.distance_m / 1000, 2) + " км"}</b> · оценка времени <b>${fmtDur(s.duration_s)}</b> · точек ${s.waypoints} · макс. высота ${num(s.max_alt_m, 0)} м`;
@@ -226,6 +255,12 @@ async function pageMission(id) {
     $("#frame-hint").textContent = loc
       ? "Technic 6S в помещении: верх карты — вперёд по носу дрона в момент взлёта, вправо — вправо от дрона; высоты от точки взлёта до 3 м (дальномер VL53L1X — до 4 м), скорость до 2 м/с. Точки — в метрах в таблице или щелчком по карте."
       : "Точки по GPS: на борту нужен модуль GPS с компасом и GPS в навигации PX4 (параметры Technic по умолчанию — для полётов в помещении).";
+    const zero = loc ? "0° — вперёд по носу дрона при взлёте, 90° — вправо" : "0° — север, 90° — восток";
+    $("#yaw-hint").textContent = (st.yaw_mode === "route"
+      ? "Перед каждым отрезком дрон поворачивается носом к следующей точке (при повороте больше 30° — сначала на месте), на отрезках вертикально вверх-вниз курс не меняется. "
+      : "Дрон держит курс взлёта. ")
+      + `Курс в точке (столбец «Курс, °» в таблице; ${zero}): прилетев, дрон развернётся на месте, затем удержание`
+      + (st.yaw_mode === "route" ? ", а следующий отрезок — снова носом вперёд." : "; этот курс сохранится и дальше.");
   }
   function drawAll() { applyFrame(); drawMap(); drawTable(); drawStats(); }
   const readForm = () => {
@@ -234,8 +269,9 @@ async function pageMission(id) {
     st.home_lat = +val(r, "home_lat"); st.home_lon = +val(r, "home_lon"); st.takeoff_alt = +val(r, "takeoff_alt");
     st.return_home = $('[name="return_home"]').checked;
     st.frame = val(r, "frame") || "global";
+    st.yaw_mode = val(r, "yaw_mode") || "keep";
   };
-  ["speed_ms", "home_lat", "home_lon", "takeoff_alt", "return_home"].forEach((n) => $(`[name="${n}"]`).addEventListener("change", () => { readForm(); drawAll(); }));
+  ["speed_ms", "home_lat", "home_lon", "takeoff_alt", "return_home", "yaw_mode"].forEach((n) => $(`[name="${n}"]`).addEventListener("change", () => { readForm(); drawAll(); }));
   $('[name="frame"]').addEventListener("change", () => {
     readForm();
     if (isLocal() && +st.takeoff_alt > 3) { st.takeoff_alt = 1.5; $('[name="takeoff_alt"]').value = 1.5; }
@@ -246,7 +282,7 @@ async function pageMission(id) {
   async function save() {
     readForm();
     const body = { name: st.name, aircraft_id: st.aircraft_id, home_lat: st.home_lat, home_lon: st.home_lon, takeoff_alt: st.takeoff_alt,
-      speed_ms: st.speed_ms, return_home: st.return_home, frame: st.frame, waypoints: st.waypoints, notes: st.notes };
+      speed_ms: st.speed_ms, return_home: st.return_home, frame: st.frame, yaw_mode: st.yaw_mode, waypoints: st.waypoints, notes: st.notes };
     await api("PUT", `/api/missions/${id}`, body);
   }
   $("#m-save").onclick = async () => { try { await save(); toast("Миссия сохранена"); } catch (e) { toast(e.message, true); } };
@@ -326,7 +362,7 @@ async function pageMission(id) {
     onLink: (d) => video.update(d),
     missionId: +id, aircraftId: () => st.aircraft_id, waypoints: () => st.waypoints, returnHome: () => st.return_home, save,
     frame: () => st.frame,
-    drawLive: (track, ll) => { const q = toXY(home(), ll[0], ll[1]); drawMap(track, [sx(q[0]), sy(q[1])]); },
+    drawLive: (track, ll, heading) => { const q = toXY(home(), ll[0], ll[1]); drawMap(track, [sx(q[0]), sy(q[1])], heading); },
     onRunsChanged: (runs) => { drawRuns(runs); refreshNavCount(); AIRCRAFT_CACHE = null; },
   });
 }

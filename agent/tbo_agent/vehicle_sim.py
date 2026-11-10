@@ -5,6 +5,8 @@
 как программа на борту) → посадка 1,5 м/с → выключение моторов через 2 с.
 Команды AUTO.RTL и AUTO.LAND прерывают маршрут. Батарея расходуется, акселерометр — 1 g с вибрацией,
 касание — 1,4 g (touchdown_g); fault="collision@N" — удар 5,5 g на подлёте к точке N (проверка анализа датчиков на сервере).
+Курс (heading, от севера по часовой — он же «верх» карты миссии): yaw_mode=route — нос к цели отрезка, keep — не
+меняется; в точке с yaw_deg борт разворачивается к нему (90°/с), в режиме keep этот курс сохраняется дальше.
 Время модели ускоряется (time_scale): пятиминутный полёт при ×50 — около 6 с.
 """
 from __future__ import annotations
@@ -14,10 +16,16 @@ import random
 import threading
 import time
 
-from .plan import R_EARTH, frame_of, plan_hash, to_xy
+from .plan import R_EARTH, frame_of, plan_hash, to_xy, yaw_desc, yaw_mode
 from .vehicle import Vehicle, VehicleError
 
 CLIMB, DESCENT, VZ = 2.5, 1.5, 2.0
+YAW_RATE = 90.0                 # °/с
+
+
+def _bearing(dx: float, dy: float) -> float:
+    """Направление (восток dx, север dy) → курс от севера по часовой, °."""
+    return math.degrees(math.atan2(dx, dy)) % 360.0
 
 
 class SimVehicle(Vehicle):
@@ -35,6 +43,7 @@ class SimVehicle(Vehicle):
         self.armed, self.in_air, self.mode = False, False, "AUTO.LOITER"
         self.battery, self.sats = float(battery_pct), sats
         self.items, self.idx, self.hold_left, self.wp_reached = [], 0, None, 0
+        self.hdg, self._route, self._carry = 0.0, False, None     # курс; режим route; курс, который держать (keep)
         self._plan_hash, self._speed = None, 5.0
         self._rtl_alt = 5.0                               # RTL_RETURN_ALT; в помещении — 0 (текущая высота)
         self._fault_wp = int(fault.split("@")[1]) if fault and fault.startswith("collision@") else None
@@ -77,7 +86,7 @@ class SimVehicle(Vehicle):
             n_wp = sum(1 for it in self.items if it[0] == "wp")
             return {"connected": True, "armed": self.armed, "mode": self.mode, "in_air": self.in_air, "lat": lat, "lon": lon,
                     "alt_rel": round(self.z, 2), "speed": round(spd, 2), "climb": round(self.vz, 2),
-                    "heading": round(math.degrees(math.atan2(self.vx, self.vy)) % 360, 1) if spd > 0.3 else None,
+                    "heading": round(self.hdg % 360, 1),
                     "battery_pct": round(self.battery, 1), "battery_v": round(6 * (3.5 + 0.7 * self.battery / 100), 2),
                     "gps_fix": 3, "sats": self.sats, "home": self._origin, "local_ok": True, "wp_total": n_wp,
                     "wp_current": min(n_wp, self.wp_reached + 1) if self.armed else 0, "wp_reached": self.wp_reached,
@@ -102,12 +111,14 @@ class SimVehicle(Vehicle):
             items = [("takeoff", float(plan["takeoff_alt"]))]
             for w in plan["waypoints"]:
                 x, y = to_xy(lat0, lon0, float(w["lat"]), float(w["lon"]))
-                items.append(("wp", x, y, float(w["alt"]), float(w.get("hold_s") or 0)))
+                yaw = None if w.get("yaw_deg") is None else float(w["yaw_deg"]) % 360.0
+                items.append(("wp", x, y, float(w["alt"]), float(w.get("hold_s") or 0), yaw))
             items.append(("rtl",) if plan.get("return_home", True) else ("land",))
             self.items, self.idx, self.wp_reached = items, 0, 0
+            self._route, self._carry = yaw_mode(plan) == "route", None
             self._plan_hash, self._speed = plan_hash(plan), float(plan["speed_ms"])
             self._rtl_alt = 0.0 if frame_of(plan) == "local" else 5.0
-        return "миссия загружена в симулятор: %d элементов" % len(items)
+        return "миссия загружена в симулятор: %d элементов" % len(items) + yaw_desc(plan)
 
     def verify(self, plan: dict):
         if self._plan_hash != plan_hash(plan):
@@ -148,6 +159,15 @@ class SimVehicle(Vehicle):
                 self._step(self.DT)
             time.sleep(self.DT / self._scale)
 
+    def _yaw_to(self, want, dt):
+        if want is not None:
+            err = (want - self.hdg + 180.0) % 360.0 - 180.0
+            self.hdg = (self.hdg + max(-YAW_RATE * dt, min(YAW_RATE * dt, err))) % 360.0
+
+    def _leg_yaw(self, tx, ty, d, dt):
+        """Курс на отрезке: route — нос к цели (у самой цели — без изменений), keep — прежний."""
+        self._yaw_to(_bearing(tx - self.x, ty - self.y) if self._route and d > 1.0 else self._carry, dt)
+
     def _go(self, tx, ty, tz, speed, dt) -> float:
         dx, dy = tx - self.x, ty - self.y
         d = math.hypot(dx, dy)
@@ -178,7 +198,13 @@ class SimVehicle(Vehicle):
                     if self._fault_wp == n and not self._fault_done and d < 15:
                         self._fault_done, extra = True, 4.5
                         self._status = "Collision suspected (simulated fault)"
-                    if d < 1.0 and abs(self.z - it[3]) < 0.5:
+                    at_point = d < 1.0 and abs(self.z - it[3]) < 0.5
+                    if at_point and it[5] is not None:            # курс, заданный в точке
+                        self._yaw_to(it[5], dt)
+                        self._carry = self._carry if self._route else it[5]
+                    else:
+                        self._leg_yaw(it[1], it[2], d, dt)
+                    if at_point:
                         self.hold_left = it[4] if self.hold_left is None else self.hold_left - dt
                         if self.hold_left <= 0:
                             self.hold_left, self.wp_reached = None, n
@@ -188,7 +214,9 @@ class SimVehicle(Vehicle):
                 else:
                     self.mode = "AUTO.LAND"
             if self.mode == "AUTO.RTL":
-                if self._go(0.0, 0.0, max(self.z, self._rtl_alt), self._speed, dt) < 1.0:
+                d = self._go(0.0, 0.0, max(self.z, self._rtl_alt), self._speed, dt)
+                self._leg_yaw(0.0, 0.0, d, dt)
+                if d < 1.0:
                     self.mode = "AUTO.LAND"
             if self.mode == "AUTO.LAND":
                 self.vx = self.vy = 0.0

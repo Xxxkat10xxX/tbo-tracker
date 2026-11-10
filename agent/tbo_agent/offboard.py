@@ -8,6 +8,14 @@
 
 Перехват управления пилотом (режим на пульте ≠ OFFBOARD, например Stab по документации Skyris) немедленно
 останавливает программу без каких-либо переключений режимов.
+
+Курс (yaw) — по плану (plan.yaw_mode, yaw_deg точек):
+* keep  — курс не меняется: navigate с yaw=NaN, simple_offboard держит прежний курс;
+* route — нос по линии маршрута: курс отрезка программа считает сама (от борта к цели) и передаёт в navigate.
+  Встроенный yaw=+inf simple_offboard (TOWARDS) не годится: на вертикальном отрезке он разворачивает борт на 0°.
+  Если отрезок уходит в сторону больше чем на TURN_FIRST_DEG, борт сначала разворачивается на месте;
+* yaw_deg точки — после прилёта борт разворачивается к этому курсу на месте (set_yaw — точка удержания не
+  меняется), затем удержание. В режиме keep курс сохраняется и дальше, в route — следующий отрезок снова носом вперёд.
 """
 from __future__ import annotations
 
@@ -16,7 +24,7 @@ import math
 import threading
 import time
 
-from .plan import R_EARTH, dist_m, to_xy
+from .plan import R_EARTH, dist_m, to_xy, yaw_mode
 from .vehicle import VehicleError
 
 log = logging.getLogger("tbo_agent")
@@ -27,6 +35,10 @@ SETTLE_S = 3.0          # держится не дальше 2× допуска 
 TARGET_LAG_S = 1.0      # столько ждать признака новой цели в кадре navigate_target (TF может отставать от команды)
 TEL_TIMEOUT_S = 5.0     # один запрос get_telemetry (на загруженном Orange Pi бывает > 3 с)
 TEL_LOST_S = 15.0       # без единого ответа телеметрии столько секунд — сбой (одна задержка — не повод садиться)
+YAW_TOL_DEG = 10.0      # курс набран: отклонение не больше (2 отсчёта подряд)
+YAW_TIMEOUT_S = 15.0    # не развернулся за это время — предупреждение и полёт дальше: курс — не повод садиться
+TURN_FIRST_DEG = 30.0   # route: отрезок уходит в сторону сильнее — сначала разворот на месте, затем полёт
+ROUTE_MIN_LEG_M = 0.3   # route: отрезок короче (по горизонтали, но не меньше 2× допуска) — курс не меняется
 
 
 class Stop(Exception):
@@ -54,6 +66,20 @@ def body_to_ll(lat0: float, lon0: float, fwd: float, left: float):
     """Условные широта/долгота для карты tbo-tracker: вокруг точки взлёта миссии."""
     north, east = fwd, -left
     return (lat0 + math.degrees(north / R_EARTH), lon0 + math.degrees(east / (R_EARTH * math.cos(math.radians(lat0)))))
+
+
+def wrap_pi(a: float) -> float:
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def heading_to_yaw(up_yaw: float, heading_deg: float) -> float:
+    """Курс плана (градусы по часовой стрелке от «верха» карты) → yaw кадра map (ENU: рад, против часовой от оси x).
+    up_yaw — «верх» карты в кадре map: локально — нос дрона при взлёте, по GPS — север (π/2)."""
+    return wrap_pi(up_yaw - math.radians(heading_deg))
+
+
+def yaw_to_heading(up_yaw: float, yaw: float) -> float:
+    return math.degrees(up_yaw - yaw) % 360.0
 
 
 def _fin(v):
@@ -191,6 +217,57 @@ class OffboardMixin:
             self._guard(ev)
             ev.wait(0.2)
 
+    # ---------------------------------------------------------------- курс
+    def _yaw_now(self):
+        """Курс борта в кадре map, рад: из /mavros/local_position/pose (без запроса к simple_offboard), иначе
+        get_telemetry; None — нет данных."""
+        pose = self._s.get("pose")
+        if pose and time.monotonic() - pose[4] < 1.0:
+            return pose[3]
+        try:
+            return _fin(getattr(self._tel("map", tries=1), "yaw", None))
+        except VehicleError:
+            return None
+
+    def _turn(self, ev, yaw: float, what: str):
+        """Развернуть борт на месте к курсу yaw (кадр map) и дождаться разворота. set_yaw не меняет точку удержания.
+        Отказ set_yaw или разворот дольше YAW_TIMEOUT_S — предупреждение в журнал агента и полёт дальше."""
+        try:
+            self._nav(self._set_yaw, 5, what, yaw=float(yaw), frame_id="map")
+        except VehicleError as e:
+            log.warning("%s — полёт продолжается без разворота", e)
+            return
+        start, run, err = time.monotonic(), 0, None
+        while True:
+            self._guard(ev)
+            cur = self._yaw_now()
+            if cur is not None:
+                err = abs(wrap_pi(yaw - cur))
+                run = run + 1 if err <= math.radians(YAW_TOL_DEG) else 0
+                if run >= 2:
+                    return
+            if time.monotonic() - start > YAW_TIMEOUT_S:
+                log.warning("%s: курс не набран за %.0f с (%s) — полёт продолжается", what, YAW_TIMEOUT_S,
+                            "нет данных о курсе" if err is None else f"отклонение {math.degrees(err):.0f}°")
+                return
+            time.sleep(0.2)
+
+    def _leg_yaw(self, ev, dx: float, dy: float, tol: float, what: str, turn: bool = True) -> float:
+        """Режим route: курс отрезка (dx, dy — от борта к цели в кадре map, м). Короткий отрезок — NaN (курс не
+        меняется). turn — сначала развернуться на месте, если отрезок уходит в сторону больше TURN_FIRST_DEG."""
+        if math.hypot(dx, dy) < max(ROUTE_MIN_LEG_M, 2 * tol):
+            return NAN
+        yaw = math.atan2(dy, dx)
+        cur = self._yaw_now()
+        if turn and cur is not None and abs(wrap_pi(yaw - cur)) > math.radians(TURN_FIRST_DEG):
+            self._turn(ev, yaw, "разворот: " + what)
+        return yaw
+
+    def _point_yaw(self, ev, w: dict, up_yaw: float, i: int):
+        """Курс, заданный в точке: развернуться после прилёта (до удержания)."""
+        if w.get("yaw_deg") is not None:
+            self._turn(ev, heading_to_yaw(up_yaw, float(w["yaw_deg"])), f"курс {float(w['yaw_deg']):.0f}° в точке {i}")
+
     def _takeoff(self, ev, alt: float):
         # цель взлёта — в кадре map (быстрый запрос); navigate_target на загруженном борту отвечает до секунд
         target = None
@@ -234,13 +311,20 @@ class OffboardMixin:
             self._phase = "mission"
             lat0, lon0 = self._s.get("lat") or plan["home"]["lat"], self._s.get("lon") or plan["home"]["lon"]
             speed = float(plan["speed_ms"])
+            route = yaw_mode(plan) == "route"
             for i, w in enumerate(plan["waypoints"], 1):
                 d = dist_m(lat0, lon0, w["lat"], w["lon"])
+                yaw = NAN
+                if route:                                    # кадр map по GPS: x — восток, y — север
+                    here = (self._s.get("lat"), self._s.get("lon"))
+                    east, north = to_xy(*(here if None not in here else (lat0, lon0)), float(w["lat"]), float(w["lon"]))
+                    yaw = self._leg_yaw(ev, east, north, self.tol, f"к точке {i}")
                 self._nav(self._navigate_global, 5, "полёт к точке %d (navigate_global)" % i, lat=float(w["lat"]),
-                          lon=float(w["lon"]), z=z0 + float(w["alt"]), yaw=NAN, speed=speed, frame_id="map", auto_arm=False)
+                          lon=float(w["lon"]), z=z0 + float(w["alt"]), yaw=yaw, speed=speed, frame_id="map", auto_arm=False)
                 self._wait_arrival(ev, d / speed * 2 + 60, self.tol, expect=d)
                 self._reached(i)
                 lat0, lon0 = w["lat"], w["lon"]
+                self._point_yaw(ev, w, math.pi / 2, i)        # «верх» карты по GPS — север
                 self._hold(ev, w)
             if plan.get("return_home", True):
                 self._call(self._release, 3, "остановка setpoint")
@@ -273,14 +357,19 @@ class OffboardMixin:
         self._local = {"x0": x0, "y0": y0, "z0": z0, "yaw0": yaw0,
                        "lat0": float(plan["home"]["lat"]), "lon0": float(plan["home"]["lon"]), "alt": float(plan["takeoff_alt"])}
 
-    def _goto_local(self, ev, fwd: float, left: float, alt: float, speed: float, what: str):
+    def _goto_local(self, ev, fwd: float, left: float, alt: float, speed: float, what: str, route: bool = False,
+                    turn: bool = True):
+        """route — нос по линии отрезка; turn — при большом повороте сначала развернуться на месте."""
         lc = self._local
         x, y = body_to_map(lc["x0"], lc["y0"], lc["yaw0"], fwd, left)
         z = lc["z0"] + float(alt)
         cur = self._tel("map")
         cx, cy, cz = _fin(cur.x), _fin(cur.y), _fin(cur.z)
         d = 0.0 if None in (cx, cy, cz) else math.hypot(math.hypot(x - cx, y - cy), z - cz)
-        self._nav(self._navigate, 5, what, x=x, y=y, z=z, yaw=NAN, speed=speed, frame_id="map", auto_arm=False)
+        yaw = NAN
+        if route and None not in (cx, cy):
+            yaw = self._leg_yaw(ev, x - cx, y - cy, self.tol_local, what, turn)
+        self._nav(self._navigate, 5, what, x=x, y=y, z=z, yaw=yaw, speed=speed, frame_id="map", auto_arm=False)
         lc["alt"] = float(alt)
         # прибытие — по своей цели в кадре map, а не по navigate_target (он может ещё показывать прежнюю цель)
         self._wait_arrival(ev, d / max(speed, 0.1) * 2 + 20, self.tol_local, dist=self._dist_map(x, y, z))
@@ -291,14 +380,16 @@ class OffboardMixin:
             self._takeoff(ev, plan["takeoff_alt"])
             self._phase = "mission"
             speed = float(plan["speed_ms"])
+            route = yaw_mode(plan) == "route"
             for i, w in enumerate(plan["waypoints"], 1):
                 fwd, left = plan_offsets(plan, w)
-                self._goto_local(ev, fwd, left, w["alt"], speed, "полёт к точке %d (navigate, кадр map)" % i)
+                self._goto_local(ev, fwd, left, w["alt"], speed, "полёт к точке %d (navigate, кадр map)" % i, route)
                 self._reached(i)
+                self._point_yaw(ev, w, self._local["yaw0"], i)    # «верх» карты — нос дрона при взлёте
                 self._hold(ev, w)
             if plan.get("return_home", True):
                 self._phase = "rtl"
-                self._goto_local(ev, 0.0, 0.0, self._local["alt"], speed, "возврат к точке взлёта (navigate)")
+                self._goto_local(ev, 0.0, 0.0, self._local["alt"], speed, "возврат к точке взлёта (navigate)", route)
             self._call(self._land_srv, 5, "посадка (land)")
             self._phase = "land"
         except Stop as e:
@@ -315,10 +406,12 @@ class OffboardMixin:
                     pass
 
     def _return_local(self, plan: dict, ev):
-        """Команда «Вернуть домой» в локальном полёте: к точке взлёта на текущей высоте, затем посадка."""
+        """Команда «Вернуть домой» в локальном полёте: к точке взлёта на текущей высоте, затем посадка.
+        В режиме route нос — к точке взлёта, но без остановки на разворот: команда оператора выполняется сразу."""
         try:
             self._phase = "rtl"
-            self._goto_local(ev, 0.0, 0.0, self._local["alt"], max(0.3, float(plan["speed_ms"])), "возврат к точке взлёта")
+            self._goto_local(ev, 0.0, 0.0, self._local["alt"], max(0.3, float(plan["speed_ms"])), "возврат к точке взлёта",
+                             route=yaw_mode(plan) == "route", turn=False)
             self._call(self._land_srv, 5, "посадка (land)")
             self._phase = "land"
         except Stop as e:
@@ -341,3 +434,10 @@ class OffboardMixin:
         fwd, left = map_to_body(lc["x0"], lc["y0"], lc["yaw0"], pose[0], pose[1])
         lat, lon = body_to_ll(lc["lat0"], lc["lon0"], fwd, left)
         return lat, lon, pose[2] - lc["z0"]
+
+    def local_heading(self):
+        """Курс для карты в локальном полёте: градусы по часовой стрелке от «верха» карты (нос при взлёте) или None."""
+        lc, pose = self._local, self._s.get("pose")
+        if not lc or not pose or time.monotonic() - pose[4] > 1.5:
+            return None
+        return round(yaw_to_heading(lc["yaw0"], pose[3]), 1)

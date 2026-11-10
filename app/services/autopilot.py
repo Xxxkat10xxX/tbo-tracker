@@ -29,6 +29,9 @@ IMU_HZ = 25
 CLIMB, DESCENT, ACCEL = 2.5, 1.5, 2.0     # м/с, м/с, м/с²
 ACCEPT_R = 3.0             # радиус принятия точки, м (по GPS)
 LOCAL_ACCEPT_R = 0.3       # в помещении (метры от точки взлёта): с 3 м все точки ближе 3 м к старту «достигались» сразу
+YAW_RATE = 45.0            # °/с — разворот для оценки времени (PX4 MPC_YAWRAUTO_MAX по умолчанию)
+TURN_FIRST_DEG = 30.0      # «по линии маршрута»: поворот больше — разворот на месте перед отрезком (как на борту)
+YAW_MODES = ("keep", "route")
 PHASES = {"preflight": "Предполётная проверка", "takeoff": "Взлёт", "mission": "Полёт по маршруту",
           "hold": "Удержание", "rtl": "Возврат домой", "land": "Посадка", "crash": "Аварийное завершение"}
 
@@ -47,6 +50,34 @@ def to_ll(lat0, lon0, x, y):
     return lat, lon
 
 
+def _turn(a: float, b: float) -> float:
+    """Угол поворота от курса a к курсу b, ° (0–180)."""
+    return abs((b - a + 180.0) % 360.0 - 180.0)
+
+
+def turns_s(m: dict) -> float:
+    """Оценка времени разворотов, с: «по линии маршрута» — на месте перед отрезком, уходящим в сторону больше
+    TURN_FIRST_DEG; курс в точке — от курса прилёта. Курс взлёта — «верх» карты (локально — нос дрона)."""
+    local = (m.get("frame") or "global") == "local"
+    route = m.get("yaw_mode") == "route"
+    min_leg = 0.5 if local else 3.0
+    pts = [(0.0, 0.0)] + [to_xy(m["home_lat"], m["home_lon"], float(w["lat"]), float(w["lon"])) for w in m["waypoints"]]
+    legs = list(zip(pts, pts[1:], m["waypoints"]))
+    if m.get("return_home", True) and len(pts) > 1:
+        legs.append((pts[-1], (0.0, 0.0), {}))
+    hdg, total = 0.0, 0.0
+    for a, b, w in legs:
+        if route and math.dist(a, b) >= min_leg:
+            want = math.degrees(math.atan2(b[0] - a[0], b[1] - a[1])) % 360.0
+            if _turn(hdg, want) > TURN_FIRST_DEG:
+                total += _turn(hdg, want) / YAW_RATE + 0.5
+            hdg = want
+        if w.get("yaw_deg") is not None:
+            total += _turn(hdg, float(w["yaw_deg"])) / YAW_RATE + 0.5
+            hdg = float(w["yaw_deg"]) % 360.0
+    return total
+
+
 def plan_stats(m: dict) -> dict:
     """Протяжённость и оценка времени маршрута (без ветра)."""
     pts = [(0.0, 0.0, 0.0)] + [(*to_xy(m["home_lat"], m["home_lon"], w["lat"], w["lon"]), float(w["alt"])) for w in m["waypoints"]]
@@ -57,7 +88,7 @@ def plan_stats(m: dict) -> dict:
         dist += math.dist(pts[-1][:2], (0, 0))
     first_alt = pts[1][2] if len(pts) > 1 else float(m.get("takeoff_alt") or 30)
     vert = first_alt / CLIMB + (pts[-1][2] if len(pts) > 1 else first_alt) / DESCENT
-    t = dist / max(1.0, float(m["speed_ms"])) * 1.08 + hold + vert + 6
+    t = dist / max(1.0, float(m["speed_ms"])) * 1.08 + hold + vert + 6 + turns_s(m)
     return {"distance_m": round(dist, 1), "duration_s": round(t), "waypoints": len(m["waypoints"]),
             "max_alt_m": max([p[2] for p in pts[1:]] or [first_alt])}
 
@@ -74,6 +105,8 @@ def validate(m: dict):
         raise DomainError("Добавьте хотя бы одну точку маршрута")
     if len(m["waypoints"]) > 200:
         raise DomainError("Не более 200 точек маршрута")
+    if (m.get("yaw_mode") or "keep") not in YAW_MODES:
+        raise DomainError("Курс дрона: «keep» (не менять) или «route» (по линии маршрута)")
     lo, hi = lim["speed"]
     if not (lo <= float(m["speed_ms"]) <= hi):
         raise DomainError(f"Крейсерская скорость: от {lo:g} до {hi:g} м/с" + (" (локальная навигация)" if local else ""))
@@ -88,6 +121,8 @@ def validate(m: dict):
                               + (" (локальная навигация)" if local else ""))
         if float(w.get("hold_s") or 0) < 0 or float(w.get("hold_s") or 0) > 600:
             raise DomainError(f"Точка {i}: удержание от 0 до 600 с")
+        if w.get("yaw_deg") is not None and not (0 <= float(w["yaw_deg"]) <= 360):
+            raise DomainError(f"Точка {i}: курс от 0 до 360°")
         d = math.dist((0, 0), to_xy(m["home_lat"], m["home_lon"], float(w["lat"]), float(w["lon"])))
         if d > lim["dist"]:
             raise DomainError(f"Точка {i}: {d:.0f} м от точки взлёта — больше {lim['dist']:g} м"
@@ -238,17 +273,18 @@ def flight_log(m: dict, sim: dict, aircraft_serial: str, end_at, run_tag: str) -
 def to_plan(m: dict, firmware: str = "ardupilot") -> dict:
     items, jid = [], 1
 
-    def item(cmd, lat, lon, alt, p1=0):
+    def item(cmd, lat, lon, alt, p1=0, yaw=None):
         nonlocal jid
         it = {"AMSLAltAboveTerrain": None, "Altitude": alt, "AltitudeMode": 1, "autoContinue": True, "command": cmd,
-              "doJumpId": jid, "frame": FRAME_REL_ALT, "params": [p1, 0, 0, None, lat, lon, alt], "type": "SimpleItem"}
+              "doJumpId": jid, "frame": FRAME_REL_ALT, "params": [p1, 0, 0, yaw, lat, lon, alt], "type": "SimpleItem"}
         jid += 1
         return it
     first = m["waypoints"][0]
     # высота взлёта миссии (а не первой точки): та же, что у симулятора и плана для борта
     items.append(item(CMD_TAKEOFF, m["home_lat"], m["home_lon"], float(m.get("takeoff_alt") or first["alt"])))
-    for w in m["waypoints"]:
-        items.append(item(CMD_WAYPOINT, float(w["lat"]), float(w["lon"]), float(w["alt"]), float(w.get("hold_s") or 0)))
+    for w in m["waypoints"]:                     # курс точки — param4 (° от севера); null — как настроено в автопилоте
+        yaw = None if w.get("yaw_deg") is None else float(w["yaw_deg"]) % 360.0
+        items.append(item(CMD_WAYPOINT, float(w["lat"]), float(w["lon"]), float(w["alt"]), float(w.get("hold_s") or 0), yaw))
     if m.get("return_home", True):
         it = item(CMD_RTL, 0, 0, 0)
         it["params"] = [0, 0, 0, 0, 0, 0, 0]
@@ -267,7 +303,8 @@ def to_waypoints(m: dict) -> str:
     lines.append(f"{n}\t0\t{FRAME_REL_ALT}\t{CMD_TAKEOFF}\t0\t0\t0\t0\t0.0000000\t0.0000000\t{takeoff:.6f}\t1")
     for w in m["waypoints"]:
         n += 1
-        lines.append(f"{n}\t0\t{FRAME_REL_ALT}\t{CMD_WAYPOINT}\t{float(w.get('hold_s') or 0):g}\t0\t0\t0\t"
+        yaw = 0.0 if w.get("yaw_deg") is None else float(w["yaw_deg"]) % 360.0      # param4 — курс точки
+        lines.append(f"{n}\t0\t{FRAME_REL_ALT}\t{CMD_WAYPOINT}\t{float(w.get('hold_s') or 0):g}\t0\t0\t{yaw:g}\t"
                      f"{float(w['lat']):.7f}\t{float(w['lon']):.7f}\t{float(w['alt']):.6f}\t1")
     if m.get("return_home", True):
         n += 1
@@ -306,12 +343,18 @@ def _parse_mission_file(content: bytes, filename: str) -> dict:
         home = (hp[0], hp[1])
         home_amsl = float(hp[2]) if len(hp) > 2 and hp[2] is not None else 0.0
         speed = mi.get("cruiseSpeed")
+        # курс точки — param4 (° от севера; null — не задан). У ArduPilot (firmwareType 3) и в .waypoints он не
+        # читается: Copter его не использует, и там 0 обычно означает «не задан», а не «на север»
+        yaw_ok = mi.get("firmwareType") != 3
         for it in mi.get("items", []):
             if it.get("type") != "SimpleItem":
                 continue
             cmd, p, frame = it.get("command"), it.get("params") or [], it.get("frame", FRAME_REL_ALT)
             if cmd == CMD_WAYPOINT and len(p) >= 7:
-                wps.append({"lat": float(p[4]), "lon": float(p[5]), "alt": rel(p[6], frame), "hold_s": float(p[0] or 0)})
+                w = {"lat": float(p[4]), "lon": float(p[5]), "alt": rel(p[6], frame), "hold_s": float(p[0] or 0)}
+                if yaw_ok and isinstance(p[3], (int, float)) and not isinstance(p[3], bool) and math.isfinite(p[3]):
+                    w["yaw_deg"] = round(float(p[3]) % 360.0, 1)
+                wps.append(w)
             elif cmd == CMD_TAKEOFF and len(p) >= 7 and p[6] is not None:
                 takeoff = rel(p[6], frame)
             elif cmd == CMD_RTL:

@@ -19,7 +19,7 @@ import time
 from collections import deque
 
 from .offboard import OffboardMixin
-from .plan import frame_of
+from .plan import frame_of, uses_yaw, yaw_desc, yaw_mode
 from .vehicle import Vehicle, VehicleError
 
 G = 9.80665
@@ -93,6 +93,7 @@ class RosVehicle(OffboardMixin, Vehicle):
         self._fly_thread, self._stop_fly = None, threading.Event()
         self._fly_error, self._phase, self._wp_reached = None, None, 0
         self._params, self._params_at, self._param_get = {}, 0.0, None
+        self._set_yaw = None                    # simple_offboard set_yaw: разворот на месте (курс в плане)
         self.technic = False
 
     def _call(self, fn, timeout: float, what: str, **kw):
@@ -175,6 +176,8 @@ class RosVehicle(OffboardMixin, Vehicle):
         self._navigate_global = sp("/navigate_global", tsrv.NavigateGlobal)
         self._land_srv = sp("/land", Trigger)
         self._release = sp("/simple_offboard/release", Trigger)
+        if hasattr(tsrv, "SetYaw") and self._has("/set_yaw", 1.0):
+            self._set_yaw = sp("/set_yaw", tsrv.SetYaw)
         self.technic = True
         return True
 
@@ -305,9 +308,11 @@ class RosVehicle(OffboardMixin, Vehicle):
             fix = 3 if s["gps_status"] >= 0 else 0
         n_wp = len((self._plan or {}).get("waypoints") or [])
         home = (self._local["lat0"], self._local["lon0"]) if lp else s.get("home")
+        # курс для карты: локально — от «верха» карты (нос при взлёте), по GPS — компас
+        heading = self.local_heading() if lp else s.get("heading")
         return {"connected": bool(s.get("connected")), "armed": armed, "mode": s.get("mode"), "in_air": in_air,
                 "lat": lp[0] if lp else s.get("lat"), "lon": lp[1] if lp else s.get("lon"), "alt_rel": alt,
-                "heading": s.get("heading"), "speed": s.get("speed"), "climb": s.get("climb"),
+                "heading": heading, "speed": s.get("speed"), "climb": s.get("climb"),
                 "battery_pct": s.get("battery_pct"), "battery_v": s.get("battery_v"), "gps_fix": fix, "sats": s.get("sats"),
                 "home": home, "local_ok": local_ok, "wp_total": n_wp, "wp_reached": reached,
                 "wp_current": min(n_wp, reached + 1) if armed and n_wp else 0, "status_text": self._last_text(),
@@ -387,14 +392,25 @@ class RosVehicle(OffboardMixin, Vehicle):
                         param3=float(p3), param4=float(p4), x_lat=float(lat), y_long=float(lon), z_alt=float(alt))
 
     def mission_items(self, plan: dict, position: dict) -> list:
-        """Взлёт (над текущей точкой) → скорость → точки (удержание) → возврат домой или посадка."""
+        """Взлёт (над текущей точкой) → скорость → точки (удержание) → возврат домой или посадка.
+
+        Курс точки — param4 (градусы от севера по часовой; NaN — по MPC_YAW_MODE, по умолчанию носом к точке):
+        route — NaN, кроме точек с заданным курсом; keep — курс борта на земле (компас), а после точки с заданным
+        курсом — он. PX4 набирает курс точки по пути к ней и ждёт его на точке (MIS_YAW_ERR, MIS_YAW_TMT)."""
         items = [self._wp(FRAME_GLOBAL_REL_ALT, CMD_TAKEOFF, lat=position["lat"], lon=position["lon"],
                           alt=plan["takeoff_alt"], current=True),
                  self._wp(FRAME_MISSION, CMD_CHANGE_SPEED, p1=1, p2=plan["speed_ms"], p3=-1, p4=0)]
         self._seq_to_wp = {}
+        route = yaw_mode(plan) == "route"
+        keep = None if route else _fin(self._s.get("heading"))
         for i, w in enumerate(plan["waypoints"], 1):
             self._seq_to_wp[len(items)] = i
-            items.append(self._wp(FRAME_GLOBAL_REL_ALT, CMD_WAYPOINT, p1=w.get("hold_s") or 0, lat=w["lat"], lon=w["lon"], alt=w["alt"]))
+            yaw = NAN if keep is None else keep
+            if w.get("yaw_deg") is not None:
+                yaw = float(w["yaw_deg"]) % 360.0
+                keep = None if route else yaw
+            items.append(self._wp(FRAME_GLOBAL_REL_ALT, CMD_WAYPOINT, p1=w.get("hold_s") or 0, p4=yaw,
+                                  lat=w["lat"], lon=w["lon"], alt=w["alt"]))
         if plan.get("return_home", True):
             items.append(self._wp(FRAME_MISSION, CMD_RTL, p4=0))
         else:
@@ -439,16 +455,19 @@ class RosVehicle(OffboardMixin, Vehicle):
         self._plan, self._local = plan, None
         with self._lock:
             self._wp_reached = 0
+        if self._program(plan) and uses_yaw(plan) and self._set_yaw is None:
+            raise VehicleError("в миссии задан курс, а у simple_offboard нет сервиса set_yaw (разворот на месте) — "
+                               "обновите ПО Technic или уберите курс из миссии")
         if frame_of(plan) == "local":
             if not self.technic:
                 raise VehicleError("для локальной миссии нужен simple_offboard Technic (служба technic)")
             if not self._s.get("connected"):
                 raise VehicleError("нет связи с полётным контроллером")
-            return "план принят: локальная навигация (OFFBOARD, кадр map, метры от точки взлёта)"
+            return "план принят: локальная навигация (OFFBOARD, кадр map, метры от точки взлёта)" + yaw_desc(plan)
         if self.executor == "offboard":
             if not self._s.get("connected"):
                 raise VehicleError("нет связи с полётным контроллером")
-            return "план принят: полёт программой на борту (OFFBOARD, simple_offboard Technic)"
+            return "план принят: полёт программой на борту (OFFBOARD, simple_offboard Technic)" + yaw_desc(plan)
         self._items = self.mission_items(plan, position)
         r = call(self._clear_srv, 15, "очистка миссии в контроллере")
         if not getattr(r, "success", False):
@@ -458,8 +477,9 @@ class RosVehicle(OffboardMixin, Vehicle):
             raise VehicleError("контроллер принял %s из %d элементов миссии%s"
                                % (getattr(r, "wp_transfered", 0), len(self._items), self._why()))
         self._check_fc()
-        return "миссия загружена в PX4 и сверена: взлёт, %d точек, %s" % (
-            len(plan["waypoints"]), "возврат домой" if plan.get("return_home", True) else "посадка в последней точке")
+        return "миссия загружена в PX4 и сверена: взлёт, %d точек, %s%s" % (
+            len(plan["waypoints"]), "возврат домой" if plan.get("return_home", True) else "посадка в последней точке",
+            yaw_desc(plan))
 
     def verify(self, plan: dict):
         if not self._program(plan):

@@ -422,6 +422,37 @@ def test_mission_crud_validation_and_export_roundtrip(client):
     assert client.delete(f"/api/missions/{m['id']}").status_code == 200
 
 
+def test_mission_heading_estimate_and_qgc_files(client):
+    """Курс дрона: режим «по линии маршрута» и курс в точке хранятся в миссии, развороты входят в оценку времени,
+    курс точки — param4 в файлах QGroundControl (читается из .plan PX4, но не из ArduPilot и .waypoints)."""
+    body = {"name": "Курс", "home_lat": 55.0, "home_lon": 37.0, "takeoff_alt": 20, "speed_ms": 6, "return_home": True,
+            "waypoints": [{"lat": 55.001, "lon": 37.0, "alt": 25, "hold_s": 0, "yaw_deg": 90},
+                          {"lat": 55.001, "lon": 37.002, "alt": 30, "hold_s": 0}]}
+    plain = dict(body, waypoints=[dict(w, yaw_deg=None) for w in body["waypoints"]])
+
+    def est(b):
+        return client.post("/api/missions/estimate", json=b).json()["duration_s"]
+    assert est(plain) < est(body) < est(dict(body, yaw_mode="route"))       # развороты: в точке; ещё и перед отрезками
+    assert client.post("/api/missions", json=dict(body, yaw_mode="spin")).status_code == 422
+    assert client.post("/api/missions", json=dict(plain, waypoints=[dict(body["waypoints"][0], yaw_deg=-5)])).status_code == 422
+    m = client.post("/api/missions", json=dict(body, yaw_mode="route")).json()
+    assert m["yaw_mode"] == "route" and m["waypoints"][0]["yaw_deg"] == 90 and m["waypoints"][1]["yaw_deg"] is None
+    old = client.post("/api/missions", json=plain).json()
+    assert old["yaw_mode"] == "keep"                                          # по умолчанию — курс не меняется
+    px4 = client.get(f"/api/missions/{m['id']}/export?fmt=plan&firmware=px4")
+    wps = [i for i in px4.json()["mission"]["items"] if i["command"] == 16]
+    assert wps[0]["params"][3] == 90 and wps[1]["params"][3] is None
+    back = client.post("/api/missions/import", files={"file": ("m.plan", px4.content)}).json()
+    assert back["waypoints"][0]["yaw_deg"] == 90 and back["waypoints"][1]["yaw_deg"] is None
+    ardu = client.get(f"/api/missions/{m['id']}/export?fmt=plan&firmware=ardupilot")
+    back = client.post("/api/missions/import", files={"file": ("a.plan", ardu.content)}).json()
+    assert all(w["yaw_deg"] is None for w in back["waypoints"])               # ArduPilot: param4 не читается
+    wpl = client.get(f"/api/missions/{m['id']}/export?fmt=waypoints").text
+    assert "\t90\t55.0010000\t37.0000000\t" in wpl
+    back = client.post("/api/missions/import", files={"file": ("m.waypoints", wpl.encode())}).json()
+    assert all(w["yaw_deg"] is None for w in back["waypoints"])
+
+
 # ------------------------------------------------------------------ К7: уведомления, К10: доска перестановки
 def test_notifications_three_categories(client):
     d = client.get("/api/notifications").json()

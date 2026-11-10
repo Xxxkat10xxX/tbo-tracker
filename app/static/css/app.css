@@ -245,6 +245,10 @@ table.spec-edit td{padding:3px 4px;border:0}
 #map .wp.sel > text:not(.wp-alt) { fill: #fff; }
 #map .home-g { cursor: default; }
 .wp-table tr.sel td { background: rgba(47, 111, 237, 0.08); }
+#map .wp-yaw { fill: var(--accent); stroke: #fff; stroke-width: 1.5; }
+#map .wp.sel .wp-yaw { fill: #1f2a3d; }
+#map .leg-dir { fill: none; stroke: var(--accent); stroke-width: 2.5; stroke-linecap: round; stroke-linejoin: round; }
+#map .drone-hdg { fill: #e0682b; stroke: #fff; stroke-width: 1.5; }
 #map .drone { fill: #e0682b; stroke: #fff; stroke-width: 2; }
 #map .drone-ring { fill: none; stroke: #e0682b; stroke-opacity: .35; stroke-width: 2; }
 #map .north { fill: #1f2a3d; }

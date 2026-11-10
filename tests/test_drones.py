@@ -238,12 +238,47 @@ def test_local_mission_rules(client):
         assert plan["frame"] == "local" and plan["limits"]["max_alt_m"] == 3 and plan["limits"]["max_speed_ms"] == 2.0
 
 
+def test_mission_heading_plan_and_old_agent(client):
+    """Курс дрона уходит в план («по линии маршрута», курс в точке). Агенту без поддержки курса такой план не
+    отправляется — он молча летел бы без курса; миссия без курса — тот же план, что прежде, для агента любой версии."""
+    a = next(x for x in client.get("/api/aircraft").json() if x["serial"] == "TBT-M4-001")
+    plain = local_mission(client, a["id"]).json()
+    wps = [dict(w) for w in plain["waypoints"]]
+    wps[1]["yaw_deg"] = 90
+    yaw = local_mission(client, a["id"], yaw_mode="route", waypoints=wps).json()
+    assert yaw["yaw_mode"] == "route" and yaw["waypoints"][1]["yaw_deg"] == 90 and yaw["waypoints"][0]["yaw_deg"] is None
+    assert local_mission(client, a["id"], waypoints=[dict(wps[0], yaw_deg=400)]).status_code == 422
+
+    def next_plan(dev):
+        for _ in range(5):
+            c = dev.get("/api/agent/commands?wait=0").json()["command"]
+            if c and c["kind"] == "prepare":
+                return c["payload"]["plan"]
+    _, lid, token = link_for(client)
+    with TestClient(app) as dev:
+        dev.headers["Authorization"] = "Bearer " + token
+        dev.post("/api/agent/hello", json={"agent_version": "1.0.0", "executor": "offboard"})      # прежний агент
+        dev.post("/api/agent/state", json={"state": "idle"})
+        r = client.post(f"/api/drones/{lid}/prepare", json={"mission_id": yaw["id"]})
+        assert r.status_code == 400 and "не поддерживает курс" in r.json()["detail"] and "1.0.0" in r.json()["detail"]
+        assert client.post(f"/api/drones/{lid}/prepare", json={"mission_id": plain["id"]}).status_code == 200
+        plan = next_plan(dev)
+        assert "yaw_mode" not in plan and all("yaw_deg" not in w for w in plan["waypoints"])         # как у прежних версий
+        assert client.post(f"/api/drones/{lid}/cancel").status_code == 200
+        dev.post("/api/agent/hello", json={"agent_version": "1.1.0", "executor": "offboard", "features": ["yaw"]})
+        assert get(client, lid)["agent"]["features"] == ["yaw"]
+        assert client.post(f"/api/drones/{lid}/prepare", json={"mission_id": yaw["id"]}).status_code == 200
+        plan = next_plan(dev)
+        assert plan["yaw_mode"] == "route" and "yaw_deg" not in plan["waypoints"][0] and plan["waypoints"][1]["yaw_deg"] == 90.0
+
+
 def test_local_flight_via_agent(client, live, tmp_path):
     a, lid, token = link_for(client)
-    mid = local_mission(client, a["id"]).json()["id"]
+    mid = local_mission(client, a["id"], yaw_mode="route").json()["id"]          # нос по линии маршрута
     ag, v = start_agent(live, token, tmp_path / "ag")
     try:
         assert wait(lambda: get(client, lid)["state"] == "idle")
+        assert "yaw" in get(client, lid)["agent"]["features"]                    # агент сообщил, что умеет курс
         assert client.post(f"/api/drones/{lid}/prepare", json={"mission_id": mid}).status_code == 200
         d = wait(lambda: (lambda x: x if x["run"] and x["run"]["status"] == "ready" else None)(get(client, lid)), 20)
         assert d and any(c["name"].startswith("Локальная позиция") and c["ok"] for c in d["checks"])
