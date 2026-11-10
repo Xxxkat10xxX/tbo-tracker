@@ -52,7 +52,8 @@ class Outbox:
         dst = os.path.join(os.path.dirname(self.path), folder)
         os.makedirs(dst, mode=0o700, exist_ok=True)
         os.replace(os.path.join(self.path, name), os.path.join(dst, name))
-        old = sorted(os.listdir(dst))[:-30]
+        # хранить 30 последних по времени (по имени «run-10» шло бы раньше «run-9» — удалялись бы свежие журналы)
+        old = sorted(os.listdir(dst), key=lambda f: os.path.getmtime(os.path.join(dst, f)))[:-30]
         for f in old:
             os.unlink(os.path.join(dst, f))
 
@@ -203,6 +204,17 @@ class Agent:
                 return False, "борт занят: %s" % self.state
             self._set("preparing", "проверка плана и борта", run_id=run_id, plan=None, checks=[])
         try:
+            return self._prepare_steps(plan, run_id)
+        except Exception as e:  # noqa: BLE001 — сбой вне ожидаемых (ROS, неверный план): не оставлять «подготовку» навсегда
+            try:
+                self.v.clear()
+            except Exception:  # noqa: BLE001
+                pass
+            self._set("idle", "подготовка прервана: %s" % e, run_id=None, plan=None, checks=[])
+            raise
+
+    def _prepare_steps(self, plan, run_id):
+        try:
             limits = self._limits(plan)
             validate(plan, self.serial, limits)
             if plan.get("run_id") != run_id:
@@ -253,7 +265,7 @@ class Agent:
         self._set("starting", "включение моторов")
         try:
             desc = self.v.start_mission(plan)
-        except VehicleError as e:
+        except Exception as e:  # noqa: BLE001 — любой сбой: моторы не включились — снова «готов»; включились — следим
             if not self.v.snapshot().get("armed"):
                 self.recorder = None
                 self._set("ready", "старт не выполнен: %s" % e)

@@ -113,3 +113,15 @@ def test_agent_log_with_odd_sensor_values_is_accepted():
         "imu": {"rate_hz": 0, "t0_s": -100, "accel_g": [1.0, None, 1.0]},
         "events": [{"type": "something-new", "t_s": -5, "peak_g": 900}]}})
     assert log.flight.imu.accel_g[1] is None and log.flight.events[0].peak_g == 900
+
+
+def test_agent_log_with_nan_samples_is_accepted():
+    from app.api.agent import LogIn
+    log = LogIn.model_validate_json('{"status": "completed", "flight": {"start": "2026-10-07T08:00:00Z", "end": "2026-10-07T08:10:00Z",'
+                                    '"imu": {"rate_hz": 25, "accel_g": [1.0, NaN, Infinity, 1.0]},'
+                                    '"events": [{"type": "fall", "t_s": 1, "peak_g": NaN}]}}')
+    assert len(log.flight.imu.accel_g) == 4
+    # трек (только для карты) и свободный итог: сбойные значения не отклоняют журнал — полёт учитывается
+    log = LogIn.model_validate_json('{"status": "completed", "track": [[NaN, 54.9, 38.2, 10, 5, "mission"], '
+                                    '[1, 54.9, 38.2, 10, 5, "mission"]], "summary": {"min_voltage": NaN, "x": [Infinity]}}')
+    assert len(log.track) == 1 and log.summary == {"min_voltage": None, "x": [None]}

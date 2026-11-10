@@ -272,3 +272,22 @@ def test_restore_of_broken_or_inconsistent_backup_is_clear_and_harmless(client):
     r = patched("installations", js.dumps(inst + [dup]).encode())
     assert r.status_code == 400 and "не восстановлена" in r.json()["detail"]
     assert len(client.get("/api/flights?limit=2000").json()) == flights_before  # база прежняя
+
+
+def test_mission_files_keep_takeoff_alt_and_convert_amsl():
+    import json as js
+
+    from app.services.autopilot import parse_mission_file, to_plan, to_waypoints
+    m = {"name": "M", "home_lat": 55.0, "home_lon": 37.0, "takeoff_alt": 20.0, "speed_ms": 6.0, "return_home": True,
+         "waypoints": [{"lat": 55.001, "lon": 37.0, "alt": 35.0, "hold_s": 2}, {"lat": 55.001, "lon": 37.002, "alt": 40.0, "hold_s": 0}]}
+    for name, body in (("m.plan", js.dumps(to_plan(m, "px4")).encode()), ("m.waypoints", to_waypoints(m).encode())):
+        back = parse_mission_file(body, name)
+        assert back["takeoff_alt"] == 20.0, name                              # прежде — высота первой точки (35)
+        assert [w["alt"] for w in back["waypoints"]] == [35.0, 40.0], name
+    # точки в кадре 0 (над уровнем моря) — от высоты «дома»; кадр 3 — как есть
+    wpl = ("QGC WPL 110\n0\t1\t0\t16\t0\t0\t0\t0\t55.0\t37.0\t150.0\t1\n"
+           "1\t0\t0\t16\t0\t0\t0\t0\t55.001\t37.0\t180.0\t1\n2\t0\t3\t16\t0\t0\t0\t0\t55.001\t37.002\t40.0\t1\n")
+    assert [w["alt"] for w in parse_mission_file(wpl.encode(), "a.waypoints")["waypoints"]] == [30.0, 40.0]
+    plan = {"fileType": "Plan", "mission": {"plannedHomePosition": [55.0, 37.0, 150.0], "items": [
+        {"type": "SimpleItem", "command": 16, "frame": 0, "params": [0, 0, 0, None, 55.001, 37.0, 175.0]}]}}
+    assert parse_mission_file(js.dumps(plan).encode(), "b.plan")["waypoints"][0]["alt"] == 25.0

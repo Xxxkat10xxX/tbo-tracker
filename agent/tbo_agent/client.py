@@ -68,7 +68,7 @@ class Api:
         """Текущее время по часам сервера (unix, с)."""
         return time.time() + self.clock_offset
 
-    def call(self, method: str, path: str, body=None, timeout: float = None):
+    def call(self, method: str, path: str, body=None, timeout: float = None, sync_clock: bool = True):
         data = None if body is None else json.dumps(clean(body), allow_nan=False, ensure_ascii=False).encode("utf-8")
         req = urllib.request.Request(self.url + path, data=data, method=method, headers=self._headers)
         sent = time.time()
@@ -87,7 +87,9 @@ class Api:
             payload = json.loads(raw or b"null")
         except ValueError:
             raise ApiError(0, "сервер вернул не JSON") from None
-        if isinstance(payload, dict) and payload.get("server_time"):
+        # Сверка часов: середина «отправили — получили» ≈ момент ответа сервера, только если сервер ответил сразу.
+        # Долгий опрос команд ждёт до 8 с и ставит время в конце — по нему часы «уезжали» бы на секунды.
+        if sync_clock and isinstance(payload, dict) and payload.get("server_time"):
             try:
                 mid = (sent + time.time()) / 2
                 self.clock_offset = parse_iso(payload["server_time"]).timestamp() - mid
@@ -100,7 +102,7 @@ class Api:
         return self.call("POST", "/api/agent/hello", {"agent_version": VERSION, "executor": executor, "vehicle": vehicle})
 
     def next_command(self, wait: int = 8):
-        return self.call("GET", "/api/agent/commands?wait=%d" % wait, timeout=wait + self.timeout).get("command")
+        return self.call("GET", "/api/agent/commands?wait=%d" % wait, timeout=wait + self.timeout, sync_clock=False).get("command")
 
     def result(self, cid: int, ok: bool, message: str):
         return self.call("POST", "/api/agent/commands/%d/result" % cid, {"ok": bool(ok), "message": message[:500]})

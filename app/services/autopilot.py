@@ -23,6 +23,7 @@ from ..errors import DomainError
 R_EARTH = 6371000.0
 CMD_WAYPOINT, CMD_RTL, CMD_LAND, CMD_TAKEOFF = 16, 20, 21, 22
 FRAME_REL_ALT = 3          # MAV_FRAME_GLOBAL_RELATIVE_ALT
+FRAME_GLOBAL = 0           # MAV_FRAME_GLOBAL: высота над уровнем моря (AMSL) — при импорте пересчитывается от точки «дом»
 DT = 0.2                   # шаг интегрирования, с
 IMU_HZ = 25
 CLIMB, DESCENT, ACCEL = 2.5, 1.5, 2.0     # м/с, м/с, м/с²
@@ -235,7 +236,8 @@ def to_plan(m: dict, firmware: str = "ardupilot") -> dict:
         jid += 1
         return it
     first = m["waypoints"][0]
-    items.append(item(CMD_TAKEOFF, m["home_lat"], m["home_lon"], float(first["alt"])))
+    # высота взлёта миссии (а не первой точки): та же, что у симулятора и плана для борта
+    items.append(item(CMD_TAKEOFF, m["home_lat"], m["home_lon"], float(m.get("takeoff_alt") or first["alt"])))
     for w in m["waypoints"]:
         items.append(item(CMD_WAYPOINT, float(w["lat"]), float(w["lon"]), float(w["alt"]), float(w.get("hold_s") or 0)))
     if m.get("return_home", True):
@@ -252,7 +254,8 @@ def to_plan(m: dict, firmware: str = "ardupilot") -> dict:
 def to_waypoints(m: dict) -> str:
     lines = ["QGC WPL 110", f"0\t1\t0\t{CMD_WAYPOINT}\t0\t0\t0\t0\t{m['home_lat']:.7f}\t{m['home_lon']:.7f}\t0.000000\t1"]
     n = 1
-    lines.append(f"{n}\t0\t{FRAME_REL_ALT}\t{CMD_TAKEOFF}\t0\t0\t0\t0\t0.0000000\t0.0000000\t{float(m['waypoints'][0]['alt']):.6f}\t1")
+    takeoff = float(m.get("takeoff_alt") or m["waypoints"][0]["alt"])
+    lines.append(f"{n}\t0\t{FRAME_REL_ALT}\t{CMD_TAKEOFF}\t0\t0\t0\t0\t0.0000000\t0.0000000\t{takeoff:.6f}\t1")
     for w in m["waypoints"]:
         n += 1
         lines.append(f"{n}\t0\t{FRAME_REL_ALT}\t{CMD_WAYPOINT}\t{float(w.get('hold_s') or 0):g}\t0\t0\t0\t"
@@ -275,7 +278,11 @@ def parse_mission_file(content: bytes, filename: str) -> dict:
 
 def _parse_mission_file(content: bytes, filename: str) -> dict:
     text = content.decode("utf-8-sig", errors="replace").strip()
-    wps, home, rtl, speed = [], None, False, None
+    wps, home, rtl, speed, takeoff, home_amsl = [], None, False, None, None, 0.0
+
+    def rel(alt, frame) -> float:
+        """Высота над точкой взлёта: точки в кадре MAV_FRAME_GLOBAL (над уровнем моря) пересчитываются."""
+        return float(alt) - home_amsl if frame == FRAME_GLOBAL else float(alt)
     if text.startswith("{"):
         try:
             plan = json.loads(text)
@@ -288,13 +295,16 @@ def _parse_mission_file(content: bytes, filename: str) -> dict:
         if not isinstance(hp, list) or len(hp) < 2:
             hp = [None, None]
         home = (hp[0], hp[1])
+        home_amsl = float(hp[2]) if len(hp) > 2 and hp[2] is not None else 0.0
         speed = mi.get("cruiseSpeed")
         for it in mi.get("items", []):
             if it.get("type") != "SimpleItem":
                 continue
-            cmd, p = it.get("command"), it.get("params") or []
+            cmd, p, frame = it.get("command"), it.get("params") or [], it.get("frame", FRAME_REL_ALT)
             if cmd == CMD_WAYPOINT and len(p) >= 7:
-                wps.append({"lat": float(p[4]), "lon": float(p[5]), "alt": float(p[6]), "hold_s": float(p[0] or 0)})
+                wps.append({"lat": float(p[4]), "lon": float(p[5]), "alt": rel(p[6], frame), "hold_s": float(p[0] or 0)})
+            elif cmd == CMD_TAKEOFF and len(p) >= 7 and p[6] is not None:
+                takeoff = rel(p[6], frame)
             elif cmd == CMD_RTL:
                 rtl = True
     elif text.startswith("QGC WPL"):
@@ -302,11 +312,14 @@ def _parse_mission_file(content: bytes, filename: str) -> dict:
             c = line.split("\t") if "\t" in line else line.split()
             if len(c) < 12:
                 continue
-            cmd, p1, lat, lon, alt = int(float(c[3])), float(c[4]), float(c[8]), float(c[9]), float(c[10])
+            frame, cmd, p1 = int(float(c[2])), int(float(c[3])), float(c[4])
+            lat, lon, alt = float(c[8]), float(c[9]), float(c[10])
             if i == 0:
-                home = (lat, lon)
+                home, home_amsl = (lat, lon), alt          # строка 0 — «дом», высота над уровнем моря
             elif cmd == CMD_WAYPOINT:
-                wps.append({"lat": lat, "lon": lon, "alt": alt, "hold_s": p1})
+                wps.append({"lat": lat, "lon": lon, "alt": rel(alt, frame), "hold_s": p1})
+            elif cmd == CMD_TAKEOFF:
+                takeoff = rel(alt, frame)
             elif cmd == CMD_RTL:
                 rtl = True
     else:
@@ -317,4 +330,4 @@ def _parse_mission_file(content: bytes, filename: str) -> dict:
         home = (wps[0]["lat"], wps[0]["lon"])
     name = filename.rsplit(".", 1)[0] or "Миссия из файла"
     return {"name": name[:200], "home_lat": float(home[0]), "home_lon": float(home[1]), "return_home": rtl,
-            "speed_ms": float(speed or 8.0), "takeoff_alt": float(wps[0]["alt"]), "waypoints": wps}
+            "speed_ms": float(speed or 8.0), "takeoff_alt": float(takeoff if takeoff else wps[0]["alt"]), "waypoints": wps}

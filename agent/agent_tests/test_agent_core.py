@@ -251,3 +251,30 @@ def test_long_flight_track_is_thinned_not_lost():
     for i in range(recorder.TRACK_MAX + 10):
         r.sample(float(i), snap, [], "in_flight")
     assert len(r.track) <= recorder.TRACK_MAX and r.track[0][0] == 0.0
+
+
+def test_unexpected_vehicle_errors_do_not_leave_agent_stuck(rig):
+    """Исключение не из VehicleError (сбой ROS-сервиса и т. п.): прежде агент оставался «preparing»/«starting» навсегда."""
+    ag, api, v = rig
+    orig_upload, orig_start = v.upload, v.start_mission
+
+    def boom_upload(*a, **kw):
+        raise RuntimeError("rospy.ServiceException: transport error")
+    v.upload = boom_upload
+    p = make_plan(run_id=21)
+    api.active_run = 21
+    api.send("prepare", {"plan": p}, run_id=21, ttl=120)
+    assert wait(lambda: api.results and api.results[-1][1] is False)
+    assert wait(lambda: ag.state == "idle") and ag.run_id is None and ag.plan is None
+    v.upload = orig_upload                                  # следующая подготовка проходит
+    api.send("prepare", {"plan": p}, run_id=21, ttl=120)
+    assert wait(lambda: ag.state == "ready"), (ag.state, ag.detail, api.results[-3:])
+
+    def boom_start(plan):
+        raise RuntimeError("ошибка вне VehicleError")
+    v.start_mission = boom_start
+    n = len(api.results)
+    api.send("start", {"run_id": 21, "plan_hash": p["plan_hash"]}, run_id=21)
+    assert wait(lambda: len(api.results) > n and api.results[-1][1] is False)
+    assert ag.state == "ready" and ag.recorder is None       # моторы не включились — снова «готов», а не «запуск»
+    v.start_mission = orig_start

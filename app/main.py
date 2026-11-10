@@ -224,5 +224,5 @@ def health():
     return {"status": "ok"}
 
 
-if os.environ.get("TBO_LOG_LEVEL"):
-    logging.getLogger("tbo").setLevel(os.environ["TBO_LOG_LEVEL"].upper())
+if os.environ.get("TBO_LOG_LEVEL", "").strip().lower() in ("critical", "error", "warning", "info", "debug"):
+    logging.getLogger("tbo").setLevel(os.environ["TBO_LOG_LEVEL"].strip().upper())

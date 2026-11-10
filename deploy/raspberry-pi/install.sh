@@ -24,6 +24,7 @@ HTTPS=0
 ADMIN='admin'
 UPGRADE=0
 SKIP_APT=0
+EXPLICIT=0          # заданы ли параметры режима (--https/--port/--demo): без них настройки установленной системы не трогаем
 
 say()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
@@ -46,9 +47,9 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --https) HTTPS=1; shift ;;
-    --port) PORT=${2:?}; shift 2 ;;
-    --demo) DEMO=1; shift ;;
+    --https) HTTPS=1; EXPLICIT=1; shift ;;
+    --port) PORT=${2:?}; EXPLICIT=1; shift 2 ;;
+    --demo) DEMO=1; EXPLICIT=1; shift ;;
     --admin) ADMIN=${2:?}; shift 2 ;;
     --upgrade) UPGRADE=1; shift ;;
     --skip-apt) SKIP_APT=1; shift ;;
@@ -116,13 +117,16 @@ fi
 
 # ---------------------------------------------------------------- настройки (без паролей)
 HOSTN=$(hostname)
+# Повторный запуск без параметров режима — обновление: настройки (пределы бортов, TBO_ALLOWED_HOSTS, HTTPS…) сохраняются
+if [[ -f $ENV_FILE && $EXPLICIT -eq 0 ]]; then UPGRADE=1; fi
 if [[ $UPGRADE -eq 1 && -f $ENV_FILE ]]; then
   say "Настройки сохранены: $ENV_FILE"
   # старые версии: вход по общему паролю из файла настроек заменён учётными записями
   sed -i '/^TBO_AUTH_USER=/d; /^TBO_AUTH_PASSWORD=/d' "$ENV_FILE"
   sed -i 's/^TBO_AUTO_SEED=/TBO_DEMO_MODE=/' "$ENV_FILE"
 else
-  if [[ -f $ENV_FILE ]]; then cp -a "$ENV_FILE" "$ENV_FILE.bak.$(date +%Y%m%d%H%M%S)"; fi
+  OLD_ENV=""
+  if [[ -f $ENV_FILE ]]; then OLD_ENV="$ENV_FILE.bak.$(date +%Y%m%d%H%M%S)"; cp -a "$ENV_FILE" "$OLD_ENV"; fi
   if [[ $HTTPS -eq 1 ]]; then
     BIND=127.0.0.1; PORT=8000; PUBLIC="https://$HOSTN.local"; TRUSTED=127.0.0.1
   else
@@ -141,6 +145,10 @@ TBO_TRUSTED_PROXIES='$TRUSTED'
 TBO_SCHEDULER='1'
 TBO_LOG_LEVEL='warning'
 EOF
+  if [[ -n $OLD_ENV ]]; then     # свои настройки (не управляемые установщиком) переносятся из прежнего файла
+    grep -vE '^(TBO_HOST|TBO_PORT|TBO_DATA_DIR|TBO_DEMO_MODE|TBO_PUBLIC_URL|TBO_TRUSTED_PROXIES|TBO_SCHEDULER|TBO_LOG_LEVEL)=|^[[:space:]]*(#|$)' \
+      "$OLD_ENV" >>"$ENV_FILE" || true
+  fi
   chown root:"$SVC_USER" "$ENV_FILE"
   chmod 0640 "$ENV_FILE"
   umask 022

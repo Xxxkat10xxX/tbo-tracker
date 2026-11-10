@@ -7,12 +7,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from datetime import datetime
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.concurrency import run_in_threadpool
-from pydantic import Field, field_validator
+from pydantic import ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal, get_session
@@ -26,10 +27,27 @@ from ..timeutil import iso, parse_dt, utcnow
 router = APIRouter(prefix="/api/agent")
 
 
+def _finite(v):
+    """NaN/∞ в свободных полях — null: PostgreSQL (JSONB) их не принимает, и журнал полёта отклонился бы целиком."""
+    if isinstance(v, float) and not math.isfinite(v):
+        return None
+    if isinstance(v, dict):
+        return {k: _finite(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [_finite(x) for x in v]
+    return v
+
+
 def _small_dict(v: dict, limit: int = 4000) -> dict:
+    v = _finite(v)
     if len(json.dumps(v, ensure_ascii=False, default=str)) > limit:
         raise ValueError(f"слишком большой объект (более {limit} байт)")
     return v
+
+
+def _track_point_ok(p) -> bool:
+    return (isinstance(p, (list, tuple)) and len(p) == 6 and isinstance(p[5], str)
+            and all(isinstance(x, (int, float)) and not isinstance(x, bool) and math.isfinite(x) for x in p[:5]))
 
 
 class HelloIn(BaseModel):
@@ -90,12 +108,14 @@ class ResultIn(BaseModel):
 # Иначе один сбойный отсчёт отклонил бы журнал целиком: агент отложил бы его в rejected/, и полёт с наработкой
 # не попал бы в учёт (правило «некорректные данные датчиков не отменяют учёт полёта», LOG_FORMAT.md).
 class ImuIn(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=True)        # сбойный отсчёт NaN/∞ — пропуск в анализе, не 422
     rate_hz: float | None = None
     t0_s: float | None = 0
     accel_g: list[float | None] = Field(max_length=2_000_000)
 
 
 class EventIn(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=True)
     type: str = Field(max_length=100)
     t_s: float | None = None
     peak_g: float | None = None
@@ -115,6 +135,13 @@ class LogIn(BaseModel):
     track: list[tuple[float, float, float, float, float, Annotated[str, Field(max_length=20)]]] = \
         Field(default_factory=list, max_length=50_000)
     summary: dict = Field(default_factory=dict)
+
+    @field_validator("track", mode="before")
+    @classmethod
+    def drop_bad_points(cls, v):
+        """Трек — только для карты: точка с NaN/∞ или неверной формы отбрасывается, а не отклоняет журнал
+        (иначе агент отложил бы журнал в rejected/, и полёт с наработкой не попал бы в учёт)."""
+        return [p for p in v if _track_point_ok(p)] if isinstance(v, list) else v
 
     @field_validator("summary")
     @classmethod

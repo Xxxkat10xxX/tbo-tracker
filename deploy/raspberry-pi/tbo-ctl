@@ -181,7 +181,14 @@ case "$cmd" in
     rm -f "/etc/systemd/system/$SVC.service"; systemctl daemon-reload
     rm -rf "$APP_DIR"
     if [[ ${1:-} == --purge ]]; then
-      rm -rf "$(envget TBO_DATA_DIR)" "$ETC_DIR"; userdel "$SVC_USER" 2>/dev/null || true
+      data=$(envget TBO_DATA_DIR)
+      # удаляем только похожее на каталог данных: абсолютный путь не короче /var/x, не корень и не системный каталог
+      case "$data" in
+        /|/bin*|/boot*|/dev*|/etc|/home|/lib*|/opt|/proc*|/root|/run*|/sbin*|/sys*|/usr*|/var|/var/lib|"") die "TBO_DATA_DIR='$data' — не похоже на каталог данных tbo-tracker, удаление отменено" ;;
+        /*) ;;
+        *) die "TBO_DATA_DIR='$data' — не абсолютный путь, удаление отменено" ;;
+      esac
+      rm -rf -- "$data" "$ETC_DIR"; userdel "$SVC_USER" 2>/dev/null || true
       say "Удалено вместе с данными"
     else
       say "Сервис удалён. Данные сохранены в $(envget TBO_DATA_DIR), настройки — в $ETC_DIR"
