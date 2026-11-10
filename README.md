@@ -10,6 +10,8 @@
 
 **Документы проекта:**
 - [паспорт проекта](docs/PASSPORT.md);
+- [интеграция с БАС: интерфейсы и две конфигурации подключения](docs/INTEGRATION.md);
+- [актуальность и сравнение с аналогами](docs/MARKET.md);
 - [руководство инженера](docs/USER_GUIDE.md);
 - [методика испытаний](docs/TEST_METHODOLOGY.md) и [протоколы](docs/protocols/), прогон — `python scripts/run_acceptance.py`;
 - сравнение с учётом по формуляру — `python scripts/benchmark_vs_logbook.py`.

@@ -28,7 +28,7 @@ from app.services import autopilot, sensors  # noqa: E402
 
 TESTS = {
     1: ["test_autonomous_mission_flight_accrues_hours", "test_mission_crud_validation_and_export_roundtrip",
-        "test_mission_fault_detects_fall_and_preflight_blocks"],
+        "test_mission_fault_detects_fall_and_preflight_blocks", "test_drones"],
     2: ["test_component_passport_uid_specs_residual", "test_individual_resource_component"],
     3: ["test_sensor_detector_thresholds", "test_fall_from_log_triggers_inspection_and_counters",
         "test_mission_fault_detects_fall_and_preflight_blocks"],
@@ -57,10 +57,10 @@ TITLES = {
 }
 
 
-def run_pytest(names: list[str]) -> dict:
+def run_pytest(names: list[str], cwd: Path = ROOT, target: str | None = None) -> dict:
     t = time.perf_counter()
-    p = subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "-k", " or ".join(names)],
-                       cwd=ROOT, capture_output=True, text=True)
+    args = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"] + ([target] if target else []) + ["-k", " or ".join(names)]
+    p = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
     last = (p.stdout.strip().splitlines() or [""])[-1]
     passed = int(last.split(" passed")[0].split()[-1]) if " passed" in last else 0
     failed = int(last.split(" failed")[0].split()[-1]) if " failed" in last else 0
@@ -161,6 +161,7 @@ def main() -> int:
     br = bench.run(runs, args.seed)
     bs = bench.summary(br)
     full = run_pytest(["test_"])
+    agent = run_pytest(["test_"], ROOT / "agent", "agent_tests") if (ROOT / "agent" / "agent_tests").is_dir() else None
 
     # Характеристики, пороги, результат
     chars = [
@@ -183,7 +184,7 @@ def main() -> int:
         "date": started.isoformat(timespec="seconds"), "commit": git_rev(),
         "environment": {"python": platform.python_version(), "os": platform.platform(), "cpu": platform.processor() or platform.machine()},
         "items": {k: {"title": TITLES[k], **v} for k, v in items.items()},
-        "missions": mis, "detector": det, "benchmark_runs": br, "benchmark_summary": bs, "full_suite": full,
+        "missions": mis, "detector": det, "benchmark_runs": br, "benchmark_summary": bs, "full_suite": full, "agent_suite": agent,
         "characteristics": [dict(zip(["id", "item", "name", "unit", "threshold", "value", "ok"], c)) for c in chars],
     }
 
@@ -193,7 +194,7 @@ def main() -> int:
     (out / f"{stem}.json").write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     (out / f"{stem}.md").write_text(render(report, runs), encoding="utf-8")
     print(f"Протокол: docs/protocols/{stem}.md")
-    ok = all(v["ok"] for v in items.values()) and all(c[6] for c in chars) and full["ok"]
+    ok = all(v["ok"] for v in items.values()) and all(c[6] for c in chars) and full["ok"] and (agent is None or agent["ok"])
     print("ИТОГ:", "ПРОЙДЕНО" if ok else "ЕСТЬ ЗАМЕЧАНИЯ")
     return 0 if ok else 1
 
@@ -222,7 +223,11 @@ def render(r: dict, runs: int) -> str:
     for k, v in r["items"].items():
         L.append(f"| {k} | {v['title']} | {v['passed']} из {v['passed'] + v['failed']} | {v['seconds']} | {yes(v['ok'])} |")
     f = r["full_suite"]
-    L += ["", f"Полный набор автотестов: {f['summary']}.", "",
+    a = r.get("agent_suite")
+    L += ["", f"Полный набор автотестов сервера: {f['summary']}.", ""]
+    if a:
+        L += [f"Автотесты бортового агента (модель PX4/MAVROS и симулятор борта): {a['summary']}.", ""]
+    L += [
           "П. 1 на реальном борту проверяется лётным испытанием по разделу 5 методики; акт и видео — отдельно.", "",
           "## 3. Сравнение с учётом по формуляру борта", "",
           f"Модель: 6 бортов TBT-M4, 90 дней эксплуатации, случайные замены и перестановки узлов, {runs} повторов "
