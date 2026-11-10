@@ -100,7 +100,7 @@ function eventsTable(list) {
   return `<div class="table-wrap"><table><thead><tr><th>Когда</th><th>Событие</th><th class="num">Пиковая перегрузка</th><th>Источник</th><th>Полёт</th></tr></thead><tbody>
     ${list.map((e) => `<tr><td class="nowrap">${fmtDT(e.occurred_at)}</td><td><span class="badge ${EV_BADGE[e.kind]}">${esc(e.kind_label)}</span></td>
       <td class="num">${e.peak_g != null ? num(e.peak_g, 1) + " g" : "—"}</td><td class="small">${esc(e.details || e.source)}</td><td class="small">№${e.flight_id}</td></tr>`).join("")}</tbody></table></div>
-    <div class="hint">Падение — невесомость |a| &lt; 0,35 g не менее 0,2 с и затем удар ≥ 3 g (или запись оборвалась в невесомости — удар не записан); столкновение — удар ≥ 4 g без невесомости; отскоки в пределах 1 с — одно событие (анализ акселерометра ИНС/ПК).</div>`;
+    <div class="hint">Падение — невесомость |a| &lt; 0,35 g не менее 0,2 с и затем удар ≥ 3 g (или запись оборвалась в невесомости — удар не записан); столкновение — удар ≥ 4 g без невесомости, кроме касания земли при посадке (последние 8 с полёта, слабее 10 g); отскоки в пределах 1 с — одно событие (анализ акселерометра ИНС/ПК).</div>`;
 }
 
 function metricHTML(m) {

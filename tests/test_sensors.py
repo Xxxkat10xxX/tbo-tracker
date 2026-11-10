@@ -125,3 +125,28 @@ def test_agent_log_with_nan_samples_is_accepted():
     log = LogIn.model_validate_json('{"status": "completed", "track": [[NaN, 54.9, 38.2, 10, 5, "mission"], '
                                     '[1, 54.9, 38.2, 10, 5, "mission"]], "summary": {"min_voltage": NaN, "x": [Infinity]}}')
     assert len(log.track) == 1 and log.summary == {"min_voltage": None, "x": [None]}
+
+
+def test_landing_touchdown_is_not_collision():
+    """Касание земли при посадке и выключение моторов (конец полёта) — не столкновение; падение при посадке — падение."""
+    end = (T1 - T0).total_seconds()
+    hit = H + [5.0] + H                                                   # удар 5 g через 1 с от начала выборки
+    mid, _ = analyze_flight(T0, {"imu": {"rate_hz": 50, "t0_s": 600, "accel_g": hit}}, T1)
+    assert [(e["kind"], e["peak_g"]) for e in mid] == [("collision", 5.0)]                     # в полёте — столкновение
+    for t0 in (end - 6, end - 1, end + 3):                               # касание за 5 с до конца, в конце, после
+        evs, warns = analyze_flight(T0, {"imu": {"rate_hz": 50, "t0_s": t0, "accel_g": hit}}, T1)
+        assert evs == [] and not warns, t0
+    # запись агента: от взлёта до выключения моторов — касание 5,5 g чуть позже распознанной посадки (конец полёта)
+    rec = [1.0] * (50 * 60) + [1.0] * 25 + [5.5, 2.0] + [1.0] * 100
+    evs, _ = analyze_flight(T0, {"imu": {"rate_hz": 50, "t0_s": 0, "accel_g": rec}}, T0 + timedelta(seconds=60.4))
+    assert evs == []
+    # удар о землю сильнее 10 g — столкновение и при посадке
+    evs, _ = analyze_flight(T0, {"imu": {"rate_hz": 50, "t0_s": end - 2, "accel_g": H + [12.0] + H}}, T1)
+    assert [(e["kind"], e["peak_g"]) for e in evs] == [("collision", 12.0)] and "при посадке" in evs[0]["details"]
+    # падение при посадке (невесомость 0,4 с, затем удар) — падение
+    evs, _ = analyze_flight(T0, {"imu": {"rate_hz": 50, "t0_s": end - 3, "accel_g": H + [0.1] * 20 + [5.0] + H}}, T1)
+    assert [e["kind"] for e in evs] == ["fall"]
+    # событие бортового ПО «столкновение» при посадке учитывается: его отметил сам контроллер
+    evs, _ = analyze_flight(T0, {"imu": {"rate_hz": 50, "t0_s": end - 2, "accel_g": hit},
+                                 "events": [{"type": "collision", "t_s": end - 1, "peak_g": 5.0}]}, T1)
+    assert [(e["kind"], e["source"]) for e in evs] == [("collision", "log")]

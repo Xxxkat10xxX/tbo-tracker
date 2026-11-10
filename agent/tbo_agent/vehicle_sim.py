@@ -4,7 +4,7 @@
 скоростью → удержание → возврат домой (если в плане; PX4 набирает 5 м, локальная миссия — на текущей высоте,
 как программа на борту) → посадка 1,5 м/с → выключение моторов через 2 с.
 Команды AUTO.RTL и AUTO.LAND прерывают маршрут. Батарея расходуется, акселерометр — 1 g с вибрацией,
-касание — 1,4 g; fault="collision@N" — удар 5,5 g на подлёте к точке N (проверка анализа датчиков на сервере).
+касание — 1,4 g (touchdown_g); fault="collision@N" — удар 5,5 g на подлёте к точке N (проверка анализа датчиков на сервере).
 Время модели ускоряется (time_scale): пятиминутный полёт при ×50 — около 6 с.
 """
 from __future__ import annotations
@@ -24,7 +24,8 @@ class SimVehicle(Vehicle):
     executor = "sim"
     DT = 0.05
 
-    def __init__(self, home=None, time_scale: float = 1.0, battery_pct: float = 96.0, fault: str = None, sats: int = 14):
+    def __init__(self, home=None, time_scale: float = 1.0, battery_pct: float = 96.0, fault: str = None, sats: int = 14,
+                 touchdown_g: float = 1.4):
         self._lock = threading.Lock()
         self._scale = max(0.1, float(time_scale))
         self._t = 0.0
@@ -40,6 +41,7 @@ class SimVehicle(Vehicle):
         self._fault_done = False
         self._imu, self._imu_next = [], 0.0
         self._touch = False
+        self._touchdown_g = float(touchdown_g)             # перегрузка при касании земли
         self._disarm_at = None
         self._status = None
         self._stop = threading.Event()
@@ -196,7 +198,7 @@ class SimVehicle(Vehicle):
                 self.in_air = True
             if self.in_air and self.z <= 0.0:
                 self.in_air, self.vz = False, 0.0
-                self._touch, extra = True, max(extra, 0.4)
+                self._touch, extra = True, max(extra, self._touchdown_g - 1.0)
                 self._disarm_at = self._t + 2.0
                 self._status = "Landing detected"
             if self._disarm_at is not None and self._t >= self._disarm_at:

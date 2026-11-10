@@ -3,6 +3,7 @@
 План → проверки на борту → «готов» → старт → полёт → журнал → автоимпорт (наработка, датчики) и прерывание
 возвратом домой; разделение прав (наблюдатель, токен устройства, сессия пользователя, чужой полёт).
 """
+import json
 import socket
 import sys
 import threading
@@ -91,7 +92,7 @@ def get(client, lid):
 def test_real_flight_via_agent_is_imported(client, live, tmp_path):
     a, lid, token = link_for(client)
     mid = mission(client, a["id"])
-    ag, v = start_agent(live, token, tmp_path / "ag", fault="collision@2")
+    ag, v = start_agent(live, token, tmp_path / "ag", fault="collision@2", touchdown_g=5.5)   # жёсткое касание
     try:
         assert wait(lambda: get(client, lid)["state"] == "idle")
         d = get(client, lid)
@@ -114,7 +115,12 @@ def test_real_flight_via_agent_is_imported(client, live, tmp_path):
         with SessionLocal() as s:
             f = s.query(Flight).filter_by(external_id=f"{a['serial']}-R{run_id}").one()
             assert f.aircraft_id == a["id"] and 60 < (f.ended_at - f.started_at).total_seconds() < 300
+            # удар у точки 2; касание земли 5,5 g при посадке — не столкновение
             assert s.query(SensorEvent).filter_by(flight_id=f.id, kind="collision").count() == 1     # удар у точки 2
+            assert s.query(SensorEvent).filter_by(flight_id=f.id).count() == 1
+        sent = tmp_path / "ag" / "sent" / f"run-{run_id}.json"
+        assert wait(sent.exists, 10)
+        assert max(json.loads(sent.read_text("utf-8"))["flight"]["imu"]["accel_g"][-250:]) >= 5   # касание записано
         assert wait(lambda: get(client, lid)["state"] == "idle" and get(client, lid)["run"] is None, 10)
         kinds = {(c["kind"], c["status"]) for c in get(client, lid)["commands"]}
         assert {("prepare", "done"), ("start", "done")} <= kinds

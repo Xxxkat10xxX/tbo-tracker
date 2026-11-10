@@ -7,7 +7,10 @@
 * падение   — участок невесомости |a| < FREE_FALL_G длительностью ≥ FREE_FALL_MIN_S,
               за которым в течение IMPACT_WINDOW_S следует удар |a| ≥ FALL_IMPACT_G;
               запись, оборвавшаяся в невесомости (удар не записан: обрыв питания или связи), — тоже падение;
-* столкновение — удар |a| ≥ COLLISION_G без предшествующей невесомости.
+* столкновение — удар |a| ≥ COLLISION_G без предшествующей невесомости;
+* посадка — удар без невесомости в последние LANDING_WINDOW_S с полёта или после его окончания (касание земли,
+              выключение моторов) — не столкновение, если он слабее HARD_LANDING_G (сильнее — удар о землю,
+              столкновение). Падение при посадке (невесомость, затем удар) остаётся падением.
 
 Соседние срабатывания (от конца одного удара до начала следующего) ближе REFRACTORY_S — одно событие:
 отскоки при падении не считаются отдельными ударами. «Невесомость» дольше FREE_FALL_MAX_S — не падение
@@ -30,6 +33,9 @@ FALL_IMPACT_G = 3.0
 COLLISION_G = 4.0
 IMPACT_WINDOW_S = 1.5
 REFRACTORY_S = 1.0
+LANDING_WINDOW_S = 8.0     # конец полёта: снижение, касание, распознавание посадки контроллером (PX4: 1–3 с) и до
+                           # выключения моторов (COM_DISARM_LAND 2 с); всё после окончания полёта — тоже посадка
+HARD_LANDING_G = 10.0      # удар при посадке сильнее — уже не касание (обычно 1,5–6 g), а удар о землю
 PX4_FREEFALL_G = 2.0 / 9.80665   # свободное падение по PX4 (MulticopterLandDetector): удельная сила < 2 м/с²
 PX4_FREEFALL_S = 0.3             # … в течение 300 мс (FREEFALL_TRIGGER_TIME_US)
 LOG_MATCH_S = 2.0          # событие бортового ПО и найденное по акселерометру ближе 2 с — одно и то же событие
@@ -193,8 +199,17 @@ def _num(v, what: str) -> float:
     return x
 
 
-def _imu_events(imu) -> list[dict]:
-    """События по выборке акселерометра: [{"off": с от взлёта, "kind", "peak_g", "source", "details"}]."""
+def is_touchdown(ev: dict, off: float, landing_from: float | None) -> bool:
+    """Удар без невесомости в конце полёта слабее HARD_LANDING_G — касание земли при посадке, а не столкновение."""
+    return (landing_from is not None and ev["kind"] == "collision" and off >= landing_from
+            and ev["peak_g"] is not None and ev["peak_g"] < HARD_LANDING_G)
+
+
+def _imu_events(imu, landing_from: float | None = None) -> list[dict]:
+    """События по выборке акселерометра: [{"off": с от взлёта, "kind", "peak_g", "source", "details"}].
+
+    landing_from — с какого момента (с от начала полёта) идёт посадка: удары без невесомости слабее HARD_LANDING_G
+    после него — касание земли, не события."""
     if imu is None:
         return []
     if not isinstance(imu, dict):
@@ -219,9 +234,14 @@ def _imu_events(imu) -> list[dict]:
     base = f"анализ акселерометра, {rate:g} Гц" + (f"; отсчётов без значения: {skipped}" if skipped else "")
     out = []
     for ev in _detect(mags, rate):
+        off = t0 + ev["t"]
+        if is_touchdown(ev, off, landing_from):
+            continue
         details = base + ("; свободное падение до конца записи — удар не записан (обрыв питания или связи)"
                           if ev.get("unrecorded_impact") else "")
-        out.append({"off": t0 + ev["t"], "kind": ev["kind"], "peak_g": ev["peak_g"], "source": "imu", "details": details})
+        if landing_from is not None and ev["kind"] == "collision" and off >= landing_from:
+            details += f"; удар при посадке ≥ {HARD_LANDING_G:g} g — не касание, а удар о землю"
+        out.append({"off": off, "kind": ev["kind"], "peak_g": ev["peak_g"], "source": "imu", "details": details})
     return out
 
 
@@ -255,7 +275,8 @@ def analyze_flight(flight_start: datetime, raw: dict | None, flight_end: datetim
     не отменяет другие и не отменяет учёт полёта. Одно физическое событие не считается дважды:
     событие бортового ПО ближе LOG_MATCH_S к найденному по акселерометру объединяется с ним, а счётчик
     в журнале — это общее число событий своего вида за полёт (добавляются только недостающие).
-    Время события ограничивается интервалом полёта.
+    Время события ограничивается интервалом полёта. Удар без невесомости в последние LANDING_WINDOW_S с полёта
+    и после его окончания слабее HARD_LANDING_G — касание земли при посадке, не столкновение.
     """
     if not raw:
         return [], []
@@ -263,7 +284,7 @@ def analyze_flight(flight_start: datetime, raw: dict | None, flight_end: datetim
     warnings: list[str] = []
     found: list[dict] = []
     try:
-        found = _imu_events(raw.get("imu"))
+        found = _imu_events(raw.get("imu"), None if span is None else max(0.0, span - LANDING_WINDOW_S))
     except ValueError as e:
         warnings.append(str(e))
     try:
