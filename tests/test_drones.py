@@ -315,3 +315,56 @@ def test_flight_lost_in_air_can_be_closed_and_late_log_counts(client):
         with SessionLocal() as s:
             run = s.get(MissionRun, rid)
             assert run.status == "completed" and run.import_id
+
+
+def test_failed_start_does_not_leave_flight_stuck(client):
+    """«Запуск» ушёл на сервер, но моторы не включились (например, отключены): борт снова «готов» — полёт тоже,
+    иначе он навсегда оставался бы «в полёте» и миссию нельзя было бы ни прервать, ни отменить."""
+    from app.models import MissionRun
+    a, lid, token = link_for(client)
+    mid = mission(client, a["id"])
+    with TestClient(app) as dev:
+        dev.headers["Authorization"] = "Bearer " + token
+        dev.post("/api/agent/state", json={"state": "idle"})
+        assert client.post(f"/api/drones/{lid}/prepare", json={"mission_id": mid}).status_code == 200
+        run0 = get(client, lid)["run"]
+        rid, ph = run0["id"], run0["plan_hash"]
+        dev.post("/api/agent/state", json={"state": "ready", "run_id": rid, "plan_hash": ph, "checks": [],
+                                           "telemetry": {"connected": True, "armed": False}})
+        r = client.post(f"/api/drones/{lid}/start", json={"run_id": rid, "plan_hash": ph, "confirm": True})
+        assert r.status_code == 200, r.text
+        cmd = dev.get("/api/agent/commands", params={"wait": 0}).json()["command"]
+        assert cmd["kind"] == "start"
+        dev.post("/api/agent/state", json={"state": "starting", "run_id": rid, "plan_hash": ph})
+        assert get(client, lid)["run"]["status"] == "in_flight"
+        dev.post("/api/agent/state", json={"state": "ready", "run_id": rid, "plan_hash": ph})
+        dev.post(f"/api/agent/commands/{cmd['id']}/result",
+                 json={"ok": False, "message": "Старт не выполнен: моторы не включились"})
+        d = get(client, lid)
+        assert d["run"]["status"] == "ready"
+        r = client.post(f"/api/drones/{lid}/cancel")
+        assert r.status_code == 200, r.text
+        with SessionLocal() as s:
+            assert s.get(MissionRun, rid).status == "cancelled"
+
+
+def test_online_board_not_flying_flight_can_be_closed(client):
+    """Агент на связи и в «ожидании» (например, перезапущен после сбоя старта), а полёт на сервере — «в полёте»."""
+    from app.models import MissionRun
+    a, lid, token = link_for(client)
+    mid = mission(client, a["id"])
+    with TestClient(app) as dev:
+        dev.headers["Authorization"] = "Bearer " + token
+        dev.post("/api/agent/state", json={"state": "idle"})
+        assert client.post(f"/api/drones/{lid}/prepare", json={"mission_id": mid}).status_code == 200
+        run0 = get(client, lid)["run"]
+        rid = run0["id"]
+        dev.post("/api/agent/state", json={"state": "ready", "run_id": rid, "plan_hash": run0["plan_hash"]})
+        dev.post("/api/agent/state", json={"state": "in_flight", "run_id": rid})
+        assert client.post(f"/api/drones/{lid}/cancel").status_code == 400                # борт летит — закрыть нельзя
+        dev.post("/api/agent/state", json={"state": "idle"})
+        r = client.post(f"/api/drones/{lid}/cancel")
+        assert r.status_code == 200, r.text
+        assert get(client, lid)["run"] is None
+        with SessionLocal() as s:
+            assert s.get(MissionRun, rid).status == "failed"

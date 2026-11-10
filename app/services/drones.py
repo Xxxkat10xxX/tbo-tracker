@@ -55,6 +55,7 @@ RUN_LABELS = {"preparing": "Подготовка", "ready": "Готов к ст�
               "completed": "Выполнена", "aborted": "Прервана", "failed": "Не выполнена", "cancelled": "Отменена"}
 ACTIVE_RUN = ("preparing", "ready", "in_flight", "landed")
 FLYING = ("starting", "in_flight", "returning", "landing")
+AGENT_IDLE = ("idle", "error", "ready")      # агент не ведёт полёт и не передаёт журнал
 TTL_S = {"prepare": 120, "start": 15, "rtl": 120, "land": 120, "cancel": 120}      # срок жизни команды, с
 PRIORITY = {"rtl": 0, "land": 0, "cancel": 1, "start": 2, "prepare": 3}
 KIND_LABELS = {"prepare": "Отправить план", "start": "Старт", "rtl": "Вернуть домой", "land": "Посадить", "cancel": "Отменить подготовку"}
@@ -330,14 +331,16 @@ def cancel(s: Session, link: DroneLink, actor: str) -> DroneCommand | None:
     run = active_run(s, link)
     if run is not None and run.status in ("in_flight", "landed"):
         silent = (now - link.last_seen_at).total_seconds() / 60 if link.last_seen_at else None
-        if online(link, now) or (silent is not None and silent < LOST_FLIGHT_MIN):
+        idle_board = online(link, now) and link.state in AGENT_IDLE    # агент на связи, но полёта не ведёт
+        if not idle_board and (online(link, now) or (silent is not None and silent < LOST_FLIGHT_MIN)):
             raise DomainError(f"Борт в полёте — «Вернуть домой» или «Посадить». Закрыть полёт без журнала можно, "
                               f"если связи с бортом нет дольше {LOST_FLIGHT_MIN} мин")
-        _supersede(s, link, tuple(TTL_S), "полёт закрыт: нет связи с бортом", now)
+        _supersede(s, link, tuple(TTL_S), "полёт закрыт: " + ("борт не ведёт полёт" if idle_board else "нет связи с бортом"), now)
         run.status, run.ended_at = "failed", now
-        _run_update(run, error=f"связь с бортом потеряна в полёте (последний обмен {iso(link.last_seen_at) or '—'}), "
-                               "журнал не получен; полёт закрыт оператором — если агент передаст журнал позже, он будет учтён",
-                    closed_by=actor)
+        why = (f"борт на связи, но полёт не ведёт (состояние агента: {link.state})" if idle_board else
+               f"связь с бортом потеряна в полёте (последний обмен {iso(link.last_seen_at) or '—'})")
+        _run_update(run, error=why + ", журнал не получен; полёт закрыт оператором — если агент передаст журнал позже, "
+                                     "он будет учтён", closed_by=actor)
         link.run_id = None
         return None
     if run is None or run.status not in ("preparing", "ready"):
@@ -400,7 +403,17 @@ def command_result(s: Session, link: DroneLink, cid: int, ok: bool, message: str
                 run.status, run.started_at = "in_flight", now
             _run_update(run, started_by=c.created_by)
         else:
+            if run.status == "in_flight" and link.state == "ready":
+                _start_failed(run, now)
             _run_update(run, last_error=c.result)
+
+
+def _start_failed(run: MissionRun, now: datetime):
+    """Старт не выполнен (например, моторы не включились): агент сообщал «Запуск», и полёт уже считался начатым,
+    но борт вернулся в «Готов к старту». Полёт снова «готов» — иначе он навсегда оставался бы «в полёте»:
+    «Вернуть домой» отклонял бы борт («не в полёте»), а «Отменить» — сервер («борт в полёте»)."""
+    run.status, run.started_at = "ready", now
+    _run_update(run, start_failed_at=iso(now))
 
 
 def agent_state(s: Session, link: DroneLink, data: dict, ip: str, now: datetime) -> dict:
@@ -422,6 +435,8 @@ def agent_state(s: Session, link: DroneLink, data: dict, ip: str, now: datetime)
             run.status, run.started_at = "in_flight", now
         elif link.state in ("landed", "uploading") and run.status == "in_flight":
             run.status = "landed"
+        elif link.state == "ready" and run.status == "in_flight" and data.get("plan_hash") == (run.summary or {}).get("plan_hash"):
+            _start_failed(run, now)                                      # «Запуск» ушёл, но моторы не включились
     elif link.state == "idle" and link.run_id:
         cur = s.get(MissionRun, link.run_id)
         if cur is not None and cur.status == "ready":                   # агент сбросил план (перезапуск, ожидание старта)

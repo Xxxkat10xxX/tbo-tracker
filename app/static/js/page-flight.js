@@ -81,6 +81,9 @@ async function flightPanel(root, ctx) {
     }
     if (run && !mine && ["preparing", "ready", "in_flight", "landed"].includes(run.status)) return `<div class="notice">Борт занят миссией «${esc(run.mission_name || "")}» (${esc(run.status_label)}).</div>`;
     if (!eng) return '<div class="small muted">Команды борту отдают инженер и администратор.</div>';
+    if (["idle", "error", "ready"].includes(d.state) && mine && run.status === "in_flight")
+      return `<div class="notice warn">Борт на связи, но полёт не ведёт (${esc(d.state_label)}) — журнал не поступит.</div>
+        <button data-fl="close">Закрыть полёт без журнала</button>`;
     if (["idle", "error"].includes(d.state)) {
       const local = ctx.frame && ctx.frame() === "local";
       return `<button class="primary" data-fl="prepare">⇪ Отправить план на борт</button>
