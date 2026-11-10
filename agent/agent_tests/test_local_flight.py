@@ -97,6 +97,50 @@ def test_local_flight_in_map_frame_without_gps():
         fc.stop()
 
 
+def _fly(fc, p, done, timeout=30):
+    v = opened(fc)
+    v.upload(p, {"lat": None, "lon": None})
+    assert "OFFBOARD" in v.start_mission(p)
+    return v, wait(lambda: done(v), timeout)
+
+
+def test_waypoint_over_takeoff_point_then_route_is_flown():
+    """Первая точка — прямо над точкой взлёта, кадр navigate_target отстаёт от команды (TF). Прежде следующая точка
+    «достигалась» мгновенно по старой цели (там, где борт уже висел), и борт садился, не долетев маршрут."""
+    fc = FakePX4(speed=2.0, target_lag_s=0.5)
+    try:
+        here, far = at(0.0, 0.0), at(3.0, 0.0)
+        p = local_plan(waypoints=[{"lat": here[0], "lon": here[1], "alt": 1.5, "hold_s": 0.0},
+                                  {"lat": far[0], "lon": far[1], "alt": 1.5, "hold_s": 0.0}])
+        peak = [0.0]
+
+        def landed(v):
+            peak[0] = max(peak[0], fc.x)
+            return not fc.armed and v.snapshot()["wp_reached"] == 2
+        v, ok = _fly(fc, p, landed)
+        assert ok and peak[0] > 2.7, (peak[0], v._fly_error)                 # долетел до точки 2 (3 м вперёд)
+        assert v._fly_error is None and ("land",) in fc.calls and abs(fc.x) < 0.3
+    finally:
+        fc.stop()
+
+
+def test_hovering_off_target_near_takeoff_point_does_not_abort():
+    """Борт держится в 0,35 м от цели — дальше допуска 0,25 м (оптический поток). Прежде он висел у близкой точки
+    до тайм-аута, а затем садился на месте с ошибкой «точка не достигнута»."""
+    fc = FakePX4(speed=2.0, hover_offset=0.35)
+    try:
+        near = at(0.5, 0.0)
+        p = local_plan(waypoints=[{"lat": near[0], "lon": near[1], "alt": 1.5, "hold_s": 0.0}])
+        t0 = time.time()
+        v, ok = _fly(fc, p, lambda v: not fc.armed, 40)
+        assert ok and v._fly_error is None and v.snapshot()["wp_reached"] == 1 and ("land",) in fc.calls
+        assert time.time() - t0 < 25                                          # по 3 с у каждой точки, а не тайм-аут
+        goals = [c for c in fc.calls if c[0] == "navigate" and c[1] == "map"]
+        assert len(goals) == 2                                                # точка и возврат к точке взлёта
+    finally:
+        fc.stop()
+
+
 def test_local_return_home_command():
     fc = FakePX4(speed=0.8)
     try:

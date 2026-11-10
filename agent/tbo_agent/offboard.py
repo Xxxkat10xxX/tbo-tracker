@@ -19,6 +19,9 @@ from .plan import R_EARTH, dist_m, to_xy
 from .vehicle import VehicleError
 
 NAN = float("nan")
+ARRIVE_DWELL = 3        # отсчётов подряд (через ~0,2 с) в допуске — точка достигнута
+SETTLE_S = 3.0          # держится не дальше 2× допуска столько секунд — тоже достигнута (шум оптического потока)
+TARGET_LAG_S = 1.0      # столько ждать признака новой цели в кадре navigate_target (TF может отставать от команды)
 
 
 class Stop(Exception):
@@ -106,16 +109,54 @@ class OffboardMixin:
         if self._s.get("mode") not in (None, "OFFBOARD"):
             raise Stop("пилот перехватил управление (режим %s)" % self._s.get("mode"))
 
-    def _wait_arrival(self, ev, timeout: float, tol: float):
-        end = time.monotonic() + timeout
+    def _dist_navigate_target(self):
+        """(по горизонтали, по вертикали) от борта до цели navigate по кадру navigate_target, м; None — нет данных."""
+        t = self._tel("navigate_target")
+        x, y, z = _fin(t.x), _fin(t.y), _fin(t.z)
+        return None if None in (x, y, z) else (math.hypot(x, y), abs(z))
+
+    def _dist_map(self, x: float, y: float, z: float):
+        """Расстояние до точки кадра map, вычисленной самой программой: не зависит от того, успел ли simple_offboard
+        обновить кадр navigate_target после новой команды."""
+        def dist():
+            t = self._tel("map")
+            px, py, pz = _fin(t.x), _fin(t.y), _fin(t.z)
+            return None if None in (px, py, pz) else (math.hypot(px - x, py - y), abs(pz - z))
+        return dist
+
+    def _wait_arrival(self, ev, timeout: float, tol: float, dist=None, expect: float = None):
+        """Ждать прибытия к цели navigate.
+
+        * Точка достигнута, если борт в допуске ARRIVE_DWELL отсчётов подряд (а не на одном отсчёте: шум, пролёт мимо)
+          или держится не дальше 2× допуска SETTLE_S секунд — у близкой точки оптический поток «плавает» сильнее
+          допуска, и борт иначе висел бы до тайм-аута, а затем садился, не долетев маршрут.
+        * expect — расстояние до новой цели в момент команды. Кадр navigate_target может ещё показывать прежнюю цель
+          (там, где борт уже стоит): пока не видно, что цель сменилась (или не прошло TARGET_LAG_S), «прибытие» не
+          засчитывается — иначе после точки у старта следующая «достигалась» мгновенно, и борт сразу садился.
+        """
+        dist = dist or self._dist_navigate_target
+        start = time.monotonic()
+        end = start + timeout
+        fresh = expect is None or expect <= 2 * tol
+        run, near_since, d = 0, None, None
         while True:
             self._guard(ev)
-            t = self._tel("navigate_target")
-            xyz = [_fin(t.x), _fin(t.y), _fin(t.z)]
-            if None not in xyz and math.sqrt(sum(v * v for v in xyz)) < tol:
-                return
-            if time.monotonic() > end:
-                raise VehicleError("точка не достигнута за %.0f с" % timeout)
+            d = dist()
+            now = time.monotonic()
+            if d is not None:
+                h, v = d
+                if not fresh and (h > 2 * tol or v > 2 * tol or now - start >= TARGET_LAG_S):
+                    fresh = True
+                run = run + 1 if fresh and h <= tol and v <= tol else 0
+                if fresh and h <= 2 * tol and v <= 2 * tol:
+                    near_since = now if near_since is None else near_since
+                else:
+                    near_since = None
+                if run >= ARRIVE_DWELL or (near_since is not None and now - near_since >= SETTLE_S):
+                    return
+            if now > end:
+                left = "" if d is None else " (до цели %.2f м)" % math.hypot(*d)
+                raise VehicleError("точка не достигнута за %.0f с%s" % (timeout, left))
             time.sleep(0.2)
 
     def _sleep(self, ev, seconds: float):
@@ -134,7 +175,7 @@ class OffboardMixin:
             if time.monotonic() > end:
                 raise VehicleError("контроллер не перешёл в OFFBOARD с включёнными моторами%s" % self._why())
             time.sleep(0.1)
-        self._wait_arrival(ev, float(alt) / self.takeoff_speed * 2 + 30, 0.3 if alt < 5 else 0.5)
+        self._wait_arrival(ev, float(alt) / self.takeoff_speed * 2 + 30, 0.3 if alt < 5 else 0.5, expect=float(alt))
 
     def _reached(self, i: int):
         with self._lock:
@@ -158,7 +199,7 @@ class OffboardMixin:
                 d = dist_m(lat0, lon0, w["lat"], w["lon"])
                 self._call(self._navigate_global, 5, "полёт к точке %d (navigate_global)" % i, lat=float(w["lat"]),
                            lon=float(w["lon"]), z=z0 + float(w["alt"]), yaw=NAN, speed=speed, frame_id="map", auto_arm=False)
-                self._wait_arrival(ev, d / speed * 2 + 60, self.tol)
+                self._wait_arrival(ev, d / speed * 2 + 60, self.tol, expect=d)
                 self._reached(i)
                 lat0, lon0 = w["lat"], w["lon"]
                 self._hold(ev, w)
@@ -195,12 +236,14 @@ class OffboardMixin:
     def _goto_local(self, ev, fwd: float, left: float, alt: float, speed: float, what: str):
         lc = self._local
         x, y = body_to_map(lc["x0"], lc["y0"], lc["yaw0"], fwd, left)
+        z = lc["z0"] + float(alt)
         cur = self._tel("map")
-        d = math.hypot(x - (_fin(cur.x) or x), y - (_fin(cur.y) or y))
-        self._call(self._navigate, 5, what, x=x, y=y, z=lc["z0"] + float(alt), yaw=NAN, speed=speed, frame_id="map",
-                   auto_arm=False)
+        cx, cy, cz = _fin(cur.x), _fin(cur.y), _fin(cur.z)
+        d = 0.0 if None in (cx, cy, cz) else math.hypot(math.hypot(x - cx, y - cy), z - cz)
+        self._call(self._navigate, 5, what, x=x, y=y, z=z, yaw=NAN, speed=speed, frame_id="map", auto_arm=False)
         lc["alt"] = float(alt)
-        self._wait_arrival(ev, d / max(speed, 0.1) * 2 + 20, self.tol_local)
+        # прибытие — по своей цели в кадре map, а не по navigate_target (он может ещё показывать прежнюю цель)
+        self._wait_arrival(ev, d / max(speed, 0.1) * 2 + 20, self.tol_local, dist=self._dist_map(x, y, z))
 
     def _fly_local(self, plan: dict, ev):
         try:

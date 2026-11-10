@@ -98,6 +98,29 @@ def test_offboard_flight_as_in_technic_examples(px4_no_mission):
     assert ("set_mode", "AUTO.RTL") in fc.calls and v._fly_error is None
 
 
+def test_offboard_route_not_skipped_when_target_frame_lags():
+    """Кадр navigate_target отстаёт от navigate_global: прежде точка 1 «достигалась» по старой цели (точке взлёта),
+    и борт летел сразу к точке 2, минуя точку 1."""
+    import math
+    fc = FakePX4(mission_plugin=False, speed=20.0, target_lag_s=0.6)
+    try:
+        v = opened()
+        p = plan()
+        v.upload(p, {"lat": HOME[0], "lon": HOME[1]})
+        v.start_mission(p)
+        wp1 = fc.xy(p["waypoints"][0]["lat"], p["waypoints"][0]["lon"])
+        closest = [1e9]
+
+        def done():
+            closest[0] = min(closest[0], math.hypot(fc.x - wp1[0], fc.y - wp1[1]))
+            s = v.snapshot()
+            return not s["armed"] and s["wp_reached"] == 2
+        assert wait(done, 60)
+        assert closest[0] < 2.0 and v._fly_error is None                      # побывал у точки 1
+    finally:
+        fc.stop()
+
+
 def test_offboard_pilot_override_stops_program_without_mode_changes():
     fc = FakePX4(mission_plugin=False, speed=4.0)
     try:

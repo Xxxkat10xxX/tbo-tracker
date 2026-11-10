@@ -27,7 +27,8 @@ FRAME_GLOBAL = 0           # MAV_FRAME_GLOBAL: высота над уровне�
 DT = 0.2                   # шаг интегрирования, с
 IMU_HZ = 25
 CLIMB, DESCENT, ACCEL = 2.5, 1.5, 2.0     # м/с, м/с, м/с²
-ACCEPT_R = 3.0             # радиус принятия точки, м
+ACCEPT_R = 3.0             # радиус принятия точки, м (по GPS)
+LOCAL_ACCEPT_R = 0.3       # в помещении (метры от точки взлёта): с 3 м все точки ближе 3 м к старту «достигались» сразу
 PHASES = {"preflight": "Предполётная проверка", "takeoff": "Взлёт", "mission": "Полёт по маршруту",
           "hold": "Удержание", "rtl": "Возврат домой", "land": "Посадка", "crash": "Аварийное завершение"}
 
@@ -97,8 +98,16 @@ def validate(m: dict):
 def simulate(m: dict, wind_ms: float = 3.0, wind_from_deg: float = 250.0, fault_at_wp: int | None = None) -> dict:
     """Кинематическая модель автономного полёта. fault_at_wp — смоделировать столкновение на подлёте к точке N."""
     validate(m)
+    local = (m.get("frame") or "global") == "local"
     lat0, lon0 = m["home_lat"], m["home_lon"]
     v_max = float(m["speed_ms"])
+    # в помещении: точки в метрах — малый радиус принятия (не меньше шага модели, чтобы не «перепрыгнуть» точку)
+    # и без ветра; по высоте — тоже в пределах дециметров, а не метра
+    accept_r = max(LOCAL_ACCEPT_R, v_max * DT) if local else ACCEPT_R
+    alt_tol = 0.2 if local else 1.0
+    if local:
+        wind_ms = 0.0
+    gust_k = 0.0 if local else 1.0
     wps = [(*to_xy(lat0, lon0, float(w["lat"]), float(w["lon"])), float(w["alt"]), float(w.get("hold_s") or 0)) for w in m["waypoints"]]
     if m.get("return_home", True):
         wps.append((0.0, 0.0, wps[-1][2], 0.0))
@@ -148,14 +157,14 @@ def simulate(m: dict, wind_ms: float = 3.0, wind_from_deg: float = 250.0, fault_
             dx, dy = cx - x, cy - y
             dist_wp = math.hypot(tx - x, ty - y)
             d = math.hypot(dx, dy) or 1e-6
-            v_cmd = min(v_max, math.sqrt(2 * ACCEL * max(dist_wp - ACCEPT_R * 0.5, 0)) + 0.6)
+            v_cmd = min(v_max, math.sqrt(2 * ACCEL * max(dist_wp - accept_r * 0.5, 0)) + 0.6)
             # желаемая путевая скорость + компенсация ветра (автопилот держит линию пути)
             gvx, gvy = dx / d * v_cmd, dy / d * v_cmd
             ax_, ay_ = (gvx - vx) / DT, (gvy - vy) / DT
             a_mag = math.hypot(ax_, ay_)
             if a_mag > ACCEL:
                 ax_, ay_ = ax_ * ACCEL / a_mag, ay_ * ACCEL / a_mag
-            gust = 0.35 * math.sin(t * 0.7) + 0.2 * math.sin(t * 1.9)
+            gust = (0.35 * math.sin(t * 0.7) + 0.2 * math.sin(t * 1.9)) * gust_k
             vx += ax_ * DT + (wx * 0.04 + gust * 0.05) * DT * 5
             vy += ay_ * DT + (wy * 0.04 - gust * 0.04) * DT * 5
             x += vx * DT
@@ -174,7 +183,7 @@ def simulate(m: dict, wind_ms: float = 3.0, wind_from_deg: float = 250.0, fault_
                 events_log.append(f"Столкновение на подлёте к точке {fault_at_wp}: аварийное завершение миссии")
                 log_point()
                 break
-            if dist_wp <= ACCEPT_R and abs(z - talt) < 1.0:
+            if dist_wp <= accept_r and abs(z - talt) < alt_tol:
                 if hold > 0:
                     phase, hold_left = "hold", hold
                     vx = vy = 0.0

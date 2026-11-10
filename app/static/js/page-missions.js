@@ -56,11 +56,12 @@ async function pageMission(id) {
   const wy = (py) => (H / 2 - py) / W * view.span + view.cy;
 
   view_().innerHTML = `<div class="crumbs"><a href="#/missions">Миссии</a> / ${esc(m.name)}</div>
-    <div class="page-head"><div><h1>${esc(m.name)}</h1><div class="sub">Щелчок по карте — новая точка, перетаскивание — перенос точки. Координаты WGS-84, высоты относительно точки взлёта.</div></div>
+    <div class="page-head"><div><h1>${esc(m.name)}</h1><div class="sub">Щелчок по карте — новая точка, перетаскивание — перенос. Щелчок по точке — выбрать (удалить — кнопкой «✕ Точка» или клавишей Delete), правый щелчок по точке — удалить. Координаты WGS-84, высоты относительно точки взлёта.</div></div>
     <div class="actions"><button id="m-save" class="primary">Сохранить</button><button id="m-exp-plan" data-exp>⇩ .plan (ArduPilot)</button><button id="m-exp-px4" data-exp>⇩ .plan (PX4)</button><button id="m-exp-wpl" data-exp>⇩ .waypoints</button><button class="danger" id="m-del">Удалить</button></div></div>
     <div class="mission-grid">
       <div class="card p-12"><div class="map-wrap"><svg id="map" viewBox="0 0 ${W} ${H}"></svg>
-        <div class="map-tools"><button class="sm" id="z-in">+</button><button class="sm" id="z-out">−</button><button class="sm" id="z-fit">Вписать</button></div>
+        <div class="map-tools"><button class="sm" id="z-in">+</button><button class="sm" id="z-out">−</button><button class="sm" id="z-fit">Вписать</button>
+          <button class="sm danger" id="wp-del" hidden></button><button class="sm" id="wp-clear" hidden>Очистить маршрут</button></div>
         <div class="telemetry" id="telemetry" hidden></div></div>
         <div class="small muted mt-8" id="m-stats"></div></div>
       <div>
@@ -104,29 +105,74 @@ async function pageMission(id) {
     const sb = step;
     map.innerHTML = `<rect width="${W}" height="${H}" class="map-bg"/>${g}
       <polyline class="route" points="${path}"/>${back}${tr}
-      <g transform="translate(${sx(0)},${sy(0)})"><rect x="-11" y="-11" width="22" height="22" rx="4" class="home"/><text y="5" class="home-t">${isLocal() ? "Т" : "H"}</text></g>
-      ${pts.map((p, i) => `<g class="wp" data-i="${i}" transform="translate(${sx(p[0])},${sy(p[1])})"><circle r="13"/><text y="4.5">${i + 1}</text>
+      <g class="home-g" transform="translate(${sx(0)},${sy(0)})"><rect x="-11" y="-11" width="22" height="22" rx="4" class="home"/><text y="5" class="home-t">${isLocal() ? "Т" : "H"}</text><title>Точка взлёта</title></g>
+      ${pts.map((p, i) => `<g class="wp${i === selected ? " sel" : ""}" data-i="${i}" transform="translate(${sx(p[0])},${sy(p[1])})"><circle r="13"/><text y="4.5">${i + 1}</text><title>Точка ${i + 1}: щелчок — выбрать, правый щелчок — удалить</title>
         <text class="wp-alt" y="-19">${num(st.waypoints[i].alt, 0)} м${+st.waypoints[i].hold_s ? ` · ${st.waypoints[i].hold_s} с` : ""}</text></g>`).join("")}
       ${dronePos ? `<g transform="translate(${dronePos[0]},${dronePos[1]})"><circle r="9" class="drone"/><circle r="17" class="drone-ring"/></g>` : ""}
       <g transform="translate(${W - 30},34)"><path d="M0,-16 L7,6 L0,1 L-7,6 Z" class="north"/><text y="22" class="north-t">${isLocal() ? "нос" : "С"}</text></g>
       <g transform="translate(16,${H - 18})"><line x1="0" y1="0" x2="${sb / view.span * W}" y2="0" class="scale"/><text x="0" y="-6" class="scale-t">${sb >= 1000 ? sb / 1000 + " км" : sb + " м"}</text></g>`;
     bindDrag();
+    const del = $("#wp-del");
+    del.hidden = selected === null;
+    if (selected !== null) del.textContent = `✕ Точка ${selected + 1}`;
+    $("#wp-clear").hidden = !st.waypoints.length;
   }
-  let dragging = null, suppressClick = false;
+  // drag: нажатие на точку; перенос начинается, только если указатель сдвинулся (иначе это щелчок — выбор точки)
+  // suppressUntil — щелчок, который браузер шлёт вслед за отпусканием точки, не должен ставить новую точку;
+  // по времени, а не флагом: если щелчка не будет (касание со сдвигом), следующий настоящий щелчок не потеряется
+  let drag = null, selected = null, suppressUntil = 0;
+  const suppressClick = () => { suppressUntil = performance.now() + 400; };
   const svgPt = (e) => { const r = map.getBoundingClientRect(); return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H]; };
+  function removeWp(i) {
+    if (i === null || i < 0 || i >= st.waypoints.length) return;
+    st.waypoints.splice(i, 1);
+    if (selected === i) selected = null;
+    else if (selected !== null && selected > i) selected -= 1;
+    drawAll();
+    toast(`Точка ${i + 1} удалена — сохраните миссию`);
+  }
+  let lastPointer = "mouse";
   function bindDrag() {
-    $$(".wp", map).forEach((g) => g.addEventListener("pointerdown", (e) => { e.stopPropagation(); dragging = +g.dataset.i; map.setPointerCapture(e.pointerId); }));
+    $$(".wp", map).forEach((g) => {
+      g.addEventListener("pointerdown", (e) => {
+        lastPointer = e.pointerType || "mouse";
+        if (e.button !== 0) return;
+        e.stopPropagation();
+        drag = { i: +g.dataset.i, x: e.clientX, y: e.clientY, moved: false };
+        try { map.setPointerCapture(e.pointerId); } catch (_) { /* указатель уже отпущен */ }
+      });
+      g.addEventListener("contextmenu", (e) => {
+        e.preventDefault(); e.stopPropagation();
+        // на сенсорном экране «контекстное меню» — это долгое нажатие перед перетаскиванием: только выбрать точку
+        if (lastPointer !== "mouse") {
+          drag = null; suppressClick();             // отпускание пальца после долгого нажатия не снимает выбор
+          selected = +g.dataset.i; drawMap(); drawTable();
+          return;
+        }
+        removeWp(+g.dataset.i);
+      });
+    });
   }
   map.addEventListener("pointermove", (e) => {
-    if (dragging === null) return;
+    if (drag === null) return;
+    if (!drag.moved && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 5) return;
+    drag.moved = true;
     const [px, py] = svgPt(e); const [lat, lon] = toLL(home(), wx(px), wy(py));
-    st.waypoints[dragging].lat = +lat.toFixed(7); st.waypoints[dragging].lon = +lon.toFixed(7);
+    st.waypoints[drag.i].lat = +lat.toFixed(7); st.waypoints[drag.i].lon = +lon.toFixed(7);
     drawMap(); drawStats();
   });
-  map.addEventListener("pointerup", () => { if (dragging !== null) { dragging = null; suppressClick = true; drawTable(); } });
+  map.addEventListener("pointerup", () => {
+    if (drag === null) return;
+    const { i, moved } = drag;
+    drag = null; suppressClick();
+    if (moved) drawTable();
+    else { selected = selected === i ? null : i; drawMap(); drawTable(); }
+  });
   map.addEventListener("click", (e) => {
-    if (suppressClick) { suppressClick = false; return; }
+    if (performance.now() < suppressUntil) { suppressUntil = 0; return; }
     if (e.target.closest(".wp")) return;
+    if (e.target.closest(".home-g")) { toast("Это точка взлёта. Новую точку ставьте щелчком по свободному месту карты"); return; }
+    if (selected !== null) { selected = null; drawMap(); drawTable(); return; }   // первый щелчок мимо точки снимает выбор
     const [px, py] = svgPt(e); const [lat, lon] = toLL(home(), wx(px), wy(py));
     const alt = st.waypoints.length ? st.waypoints[st.waypoints.length - 1].alt : (isLocal() ? Math.min(+st.takeoff_alt, 1.5) : +st.takeoff_alt);
     st.waypoints.push({ lat: +lat.toFixed(7), lon: +lon.toFixed(7), alt, hold_s: 0 });
@@ -138,7 +184,7 @@ async function pageMission(id) {
     // локально: «вперёд» — север на карте (нос дрона при взлёте), «вправо» — восток; хранятся те же широта/долгота
     const xy = (w) => toXY(home(), w.lat, w.lon);
     $("#wp-table").innerHTML = st.waypoints.length ? `<table class="wp-table"><thead><tr><th>№</th>${loc ? "<th>Вперёд, м</th><th>Вправо, м</th>" : "<th>Широта</th><th>Долгота</th>"}<th>Высота, м</th><th>Удерж., с</th><th></th></tr></thead><tbody>
-      ${st.waypoints.map((w, i) => `<tr><td>${i + 1}</td>${loc
+      ${st.waypoints.map((w, i) => `<tr${i === selected ? ' class="sel"' : ""}><td>${i + 1}</td>${loc
         ? `<td><input data-k="fwd" data-i="${i}" type="number" step="0.1" value="${xy(w)[1].toFixed(2)}"></td><td><input data-k="right" data-i="${i}" type="number" step="0.1" value="${xy(w)[0].toFixed(2)}"></td>`
         : `<td><input data-k="lat" data-i="${i}" type="number" step="0.000001" value="${w.lat}"></td><td><input data-k="lon" data-i="${i}" type="number" step="0.000001" value="${w.lon}"></td>`}
         <td><input data-k="alt" data-i="${i}" type="number" min="${loc ? 0.5 : 2}" max="${loc ? 10 : 500}" step="${loc ? 0.1 : 1}" value="${w.alt}"></td><td><input data-k="hold_s" data-i="${i}" type="number" min="0" max="600" value="${w.hold_s || 0}"></td>
@@ -152,7 +198,7 @@ async function pageMission(id) {
       } else w[k] = +inp.value;
       drawMap(); drawStats();
     }));
-    $$("#wp-table [data-rm]").forEach((b) => b.addEventListener("click", () => { st.waypoints.splice(+b.dataset.rm, 1); drawAll(); }));
+    $$("#wp-table [data-rm]").forEach((b) => b.addEventListener("click", () => removeWp(+b.dataset.rm)));
     const f = $('[name="fault"]');
     f.innerHTML = `<option value="">без отказов</option>` + st.waypoints.map((_, i) => `<option value="${i + 1}">столкновение у точки ${i + 1}</option>`).join("");
   }
@@ -209,6 +255,17 @@ async function pageMission(id) {
   $("#z-in").onclick = () => { view.span /= 1.5; drawMap(); };
   $("#z-out").onclick = () => { view.span *= 1.5; drawMap(); };
   $("#z-fit").onclick = () => { fit(); drawMap(); };
+  $("#wp-del").onclick = () => removeWp(selected);
+  $("#wp-clear").onclick = () => modal("Очистить маршрут", `<p>Удалить все точки маршрута (${st.waypoints.length})? Изменения вступят в силу после «Сохранить».</p>`,
+    { okText: "Очистить", onOk: async () => { st.waypoints = []; selected = null; drawAll(); } });
+  const onKey = (e) => {
+    if (!document.body.contains(map)) { document.removeEventListener("keydown", onKey); return; }   // ушли со страницы
+    const t = e.target instanceof Element ? e.target : null;       // клавиша может прийти и на сам document
+    if (selected === null || !["Delete", "Backspace"].includes(e.key) || (t && t.closest("input, select, textarea, [contenteditable]")) || $(".modal-bg")) return;
+    e.preventDefault();
+    removeWp(selected);
+  };
+  document.addEventListener("keydown", onKey);
 
   function drawRuns(runs) {
     $("#runs").innerHTML = runs.length ? `<div class="table-wrap"><table><thead><tr><th>Окончание</th><th>Борт</th><th>Где</th><th>Итог</th><th class="num">Длительность</th><th class="num">Путь</th><th class="num">Макс. высота</th><th>Журнал</th></tr></thead><tbody>

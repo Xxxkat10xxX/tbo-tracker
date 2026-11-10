@@ -21,13 +21,18 @@ class FakePX4:
     # заводские параметры Technic для полётов в помещении (docs.skyris.ru → «Параметры полетного контроллера»)
     TECHNIC_INDOOR = {"EKF2_GPS_CTRL": 0, "SYS_HAS_MAG": 0, "EKF2_MAG_TYPE": 5, "COM_DISARM_LAND": 2.0}
 
-    def __init__(self, lat=55.75, lon=37.6, mission_plugin=True, technic=True, refuse_arm=None, speed=40.0, params=None):
+    def __init__(self, lat=55.75, lon=37.6, mission_plugin=True, technic=True, refuse_arm=None, speed=40.0, params=None,
+                 target_lag_s=0.0, hover_offset=0.0):
+        """target_lag_s — кадр navigate_target показывает прежнюю цель столько секунд после команды (TF отстаёт);
+        hover_offset — в OFFBOARD борт устанавливается в стольких метрах от цели (оптический поток «плавает»)."""
         rospy.reset()
         self.lat0, self.lon0 = lat, lon
         self.x = self.y = self.z = 0.0
         self.armed, self.mode, self.landed_state = False, "POSCTL", 1
         self.items, self.seq, self.target = [], 0, None
         self.refuse_arm, self.speed = refuse_arm, speed
+        self.target_lag_s, self.hover_offset = target_lag_s, hover_offset
+        self._prev_target, self._target_at = None, 0.0
         self.calls = []
         self.params = dict(self.TECHNIC_INDOOR if params is None else params)
         self._stop = threading.Event()
@@ -90,11 +95,17 @@ class FakePX4:
         return NS(success=True, value=NS(integer=v if isinstance(v, int) else 0, real=float(v) if isinstance(v, float) else 0.0))
 
     # ------------------------------------------------------------ simple_offboard (Technic)
+    def _set_target(self, target):
+        self._prev_target, self._target_at, self.target = self.target, time.time(), target
+
     def _telemetry(self, frame_id=""):
         if frame_id == "navigate_target":
-            if self.target is None:
+            tgt = self.target
+            if self._prev_target is not None and time.time() - self._target_at < self.target_lag_s:
+                tgt = self._prev_target                       # TF цели ещё не обновился
+            if tgt is None:
                 return NS(x=float("nan"), y=float("nan"), z=float("nan"))
-            return NS(x=self.target[0] - self.x, y=self.target[1] - self.y, z=self.target[2] - self.z)
+            return NS(x=tgt[0] - self.x, y=tgt[1] - self.y, z=tgt[2] - self.z)
         lat, lon = self.ll()
         return NS(x=self.x, y=self.y, z=self.z, yaw=0.0, lat=lat, lon=lon, armed=self.armed, mode=self.mode, connected=True)
 
@@ -102,13 +113,13 @@ class FakePX4:
         self.calls.append(("navigate", frame_id, z, auto_arm))
         if auto_arm:
             self.mode, self.armed = "OFFBOARD", True
-        self.target = (self.x + x, self.y + y, self.z + z) if frame_id == "body" else (x, y, z)
+        self._set_target((self.x + x, self.y + y, self.z + z) if frame_id == "body" else (x, y, z))
         return NS(success=True, message="")
 
     def _navigate_global(self, lat, lon, z, yaw, speed, frame_id, auto_arm):
         self.calls.append(("navigate_global", round(lat, 6), round(lon, 6), z, frame_id))
         tx, ty = self.xy(lat, lon)
-        self.target = (tx, ty, z)
+        self._set_target((tx, ty, z))
         return NS(success=True, message="")
 
     def _land(self):
@@ -156,7 +167,8 @@ class FakePX4:
             else:
                 self._reach()
         elif self.mode == "OFFBOARD" and self.target is not None:
-            self._move(*self.target, dt)
+            tx, ty, tz = self.target
+            self._move(tx + self.hover_offset, ty, tz, dt)
         elif self.mode == "AUTO.RTL":                 # как PX4: режим AUTO.RTL до посадки (долёт, затем снижение)
             if math.hypot(self.x, self.y) > 0.5:
                 self._move(0.0, 0.0, max(self.z, 5.0), dt)

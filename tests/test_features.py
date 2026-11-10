@@ -370,6 +370,27 @@ def test_autonomous_mission_flight_accrues_hours(client):
     assert client.get(f"/api/missions/{m['id']}").json()["runs"][0]["status"] == "completed"
 
 
+def test_local_mission_simulator_flies_short_legs_without_wind():
+    """Локальная миссия (метры, в помещении): точка над точкой взлёта и точка в 2,5 м впереди. Прежде радиус принятия
+    точки был 3 м, как по GPS: обе «достигались» сразу, и в симуляторе дрон взлетал и садился на месте; ветер 3 м/с
+    при этом сносил его и в помещении."""
+    from app.services import autopilot
+    lat0, lon0 = 55.0, 37.0
+
+    def wp(fwd, right, alt=1.5):
+        lat, lon = autopilot.to_ll(lat0, lon0, right, fwd)
+        return {"lat": lat, "lon": lon, "alt": alt, "hold_s": 0}
+    m = {"home_lat": lat0, "home_lon": lon0, "takeoff_alt": 1.5, "speed_ms": 0.8, "return_home": True, "frame": "local",
+         "waypoints": [wp(0, 0), wp(2.5, 0)]}
+    sim = autopilot.simulate(m, wind_ms=3.0)
+    fwd = [autopilot.to_xy(lat0, lon0, p[1], p[2])[1] for p in sim["track"]]
+    assert sim["status"] == "completed" and max(fwd) > 1.8, max(fwd)          # долетел до точки 2
+    assert abs(fwd[-1]) < 0.4 and sim["wind"]["speed_ms"] == 0.0               # вернулся и сел у точки взлёта
+    g = autopilot.simulate(dict(m, frame="global", takeoff_alt=20, speed_ms=6,
+                                waypoints=[wp(0, 0, 20), wp(200, 0, 20)]), wind_ms=3.0)
+    assert g["status"] == "completed" and g["wind"]["speed_ms"] == 3.0         # по GPS — прежний радиус и ветер
+
+
 def test_mission_fault_detects_fall_and_preflight_blocks(client):
     m = _mission(client, "Аэрофотосъёмка")
     r = client.post(f"/api/missions/{m['id']}/run", json={"fault_at_wp": 3}).json()
