@@ -9,10 +9,11 @@
 Соответствие критериям конкурсного задания «Летающая робототехника» — [docs/CRITERIA.md](docs/CRITERIA.md).
 
 **Документы проекта:**
-- [паспорт проекта](docs/PASSPORT.md);
+- **паспорт проекта** — [PDF](docs/passport/tbo-tracker-passport.pdf), [DOCX](docs/passport/tbo-tracker-passport.docx), [кратко](docs/PASSPORT.md);
 - [интеграция с БАС: интерфейсы и две конфигурации подключения](docs/INTEGRATION.md);
 - [актуальность и сравнение с аналогами](docs/MARKET.md);
 - [руководство инженера](docs/USER_GUIDE.md);
+- [безопасность и обслуживаемость](docs/SAFETY.md), [чек-лист запуска перед испытаниями](docs/LAUNCH_CHECKLIST.md);
 - [методика испытаний](docs/TEST_METHODOLOGY.md) и [протоколы](docs/protocols/), прогон — `python scripts/run_acceptance.py`;
 - сравнение с учётом по формуляру — `python scripts/benchmark_vs_logbook.py`.
 
@@ -261,4 +262,4 @@ Python 3 · FastAPI · SQLAlchemy 2 · SQLite или PostgreSQL (psycopg 3) · A
 
 ## Лицензия
 
-[MIT](LICENSE). Шрифты DejaVu (`app/assets/fonts`) — по их собственной лицензии (`DejaVu-LICENSE.txt`).
+[MIT](LICENSE). Лицензии зависимостей и сторонних компонентов — [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md): все допускают использование и распространение в составе проекта.
