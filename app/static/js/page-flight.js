@@ -35,6 +35,67 @@ function droneRunResultHTML(r) {
     ${r.import_id ? `<br>Журнал импортирован автоматически (импорт №${r.import_id}): начислено <b>${flightTime(s)}</b> наработки${s.components ? ` борту и ${s.components} узлам` : ""}${(s.sensor_events || []).length ? `; события датчиков: ${s.sensor_events.length}` : ""}. <a href="#/aircraft/${r.aircraft_id}">Открыть борт →</a>` : ""}</div>`;
 }
 
+// Видео с борта (web_video_server на борту → сервер → страница). Включается кнопкой: поток ~2 Мбит/с и нагрузка
+// на бортовой компьютер. Элемент <img> пересоздаётся только при смене состояния: иначе поток переподключался бы.
+function droneVideoPanel(root) {
+  let lid = null, name = "", online = false, playing = false, stream = "main", streams = [], note = "", shownKey = "";
+  let enabled = true, maxMin = 30, startedAt = 0, starting = false;
+  const alive = () => document.body.contains(root);
+  api("GET", "/api/drones/video/streams", undefined, false, true).then((s) => {
+    streams = s.streams || []; maxMin = s.max_minutes || 30; enabled = s.enabled !== false; render(true);
+  }).catch(() => {});
+
+  function stop(msg) { playing = false; note = msg || ""; render(true); }
+  async function start() {
+    if (starting) return;
+    const want = `${lid}|${stream}`;                     // за время проверки борт или поток могли смениться
+    starting = true; note = "Подключение к камере борта…"; render(true);
+    try {
+      await api("GET", `/api/drones/${lid}/video?stream=${encodeURIComponent(stream)}&probe=1`, undefined, false, true);
+      if (want === `${lid}|${stream}` && online) { playing = true; note = ""; startedAt = Date.now(); } else note = "";
+    } catch (e) { note = e.message; } finally { starting = false; }
+    render(true);
+  }
+  function render(force) {
+    if (!alive()) return;
+    root.hidden = lid === null || !enabled;
+    const key = [lid, online, playing, stream, note, streams.length, starting].join("|");
+    if (!force && key === shownKey) return;              // без изменений — не трогаем идущий поток
+    shownKey = key;
+    const opts = streams.map((s) => `<option value="${esc(s.id)}" ${s.id === stream ? "selected" : ""}>${esc(s.label)}</option>`).join("");
+    const src = `/api/drones/${lid}/video?stream=${encodeURIComponent(stream)}&t=${Date.now()}`;
+    root.innerHTML = `<div class="card-head"><h2>Видео с борта</h2><span class="small muted">${esc(name)}</span></div>
+      <div class="video-ctl">${opts ? `<select data-vs class="w-auto" ${playing ? "disabled" : ""}>${opts}</select>` : ""}
+        ${playing ? '<button data-vstop>■ Остановить</button>'
+          : `<button class="primary" data-vplay ${online && !starting ? "" : "disabled"}>▶ Показать видео</button>`}</div>
+      ${!online ? '<div class="notice warn mt-8">Борт не на связи — видео недоступно.</div>' : ""}
+      ${note ? `<div class="notice ${/Подключение/.test(note) ? "" : "bad"} mt-8">${esc(note)}</div>` : ""}
+      ${playing ? `<div class="video-wrap mt-8"><img data-vimg alt="Видео с борта" src="${src}"></div>` : ""}
+      <div class="hint">Камера бортового компьютера через сервер (web_video_server, порт 8080). Поток ~2 Мбит/с; один просмотр — до ${maxMin} мин.</div>`;
+    const sel = $("[data-vs]", root);
+    if (sel) sel.onchange = () => { stream = sel.value; render(true); };
+    const play = $("[data-vplay]", root);
+    if (play) play.onclick = start;
+    const st = $("[data-vstop]", root);
+    if (st) st.onclick = () => stop("");
+    const img = $("[data-vimg]", root);
+    if (img) img.onerror = () => { if (playing) stop("Поток с борта прервался — нажмите «Показать видео», чтобы подключиться снова."); };
+  }
+  return {
+    update(d) {                                           // состояние борта из панели полёта (раз в 1,5 с)
+      const newLid = d ? d.id : null;
+      if (newLid !== lid) { lid = newLid; playing = false; note = ""; }
+      name = d ? `${d.aircraft.name} · ${d.aircraft.serial}` : "";
+      online = !!(d && d.online && d.enabled);
+      if (playing && !online) { playing = false; note = "Борт пропал со связи — видео остановлено."; }
+      // сервер закрывает просмотр через maxMin минут — браузер при этом «замирает» на последнем кадре
+      if (playing && Date.now() - startedAt > maxMin * 60000) { playing = false; note = `Просмотр длится ${maxMin} мин — видео остановлено. Нажмите «Показать видео», чтобы продолжить.`; }
+      if (playing && document.hidden) { playing = false; note = "Видео остановлено, пока вкладка была скрыта."; }
+      render(false);
+    },
+  };
+}
+
 async function flightPanel(root, ctx) {
   const my = NAV_SEQ;
   const alive = () => my === NAV_SEQ && document.body.contains(root);
@@ -55,6 +116,7 @@ async function flightPanel(root, ctx) {
       return;
     }
     if (!alive()) return;
+    if (ctx.onLink) ctx.onLink(d);
     const t = d.telemetry || {}, run = d.run;
     if (run && run.mission_id === ctx.missionId && ["preparing", "ready", "in_flight", "landed"].includes(run.status)) watch = run.id;
     if (watch && (!run || run.id !== watch)) {                        // полёт завершён: итог из истории миссии

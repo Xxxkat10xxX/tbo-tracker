@@ -225,6 +225,9 @@ table.spec-edit td{padding:3px 4px;border:0}
 /* ------------------------------------------------------------------ миссии */
 .mission-grid { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 16px; align-items: start; }
 @media (max-width: 1100px) { .mission-grid { grid-template-columns: 1fr; } }
+.video-ctl { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.video-wrap { background: #0d1117; border-radius: 8px; overflow: hidden; aspect-ratio: 4 / 3; display: flex; align-items: center; justify-content: center; }
+.video-wrap img { width: 100%; height: 100%; object-fit: contain; display: block; }
 .map-wrap { position: relative; }
 #map { width: 100%; height: auto; display: block; border-radius: 8px; cursor: crosshair; touch-action: none; user-select: none; }
 #map .map-bg { fill: #eef3ea; }

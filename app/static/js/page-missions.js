@@ -59,11 +59,12 @@ async function pageMission(id) {
     <div class="page-head"><div><h1>${esc(m.name)}</h1><div class="sub">Щелчок по карте — новая точка, перетаскивание — перенос. Щелчок по точке — выбрать (удалить — кнопкой «✕ Точка» или клавишей Delete), правый щелчок по точке — удалить. Координаты WGS-84, высоты относительно точки взлёта.</div></div>
     <div class="actions"><button id="m-save" class="primary">Сохранить</button><button id="m-exp-plan" data-exp>⇩ .plan (ArduPilot)</button><button id="m-exp-px4" data-exp>⇩ .plan (PX4)</button><button id="m-exp-wpl" data-exp>⇩ .waypoints</button><button class="danger" id="m-del">Удалить</button></div></div>
     <div class="mission-grid">
-      <div class="card p-12"><div class="map-wrap"><svg id="map" viewBox="0 0 ${W} ${H}"></svg>
+      <div><div class="card p-12"><div class="map-wrap"><svg id="map" viewBox="0 0 ${W} ${H}"></svg>
         <div class="map-tools"><button class="sm" id="z-in">+</button><button class="sm" id="z-out">−</button><button class="sm" id="z-fit">Вписать</button>
           <button class="sm danger" id="wp-del" hidden></button><button class="sm" id="wp-clear" hidden>Очистить маршрут</button></div>
         <div class="telemetry" id="telemetry" hidden></div></div>
         <div class="small muted mt-8" id="m-stats"></div></div>
+        <div class="card" id="video-panel" hidden></div></div>
       <div>
         <div class="card" id="flight-panel"></div>
         <div class="card"><h2>Параметры миссии</h2>
@@ -320,7 +321,9 @@ async function pageMission(id) {
     el.scrollIntoView({ behavior: "smooth" });
   }
   drawAll();
+  const video = droneVideoPanel($("#video-panel"));
   flightPanel($("#flight-panel"), {
+    onLink: (d) => video.update(d),
     missionId: +id, aircraftId: () => st.aircraft_id, waypoints: () => st.waypoints, returnHome: () => st.return_home, save,
     frame: () => st.frame,
     drawLive: (track, ll) => { const q = toXY(home(), ll[0], ll[1]); drawMap(track, [sx(q[0]), sy(q[1])]); },

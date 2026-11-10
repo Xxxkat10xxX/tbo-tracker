@@ -147,6 +147,8 @@ docker build --secret id=pip_ca,src=/путь/к/proxy-ca.pem -t tbo-tracker:lat
 | `TBO_DRONE_MAX_ALT_M` / `TBO_DRONE_MAX_DIST_M` | 120 / 2000 | пределы реального полёта: высота точек и удаление от точки взлёта (агент на борту проверяет и свои) |
 | `TBO_DRONE_MAX_HOME_OFFSET_M` / `TBO_DRONE_MIN_BATTERY_PCT` | 50 / 50 | борт не дальше от точки взлёта миссии; минимальный заряд для старта |
 | `TBO_DRONE_LOCAL_MAX_ALT_M` / `TBO_DRONE_LOCAL_MAX_DIST_M` | 3 / 20 | пределы локальной миссии в помещении (Optical Flow / ArUco): высота и удаление от точки взлёта; скорость — до 2 м/с |
+| `TBO_DRONE_VIDEO_PORT` | 8080 | порт web_video_server на борту для «Видео с борта» (сервер берёт поток с адреса, с которого подключён агент); `0` — видео выключено |
+| `TBO_DRONE_VIDEO_MAX` / `TBO_DRONE_VIDEO_MAX_MIN` | 3 / 30 | одновременных просмотров видео на сервер; длительность одного просмотра, мин |
 | `TBO_ALLOWED_HOSTS` | — (любые) | имена сайта через запятую, допустимые в заголовке `Host` (защита от DNS rebinding); `localhost` и имя из `TBO_PUBLIC_URL` разрешены всегда |
 | `TBO_DEMO_MODE` | `0` | демо-данные, сценарии, «Сбросить демо-данные» |
 | `TBO_SESSION_IDLE_MIN` / `TBO_SESSION_MAX_HOURS` | 120 / 12 | выход после бездействия / предельный срок сессии |
