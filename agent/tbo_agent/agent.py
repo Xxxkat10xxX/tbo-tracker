@@ -1,8 +1,10 @@
 """Агент: команды сервера → проверки → борт; телеметрия; регистратор полёта; журнал после посадки.
 
 Потоки: главный — долгий опрос команд и их выполнение; telemetry — состояние борта на сервер (1–5 с);
-flight — наблюдение за полётом и регистратор; outbox — повторная отправка журналов (журнал сначала
-сохраняется на диск, поэтому не теряется при отсутствии связи и перезапуске).
+flight — наблюдение за полётом и регистратор; watch — включение моторов без команды агента (взлёт из
+QGroundControl, «Start Mission» в QGC, с пульта): такой полёт тоже записывается — только наблюдение, без плана
+и без управления бортом; outbox — повторная отправка журналов (журнал сначала сохраняется на диск, поэтому
+не теряется при отсутствии связи и перезапуске).
 """
 from __future__ import annotations
 
@@ -26,6 +28,8 @@ TELEMETRY_KEYS = ("connected", "armed", "mode", "in_air", "lat", "lon", "alt_rel
 BOUNDS = {"lat": (-90, 90), "lon": (-180, 180), "alt_rel": (-1000, 10000), "heading": (-360, 720), "speed": (0, 300),
           "climb": (-200, 200), "battery_pct": (0, 100), "battery_v": (0, 200), "gps_fix": (-1, 10), "sats": (0, 200),
           "wp_current": (0, 10000), "wp_total": (0, 10000)}
+EXTERNAL_REASON = "полёт вне tbo-tracker (QGroundControl / пульт)"
+WATCH_STATES = ("idle", "error", "ready")      # агент не ведёт полёт: включение моторов — полёт вне tbo-tracker
 
 
 class Outbox:
@@ -35,14 +39,20 @@ class Outbox:
         self.path = path
         os.makedirs(path, mode=0o700, exist_ok=True)
 
-    def put(self, run_id: int, body: dict):
-        tmp = os.path.join(self.path, ".run-%d.tmp" % run_id)
+    @staticmethod
+    def name(key) -> str:
+        """Номер полёта tbo-tracker (int) → run-<номер>.json; номер полёта вне tbo-tracker (str) → flight-<номер>.json."""
+        return "run-%d.json" % key if isinstance(key, int) else "flight-%s.json" % key
+
+    def put(self, key, body: dict):
+        name = self.name(key)
+        tmp = os.path.join(self.path, "." + name[:-5] + ".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(body, f, ensure_ascii=False)
-        os.replace(tmp, os.path.join(self.path, "run-%d.json" % run_id))
+        os.replace(tmp, os.path.join(self.path, name))
 
     def pending(self) -> list:
-        return sorted(f for f in os.listdir(self.path) if f.startswith("run-") and f.endswith(".json"))
+        return sorted(f for f in os.listdir(self.path) if f.startswith(("run-", "flight-")) and f.endswith(".json"))
 
     def load(self, name: str) -> dict:
         with open(os.path.join(self.path, name), encoding="utf-8") as f:
@@ -80,6 +90,7 @@ class Agent:
         self.serial = None
         self.ready_since = None
         self.recorder, self.abort_kind, self.flight_thread = None, None, None
+        self.flight_id = None        # номер полёта вне tbo-tracker (взлёт из QGroundControl / с пульта), иначе None
         self.stop_ev, self.wake = threading.Event(), threading.Event()
         self._post_lock = threading.Lock()     # состояние отправляется строго по очереди — последним приходит актуальное
         # журналы отправляет один поток за раз: поток полёта сразу после посадки и фоновый повтор раз в 30 с
@@ -136,7 +147,7 @@ class Agent:
         self.v.open()
         self._hello()
         self._recover()
-        for target, name in ((self._telemetry_loop, "telemetry"), (self._outbox_loop, "outbox")):
+        for target, name in ((self._telemetry_loop, "telemetry"), (self._outbox_loop, "outbox"), (self._watch_loop, "watch")):
             threading.Thread(target=target, name=name, daemon=True).start()
         if self.state not in FLYING:                 # после восстановления полёта состояние уже «в полёте»
             self._set("idle", "на связи, ждёт план")
@@ -166,8 +177,9 @@ class Agent:
                 self.stop_ev.wait(30 if e.status in (401, 403) else 5)
 
     def stop(self):
-        """Остановка службы. В полёте с исполнителем offboard — сначала возврат домой (программа полёта прервётся)."""
-        if self.state in FLYING and self.v.executor == "offboard":
+        """Остановка службы. В полёте с исполнителем offboard — сначала возврат домой (программа полёта прервётся).
+        Полётом вне tbo-tracker управляет пилот (QGroundControl / пульт) — его агент не трогает."""
+        if self.state in FLYING and self.v.executor == "offboard" and self.flight_id is None:
             try:
                 self.v.rtl()
             except VehicleError as e:
@@ -275,9 +287,14 @@ class Agent:
             self.v.clear()
             self._set("idle", "план в контроллере изменён: %s" % e, run_id=None, plan=None, checks=[])
             return False, "Старт отменён: %s. Отправьте план заново" % e
-        self.abort_kind = None
-        self.recorder = Recorder(self.v.now())
-        self._set("starting", "включение моторов")
+        with self.lock:                  # моторы могли включить из QGroundControl, пока шли проверки (поток watch)
+            if self.flight_id is not None:
+                return False, "старт отменён: моторы уже включены вне tbo-tracker (QGroundControl / пульт)"
+            if self.state != "ready" or self.recorder is not None:
+                return False, "борт не готов к старту (%s)" % self.state
+            self.abort_kind = None
+            self.recorder = Recorder(self.v.now())
+            self._set("starting", "включение моторов")
         try:
             desc = self.v.start_mission(plan)
         except Exception as e:  # noqa: BLE001 — любой сбой: моторы не включились — снова «готов»; включились — следим
@@ -295,6 +312,8 @@ class Agent:
         with self.lock:
             if self.state not in FLYING:
                 return False, "борт не в полёте"
+            if self.flight_id is not None:
+                return False, "полёт начат вне tbo-tracker — управляет пилот (QGroundControl / пульт), агент только записывает журнал"
         desc = self.v.rtl() if kind == "rtl" else self.v.land()
         self.abort_kind = kind
         self._set("returning" if kind == "rtl" else "landing", desc)
@@ -310,7 +329,7 @@ class Agent:
 
     # ---------------------------------------------------------------- полёт
     def _save_ckpt(self, rec: Recorder):
-        data = {"run_id": self.run_id, "plan_hash": (self.plan or {}).get("plan_hash"),
+        data = {"run_id": self.run_id, "flight_id": self.flight_id, "plan_hash": (self.plan or {}).get("plan_hash"),
                 "wp_total": len((self.plan or {}).get("waypoints") or []), "abort_kind": self.abort_kind,
                 "takeoff_wall": None, "last_air_wall": None, "saved": self.api.now()}
         scale = self.v.time_scale()
@@ -366,7 +385,21 @@ class Agent:
         if self.stop_ev.is_set() and snap.get("in_air"):
             return                       # агент остановлен в полёте: контрольная точка сохранена
         end_wall = self.api.now() - (v.now() - land_t) / v.time_scale()
-        if not rec.took_off:
+        external = self.flight_id is not None
+        if external and not rec.took_off:
+            # моторы включили и выключили на земле (проверка, отказ взлёта): полёта нет — журнал не создаётся
+            detail = "моторы включены и выключены на земле вне tbo-tracker — полёта нет, журнал не создан"
+            if rec.ground_peak >= GROUND_HIT_G:
+                detail += "; удар %.1f g на земле (опрокидывание?) — осмотрите винты, лучи и подвес" % rec.ground_peak
+            log.info("полёт %s: %s", self.flight_id, detail)
+            self._drop_ckpt()
+            with self.lock:
+                self._set("idle", detail, flight_id=None, run_id=None, plan=None, checks=[])
+                self.recorder = None
+            return
+        if external:
+            status, reason = "completed", EXTERNAL_REASON
+        elif not rec.took_off:
             status, reason = "aborted", "моторы выключились без взлёта%s" % (": " + snap["status_text"] if snap.get("status_text") else "")
             if rec.ground_peak >= GROUND_HIT_G:      # полёта нет — события на сервере не будет, поэтому сообщаем здесь
                 reason += "; удар %.1f g на земле (опрокидывание?) — осмотрите винты, лучи и подвес" % rec.ground_peak
@@ -385,23 +418,27 @@ class Agent:
                 reason = "прервана: посадка до конца маршрута — достигнуто точек %d из %d%s" % (
                     reached, len(wps), "; " + str(err)[:200] if err else "")
         extra = {"executor": v.executor, "agent_version": VERSION, "wp_total": len((self.plan or {}).get("waypoints") or [])}
+        if external:
+            extra["external"] = True
+        key = self.flight_id if external else self.run_id
         saved = False
         try:
             body = rec.build(end_wall, status, reason, extra)
-            self.outbox.put(self.run_id, body)
+            self.outbox.put(key, body)
             saved = True
             self._set("landed", "посадка выполнена: " + reason)
             self._set("uploading", "передача журнала полёта")
             sent = self._flush_outbox()
             detail = "полёт завершён — %s" % ("журнал принят сервером" if sent else "журнал будет передан при появлении связи")
         except Exception as e:  # noqa: BLE001 — сбой при сохранении/передаче журнала не должен оставлять борт «на передаче»
-            log.exception("журнал полёта R%s", self.run_id)
+            log.exception("журнал полёта %s", key)
             detail = ("полёт завершён — журнал сохранён на борту и будет передан позже (%s)" % e if saved
                       else "полёт завершён — журнал не сохранён: %s" % e)
         if saved:
             self._drop_ckpt()            # без сохранённого журнала контрольная точка нужна: по ней журнал восстановится
-        self._set("idle", detail, run_id=None, plan=None, checks=[])
-        self.recorder = None
+        with self.lock:                  # атомарно: поток watch не должен увидеть «idle» с прежним регистратором
+            self._set("idle", detail, run_id=None, flight_id=None, plan=None, checks=[])
+            self.recorder = None
 
     def _recover(self):
         """Перезапуск агента: в воздухе — продолжить наблюдение; на земле после полёта — журнал по контрольной точке."""
@@ -411,27 +448,37 @@ class Agent:
         except (OSError, ValueError):
             return
         snap = self.v.snapshot()
-        if ck.get("run_id") and (snap.get("armed") or snap.get("in_air")):
-            log.warning("агент перезапущен в полёте (полёт R%s) — наблюдение продолжено", ck["run_id"])
+        fid = ck.get("flight_id") if not ck.get("run_id") else None      # полёт вне tbo-tracker
+        key = ck.get("run_id") or fid
+        if key and (snap.get("armed") or snap.get("in_air")):
+            log.warning("агент перезапущен в полёте (полёт %s) — наблюдение продолжено", key)
             rec = Recorder(self.v.now())
             if ck.get("takeoff_wall"):
                 rec.takeoff_t = self.v.now() - (self.api.now() - ck["takeoff_wall"])
             self.recorder, self.abort_kind = rec, ck.get("abort_kind")
-            self._set("in_flight", "наблюдение продолжено после перезапуска агента", run_id=ck["run_id"],
-                      plan={"plan_hash": ck.get("plan_hash"), "waypoints": [None] * int(ck.get("wp_total") or 0)})
+            if fid:
+                self._set("in_flight", EXTERNAL_REASON + " — наблюдение продолжено после перезапуска агента",
+                          run_id=None, flight_id=fid, plan=None)
+            else:
+                self._set("in_flight", "наблюдение продолжено после перезапуска агента", run_id=ck["run_id"],
+                          plan={"plan_hash": ck.get("plan_hash"), "waypoints": [None] * int(ck.get("wp_total") or 0)})
             self.flight_thread = threading.Thread(target=self._flight, name="flight", daemon=True)
             self.flight_thread.start()
             return
-        if ck.get("run_id") and ck.get("takeoff_wall"):
+        if key and ck.get("takeoff_wall"):
             from .client import iso
             start, end = ck["takeoff_wall"], max(ck["takeoff_wall"] + 1, ck.get("last_air_wall") or ck["takeoff_wall"])
+            restored = "журнал восстановлен по контрольной точке после перезапуска агента (без акселерометра)"
             body = {"status": "aborted" if ck.get("abort_kind") else "completed",
-                    "reason": "журнал восстановлен по контрольной точке после перезапуска агента (без акселерометра)",
+                    "reason": EXTERNAL_REASON + "; " + restored if fid else restored,
                     "flight": {"start": iso(start), "end": iso(end), "imu": None, "events": []}, "track": [],
                     "summary": {"duration_s": round(end - start, 1), "executor": self.v.executor, "agent_version": VERSION,
                                 "reason": "журнал восстановлен после перезапуска агента"}}
-            self.outbox.put(ck["run_id"], body)
-        self.v.clear()
+            if fid:
+                body["summary"]["external"] = True
+            self.outbox.put(key, body)
+        if not fid:
+            self.v.clear()               # свой план — снять; миссию пилота (QGroundControl) не трогать
         self._drop_ckpt()
 
     # ---------------------------------------------------------------- фоновые потоки
@@ -471,7 +518,9 @@ class Agent:
             ok = True
             for name in self.outbox.pending():
                 try:
-                    run_id = int(name[4:-5])
+                    external = name.startswith("flight-")
+                    key = name[7:-5] if external else int(name[4:-5])
+                    label = key if external else "R%d" % key
                     body = self.outbox.load(name)
                 except FileNotFoundError:
                     continue                     # уже отправлен и перенесён
@@ -480,17 +529,20 @@ class Agent:
                     self._move(name, "rejected")
                     continue
                 try:
-                    self.api.upload_log(run_id, body)
+                    if external:
+                        self.api.upload_flight(key, body)
+                    else:
+                        self.api.upload_log(key, body)
                 except ApiError as e:
                     ok = False
                     if e.status in (400, 404, 409, 422):
-                        log.error("журнал R%d отклонён сервером: %s (сохранён в rejected/)", run_id, e.message)
+                        log.error("журнал %s отклонён сервером: %s (сохранён в rejected/)", label, e.message)
                         self._move(name, "rejected")
                         continue
-                    log.warning("журнал R%d не передан: %s — повтор позже", run_id, e.message)
+                    log.warning("журнал %s не передан: %s — повтор позже", label, e.message)
                     break
                 self._move(name, "sent")
-                log.info("журнал полёта R%d принят сервером", run_id)
+                log.info("журнал полёта %s принят сервером", label)
             return ok
 
     def _outbox_tick(self):
@@ -499,6 +551,40 @@ class Agent:
                 self._flush_outbox()
         except Exception:  # noqa: BLE001 — фоновый повтор не должен останавливаться навсегда
             log.exception("повторная отправка журналов")
+
+    def _new_flight_id(self) -> str:
+        """Номер полёта вне tbo-tracker: время включения моторов (UTC, по часам сервера) и случайный хвост."""
+        return "X" + time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(self.api.now())) + "-" + os.urandom(2).hex()
+
+    def _watch_tick(self) -> bool:
+        """Моторы включены без команды агента → наблюдение и запись журнала (без плана и без управления бортом)."""
+        snap = self.v.snapshot()
+        if not (snap.get("armed") or snap.get("in_air")):
+            return False
+        with self.lock:
+            if self.recorder is not None or self.state not in WATCH_STATES:
+                return False
+            dropped = self.state == "ready"
+            fid = self._new_flight_id()
+            self.abort_kind, self.ready_since = None, None
+            self.recorder = Recorder(self.v.now())
+            # подготовка tbo-tracker снимается только у агента (сервер закроет её как «сброшенную на борту»):
+            # план в контроллере не стирается — по нему, возможно, и летит пилот
+            self._set("in_flight", EXTERNAL_REASON + " — запись журнала" + ("; подготовка tbo-tracker снята" if dropped else ""),
+                      run_id=None, flight_id=fid, plan=None, checks=[])
+            self.flight_thread = threading.Thread(target=self._flight, name="flight", daemon=True)
+            self.flight_thread.start()
+        log.warning("моторы включены без команды tbo-tracker (режим %s) — запись полёта %s", snap.get("mode"), fid)
+        return True
+
+    def _watch_loop(self):
+        period = max(0.02, 0.25 / self.v.time_scale())
+        while not self.stop_ev.wait(period):
+            try:
+                self._watch_tick()
+            except Exception:  # noqa: BLE001 — сбой одного опроса не должен отключать наблюдение
+                log.exception("наблюдение за включением моторов")
+                self.stop_ev.wait(5)
 
     def _outbox_loop(self):
         while not self.stop_ev.wait(30):

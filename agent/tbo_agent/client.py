@@ -113,3 +113,7 @@ class Api:
 
     def upload_log(self, run_id: int, body: dict):
         return self.call("POST", "/api/agent/runs/%d/log" % run_id, body, timeout=max(60.0, self.timeout))
+
+    def upload_flight(self, flight_id: str, body: dict):
+        """Журнал полёта вне tbo-tracker (QGroundControl / пульт): номер полёта задаёт агент."""
+        return self.call("POST", "/api/agent/flights", {**body, "flight_id": flight_id}, timeout=max(60.0, self.timeout))
