@@ -40,14 +40,19 @@ class Handler(socketserver.StreamRequestHandler):
         if "topic=/main_camera/image_raw&" not in line and "topic=/main_camera/image_raw_throttled&" not in line:
             time.sleep(3)
             return
+        # «очередь на борту» (поток main_low): кадры сняты раз в 50 мс, а уходят раз в 100 мс — метки X-Timestamp
+        # (steady_clock борта) всё сильнее отстают от времени прихода, как при раздутом буфере TCP на борту
+        queued = "image_raw_throttled&" in line
+        t0 = time.monotonic() + 1000.0                   # часы «борта» — не часы сервера
         try:
             for i in range(400):                         # ~20 с кадров, пока клиент не закроет соединение
                 frame = FRAME[:2] + b"%06d" % i + FRAME[2:]                 # номер кадра — для проверки задержки
                 self.server.sent = i
+                stamp = t0 + i * 0.05 if queued else time.monotonic() + 1000.0
                 self.wfile.write(b"--" + BOUNDARY + b"\r\nContent-type: image/jpeg\r\nContent-Length: "
-                                 + str(len(frame)).encode() + b"\r\n\r\n" + frame + b"\r\n")
+                                 + str(len(frame)).encode() + b"\r\nX-Timestamp: %.06f\r\n\r\n" % stamp + frame + b"\r\n")
                 self.wfile.flush()
-                time.sleep(0.05)
+                time.sleep(0.1 if queued else 0.05)
         except OSError:
             pass
 
@@ -162,7 +167,7 @@ def test_video_frames_do_not_lag_behind(client, cam):
         assert r.status_code == 200 and int(r.headers["x-frame-seq"]) > seq
         seq = int(r.headers["x-frame-seq"])
         lags.append(cam.sent - int(r.content[2:8]))                                  # насколько кадр отстал от камеры
-        assert int(r.headers["x-frame-age-ms"]) < 300
+        assert int(r.headers["x-frame-age-ms"]) < 300 and int(r.headers["x-frame-lag-ms"]) < 300
     assert max(lags) <= 3, lags                                                       # не очередь: свежий кадр (по 50 мс)
     none = client.get(f"{url}&after={seq + 10**6}&wait=0")                            # нового кадра нет — 204, без ожидания
     assert none.status_code == 204
@@ -176,11 +181,37 @@ def test_split_frames_handles_partial_and_missing_length():
     b = b"--bnd"
     one = b"\xff\xd8one\xff\xd9"
     two = b"\xff\xd8two\xff\xd9"
-    data = (b"--bnd\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n" % len(one) + one + b"\r\n"
+    data = (b"--bnd\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\nX-Timestamp: 1234.500000\r\n\r\n" % len(one)
+            + one + b"\r\n"
             + b"--bnd\r\nContent-Type: image/jpeg\r\n\r\n" + two + b"\r\n--bnd\r\nContent-Type: image/jpeg\r\nContent-Le")
     frames, rest = video.split_frames(data[:30], b)                                   # заголовок ещё не пришёл целиком
     assert frames == [] and rest == data[:30]
     frames, rest = video.split_frames(data, b)
-    assert frames == [one, two] and rest.startswith(b"--bnd")                         # без Content-Length — до границы
+    assert frames == [(one, 1234.5), (two, None)] and rest.startswith(b"--bnd")      # без Content-Length — до границы
     frames, rest = video.split_frames(b"garbage" * 10, b)
     assert frames == [] and len(rest) <= len(b)
+
+
+def test_queue_on_board_is_reset_by_reconnect(client, cam, monkeypatch):
+    """Очередь кадров на самом борту (буфер TCP борта при слабом Wi-Fi): метки X-Timestamp всё сильнее отстают от
+    прихода. Сторож пересоздаёт соединение — очередь борта сбрасывается, отставание снова около нуля; окно приёма
+    от борта маленькое, чтобы буфер борта не раздувался."""
+    monkeypatch.setattr(video, "LAG_MAX_S", 0.3)
+    monkeypatch.setattr(video, "LAG_HOLD_S", 0.3)
+    lid = _link(client)
+    url = f"/api/drones/{lid}/video/frame?stream=main_low"
+    seq, seen = 0, []
+    end = time.time() + 8
+    while time.time() < end:
+        r = client.get(f"{url}&after={seq}")
+        assert r.status_code == 200, r.text
+        seq = int(r.headers["x-frame-seq"])
+        seen.append((int(r.headers["x-frame-lag-ms"]), int(r.headers["x-feed-reconnects"])))
+        if seen[-1][1] >= 1 and seen[-1][0] < 200:
+            break
+    assert max(lag for lag, _ in seen) > 300, seen                                   # отставание росло…
+    assert seen[-1][1] >= 1 and seen[-1][0] < 200, seen                               # …и сброшено переподключением
+    assert sum("image_raw_throttled" in q for q in cam.requests) >= 2                 # новое соединение с бортом
+    feed = next(iter(video._feeds.values()))
+    rcv = feed.writer.get_extra_info("socket").getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
+    assert rcv <= 4 * video.RCVBUF                                                    # окно приёма от борта маленькое

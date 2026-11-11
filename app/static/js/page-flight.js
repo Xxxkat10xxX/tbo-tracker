@@ -51,7 +51,7 @@ function droneVideoPanel(root) {
   // кадры в буферах сети, и картинка отставала на десятки секунд; так отставание не больше одного кадра.
   let gen = 0;
   async function pump(my, img, statsEl) {
-    let after = 0, prevUrl = null, shown = 0, since = performance.now(), lag = 0;
+    let after = 0, prevUrl = null, shown = 0, since = performance.now(), lag = 0, boardLag = null;
     const live = () => my === gen && playing && alive();
     while (live()) {
       const t0 = performance.now();
@@ -70,6 +70,8 @@ function droneVideoPanel(root) {
       }
       after = +r.headers.get("X-Frame-Seq") || after;
       const age = +r.headers.get("X-Frame-Age-Ms") || 0;
+      const lagHdr = r.headers.get("X-Frame-Lag-Ms"), reconnects = +r.headers.get("X-Feed-Reconnects") || 0;
+      if (lagHdr !== null) boardLag = boardLag === null ? +lagHdr : boardLag * 0.8 + +lagHdr * 0.2;
       const url = URL.createObjectURL(await r.blob());
       await new Promise((res) => { img.onload = res; img.onerror = res; img.src = url; });
       if (prevUrl) URL.revokeObjectURL(prevUrl);
@@ -77,7 +79,11 @@ function droneVideoPanel(root) {
       lag = lag ? lag * 0.8 + (age + performance.now() - t0) * 0.2 : age + performance.now() - t0;
       const dt = performance.now() - since;
       if (dt >= 1000 && statsEl) {
-        statsEl.textContent = `${num(shown * 1000 / dt, 1)} кадр/с · задержка сервера и сети ≈ ${num(lag, 0)} мс`;
+        // отставание от борта — очередь кадров на борту и в Wi-Fi борт → сервер (по меткам web_video_server)
+        statsEl.textContent = `${num(shown * 1000 / dt, 1)} кадр/с`
+          + (boardLag !== null ? ` · отставание от борта ≈ ${num(boardLag, 0)} мс` : "")
+          + ` · сервер и сеть ≈ ${num(lag, 0)} мс`
+          + (reconnects ? ` · канал с бортом пересоздан ${reconnects} раз (слабый Wi-Fi)` : "");
         shown = 0; since = performance.now();
       }
     }

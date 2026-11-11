@@ -127,9 +127,12 @@ async def drone_video_frame(lid: int, stream: str = Query("main", max_length=20)
     got = await video.frame(ip, stream, after, wait)
     if got is None:
         return Response(status_code=204, headers={"Cache-Control": "no-store", "X-Frame-Seq": str(after)})
-    jpeg, seq, age_ms = got
-    return Response(jpeg, media_type="image/jpeg",
-                    headers={"Cache-Control": "no-store", "X-Frame-Seq": str(seq), "X-Frame-Age-Ms": str(age_ms)})
+    jpeg, seq, age_ms, lag_ms, reconnects = got
+    headers = {"Cache-Control": "no-store", "X-Frame-Seq": str(seq), "X-Frame-Age-Ms": str(age_ms),
+               "X-Feed-Reconnects": str(reconnects)}
+    if lag_ms is not None:
+        headers["X-Frame-Lag-Ms"] = str(lag_ms)            # отставание кадров борта (очередь на борту и в Wi-Fi)
+    return Response(jpeg, media_type="image/jpeg", headers=headers)
 
 
 @router.get("/drones/{lid}/video")
