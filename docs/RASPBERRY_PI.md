@@ -68,7 +68,7 @@ sudo apt update && sudo apt install -y git
 ```
 
 ```bash
-git clone https://github.com/Xxxkat10xxX/tbo-tracker.git && cd tbo-tracker
+git clone https://github.com/DanilTeplo/tbo-tracker.git && cd tbo-tracker
 ```
 
 ```bash
