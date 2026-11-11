@@ -132,7 +132,7 @@ class FakeApi:
     """Сервер в памяти: очередь команд, принятые состояния, результаты и журналы."""
 
     def __init__(self):
-        self.cmds, self.results, self.states, self.logs = [], [], [], {}
+        self.cmds, self.results, self.states, self.logs, self.flights = [], [], [], {}, {}
         self.active_run, self.clock_offset, self.offline = None, 0.0, False
         self.lock = threading.Lock()
 
@@ -162,6 +162,12 @@ class FakeApi:
         if self.offline:
             raise ApiError(0, "нет связи")
         self.logs[run_id] = body
+        return {"ok": True}
+
+    def upload_flight(self, flight_id, body):
+        if self.offline:
+            raise ApiError(0, "нет связи")
+        self.flights[flight_id] = body
         return {"ok": True}
 
     def send(self, kind, payload=None, run_id=None, ttl=15):

@@ -461,11 +461,12 @@ def agent_state(s: Session, link: DroneLink, data: dict, ip: str, now: datetime)
             run.status = "landed"
         elif link.state == "ready" and run.status == "in_flight" and data.get("plan_hash") == (run.summary or {}).get("plan_hash"):
             _start_failed(run, now)                                      # «Запуск» ушёл, но моторы не включились
-    elif link.state == "idle" and link.run_id:
+    elif (link.state == "idle" or link.state in FLYING) and link.run_id:
         cur = s.get(MissionRun, link.run_id)
         if cur is not None and cur.status == "ready":                   # агент сбросил план (перезапуск, ожидание старта)
-            cur.status, cur.ended_at = "cancelled", now
-            _run_update(cur, error="подготовка сброшена на борту")
+            cur.status, cur.ended_at = "cancelled", now                 # или взлетели вне tbo-tracker (QGroundControl)
+            _run_update(cur, error="подготовка сброшена на борту" if link.state == "idle" else
+                        "подготовка снята: моторы включены вне tbo-tracker (QGroundControl / пульт)")
             link.run_id = None
     return {"active_run_id": link.run_id, "server_time": iso(now)}
 

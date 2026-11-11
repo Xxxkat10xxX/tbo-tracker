@@ -151,6 +151,11 @@ class LogIn(BaseModel):
         return _small_dict(v, 64000)
 
 
+class ExternalLogIn(LogIn):
+    """Журнал полёта, начатого не из tbo-tracker (QGroundControl, пульт): номер полёта задаёт агент."""
+    flight_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+
+
 def device(request: Request, s: Session = Depends(get_session)) -> DroneLink:
     link = s.get(DroneLink, getattr(request.state, "device", None) or 0)
     if link is None or not link.enabled:
@@ -223,4 +228,18 @@ def upload_log(rid: int, data: LogIn, request: Request, link: DroneLink = Depend
     with drones.guard(s, link):
         _seen(link, request)
         res = dronelog.ingest(s, link, rid, payload, utcnow())
+    return {**res, "server_time": iso(utcnow())}
+
+
+@router.post("/flights")
+def upload_external(data: ExternalLogIn, request: Request, link: DroneLink = Depends(device), s: Session = Depends(get_session)):
+    """Полёт борта без миссии (взлёт из QGroundControl, с пульта): наработка и датчики — как у обычного полёта.
+    Повтор с тем же flight_id (обрыв связи после приёма) второй полёт не создаёт."""
+    payload = data.model_dump(exclude={"flight_id"})
+    if data.flight is not None and parse_dt(data.flight.end) <= parse_dt(data.flight.start):
+        raise DomainError("Окончание полёта раньше начала")
+    payload["track"] = [list(p) for p in data.track]
+    with drones.guard(s, link):
+        _seen(link, request)
+        res = dronelog.ingest_external(s, link, data.flight_id, payload, utcnow())
     return {**res, "server_time": iso(utcnow())}
