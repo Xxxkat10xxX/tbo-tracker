@@ -272,14 +272,35 @@ class ComponentUsageEntry(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime)
     hours: Mapped[float] = mapped_column(Float)
     cycles: Mapped[int] = mapped_column(Integer, default=0)
-    kind: Mapped[str] = mapped_column(String(30), default="bench")  # bench | test | correction
+    kind: Mapped[str] = mapped_column(String(30), default="bench")  # bench | test | correction | ground
     note: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[str | None] = mapped_column(String(200))
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    # запись борта (AircraftUsageEntry), с которой начислено узлу; удаляется вместе с ней
+    aircraft_entry_id: Mapped[int | None] = mapped_column(Integer)
 
     component: Mapped[Component] = relationship(lazy="joined")
 
     __table_args__ = (CheckConstraint("hours >= 0 AND cycles >= 0", name="ck_usage_entry_nonneg"),)
+
+
+class AircraftUsageEntry(Base):
+    """Ручное начисление наработки борту без полёта: часы и циклы (износ) — перенос из бумажного формуляра,
+    наземные прогоны, испытания. Учитывается в наработке борта и его регламентах; при начислении «и узлам» каждому
+    узлу, стоявшему на борту в эту дату, создаётся связанная ComponentUsageEntry."""
+
+    __tablename__ = "aircraft_usage_entries"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    aircraft_id: Mapped[int] = mapped_column(ForeignKey("aircraft.id"), index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime)
+    hours: Mapped[float] = mapped_column(Float)
+    cycles: Mapped[int] = mapped_column(Integer, default=0)
+    kind: Mapped[str] = mapped_column(String(30), default="correction")  # correction | ground | test
+    note: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[str | None] = mapped_column(String(200))
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+    __table_args__ = (CheckConstraint("hours >= 0 AND cycles >= 0", name="ck_aircraft_usage_nonneg"),)
 
 
 class SensorEvent(Base):

@@ -162,6 +162,17 @@ class UsageEntryIn(BaseModel):
     created_by: str | None = None
 
 
+class AircraftUsageIn(BaseModel):
+    """Ручное начисление борту часов и циклов (износа) без полёта."""
+    started_at: datetime | None = None
+    hours: float = Field(0, ge=0)
+    cycles: int = Field(0, ge=0)
+    kind: Literal["correction", "ground", "test"] = "correction"
+    note: str | None = Field(None, max_length=500)
+    created_by: str | None = Field(None, max_length=200)
+    to_components: bool = False             # то же — узлам, стоявшим на борту в эту дату
+
+
 class ComponentTypeIn(BaseModel):
     code: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_\-]+$")
     name: str = Field(min_length=1, max_length=200)

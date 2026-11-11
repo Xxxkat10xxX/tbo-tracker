@@ -4,20 +4,22 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..config import FUTURE_TOLERANCE_MIN
 from ..errors import DomainError
-from ..models import Aircraft, Component, ComponentUsageEntry, Flight, Installation, LogImport
+from ..models import Aircraft, AircraftUsageEntry, Component, ComponentUsageEntry, Flight, Installation, LogImport
 from ..timeutil import iso, utcnow
-from . import logs
+from . import logs, usage
 
 ENTRY_KINDS = {
     "bench": "Стендовый прогон",
     "test": "Испытания / проверка",
     "correction": "Корректировка по формуляру",
+    "ground": "Наземный прогон",
 }
+AIRCRAFT_KINDS = ("correction", "ground", "test")
 
 
 def installed_on(s: Session, component_id: int, moment: datetime) -> Installation | None:
@@ -90,4 +92,55 @@ def add_usage_entry(s: Session, component: Component, started_at: datetime | Non
 def entry_dict(e: ComponentUsageEntry) -> dict:
     return {"id": e.id, "component_id": e.component_id, "started_at": iso(e.started_at), "hours": round(e.hours, 3),
             "cycles": e.cycles, "kind": e.kind, "kind_label": ENTRY_KINDS.get(e.kind, e.kind), "note": e.note,
-            "created_by": e.created_by}
+            "created_by": e.created_by, "aircraft_entry_id": e.aircraft_entry_id}
+
+
+def _check_amounts(hours: float, cycles: int, started_at: datetime):
+    if hours < 0 or cycles < 0 or (hours == 0 and cycles == 0):
+        raise DomainError("Укажите часы и/или циклы (неотрицательные, хотя бы одно больше нуля)")
+    if hours > 100000 or cycles > 1000000:
+        raise DomainError("Слишком большое значение — проверьте ввод")
+    if started_at > utcnow() + timedelta(minutes=FUTURE_TOLERANCE_MIN):
+        raise DomainError("Дата не может быть в будущем")
+
+
+def add_aircraft_entry(s: Session, aircraft: Aircraft, started_at: datetime | None, hours: float, cycles: int, kind: str,
+                       note: str | None, by: str | None, to_components: bool = False) -> tuple[AircraftUsageEntry, int]:
+    """Начислить борту часы и циклы (износ) без полёта. to_components — то же каждому узлу, стоявшему на борту в эту
+    дату (связанные записи узлов удаляются вместе с записью борта). Возвращает (запись, число узлов)."""
+    started_at = started_at or utcnow()
+    if kind not in AIRCRAFT_KINDS:
+        raise DomainError("Неизвестный вид записи")
+    _check_amounts(hours, cycles, started_at)
+    if started_at < aircraft.in_service_at and kind != "correction":
+        raise DomainError("Дата раньше постановки борта на учёт (для переноса старой наработки — «Корректировка по формуляру»)")
+    e = AircraftUsageEntry(aircraft_id=aircraft.id, started_at=started_at, hours=round(hours, 4), cycles=cycles, kind=kind,
+                           note=note, created_by=by)
+    s.add(e)
+    s.flush()
+    n = 0
+    if to_components:
+        for inst in usage.installed_at(s, aircraft.id, started_at):
+            s.add(ComponentUsageEntry(component_id=inst.component_id, started_at=started_at, hours=e.hours, cycles=cycles,
+                                      kind=kind, note=f"с борта {aircraft.name}" + (f": {note}" if note else ""),
+                                      created_by=by, aircraft_entry_id=e.id))
+            n += 1
+        s.flush()
+    return e, n
+
+
+def delete_aircraft_entry(s: Session, e: AircraftUsageEntry) -> int:
+    """Удалить начисление борту и связанные записи узлов. Возвращает число снятых записей узлов."""
+    linked = list(s.scalars(select(ComponentUsageEntry).where(ComponentUsageEntry.aircraft_entry_id == e.id)))
+    for x in linked:
+        s.delete(x)
+    s.delete(e)
+    s.flush()
+    return len(linked)
+
+
+def aircraft_entry_dict(s: Session, e: AircraftUsageEntry) -> dict:
+    n = s.scalar(select(func.count(ComponentUsageEntry.id)).where(ComponentUsageEntry.aircraft_entry_id == e.id)) or 0
+    return {"id": e.id, "aircraft_id": e.aircraft_id, "started_at": iso(e.started_at), "hours": round(e.hours, 3),
+            "cycles": e.cycles, "kind": e.kind, "kind_label": ENTRY_KINDS.get(e.kind, e.kind), "note": e.note,
+            "created_by": e.created_by, "components": n}

@@ -7,7 +7,7 @@ from datetime import datetime
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from ..models import Aircraft, Component, ComponentUsageEntry, Flight, Installation
+from ..models import Aircraft, AircraftUsageEntry, Component, ComponentUsageEntry, Flight, Installation
 
 
 @dataclass
@@ -117,7 +117,21 @@ def aircraft_usage(
     if aircraft_ids is not None:
         q = q.where(Flight.aircraft_id.in_(aircraft_ids))
     q = _time_filters(q, since, before)
-    return {aid: Usage(h, c, n) for aid, h, c, n in s.execute(q)}
+    out = {aid: Usage(h, c, n) for aid, h, c, n in s.execute(q)}
+    # ручные начисления борту без полёта (формуляр, наземные прогоны): часы и циклы, полётов не прибавляют
+    e = select(AircraftUsageEntry.aircraft_id, func.coalesce(func.sum(AircraftUsageEntry.hours), 0.0),
+               func.coalesce(func.sum(AircraftUsageEntry.cycles), 0)).group_by(AircraftUsageEntry.aircraft_id)
+    if aircraft_ids is not None:
+        e = e.where(AircraftUsageEntry.aircraft_id.in_(aircraft_ids))
+    if since is not None:
+        e = e.where(AircraftUsageEntry.started_at >= since)
+    if before is not None:
+        e = e.where(AircraftUsageEntry.started_at < before)
+    for aid, h, c in s.execute(e):
+        u = out.setdefault(aid, Usage())
+        u.hours += h
+        u.cycles += c
+    return out
 
 
 def component_totals(s: Session, components: list[Component], before: datetime | None = None) -> dict[int, Usage]:

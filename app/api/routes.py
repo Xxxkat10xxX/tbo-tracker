@@ -16,6 +16,7 @@ from ..models import (
     AIRCRAFT_STATUSES,
     COMPONENT_STATUSES,
     Aircraft,
+    AircraftUsageEntry,
     AircraftType,
     Component,
     ComponentType,
@@ -45,6 +46,7 @@ from ..schemas import (
     RemoveIn,
     RuleIn,
     UsageEntryIn,
+    AircraftUsageIn,
 )
 from ..services import images, inventory, logs, manual, sensors
 from ..services.analytics import analytics
@@ -358,15 +360,27 @@ def get_aircraft(aid: int, s: Session = Depends(get_session)):
     flights = s.scalars(select(Flight).where(Flight.aircraft_id == aid).order_by(Flight.started_at.desc()).limit(200))
     records = s.scalars(records_query(aircraft_id=aid, include_components=True))
     mids = _manual_ids(s)
+    entries = [manual.aircraft_entry_dict(s, e) for e in s.scalars(select(AircraftUsageEntry).where(
+        AircraftUsageEntry.aircraft_id == aid).order_by(AircraftUsageEntry.started_at.desc()))]
     return {
         **aircraft_brief(a, tot, summ, set(current)),
         "initial_hours": a.initial_hours, "initial_cycles": a.initial_cycles, "notes": a.notes,
         "configuration": config, "due": items, "installations": history,
         "sensor_events": [sensors.event_dict(e) for e in s.scalars(select(SensorEvent).where(SensorEvent.aircraft_id == aid)
                                                                      .order_by(SensorEvent.occurred_at.desc()))],
-        "flight_log": [_flight_dict(f, mids) for f in flights],
+        "flight_log": sorted([_flight_dict(f, mids) for f in flights] + [_aircraft_entry_row(e) for e in entries],
+                             key=lambda f: f["started_at"], reverse=True),
+        "usage_entries": entries,
         "maintenance_records": [record_dict(r) for r in records],
     }
+
+
+def _aircraft_entry_row(e: dict) -> dict:
+    """Ручное начисление борту — строкой в журнале полётов борта."""
+    note = e["kind_label"] + (f": {e['note']}" if e["note"] else "") + (f" (и {e['components']} узлам)" if e["components"] else "")
+    return {"source": "aircraft_entry", "id": e["id"], "started_at": e["started_at"], "ended_at": None,
+            "duration_h": e["hours"], "cycles": e["cycles"], "mission": note, "aircraft_id": e["aircraft_id"],
+            "aircraft_name": "начислено вручную", "external_id": "—", "import_id": None, "manual": True, "events": 0}
 
 
 def _manual_ids(s: Session) -> set[int]:
@@ -487,9 +501,11 @@ def get_component(cid: int, s: Session = Depends(get_session)):
     for e in entries:
         fl.append({"source": "entry", "id": e["id"], "started_at": e["started_at"], "ended_at": None,
                    "duration_h": e["hours"], "cycles": e["cycles"], "mission": e["kind_label"] + (f": {e['note']}" if e["note"] else ""),
-                   "aircraft_id": None, "aircraft_name": "вне борта", "external_id": "—", "import_id": None, "manual": True})
+                   "aircraft_id": None, "aircraft_name": "с борта, вручную" if e["aircraft_entry_id"] else "вне борта",
+                   "external_id": "—", "import_id": None, "manual": True, "linked": bool(e["aircraft_entry_id"])})
         timeline.append({"at": e["started_at"], "kind": "entry",
-                         "title": f"{e['kind_label']}: +{e['hours']} ч, +{e['cycles']} цикл. (вне борта)",
+                         "title": f"{e['kind_label']}: +{e['hours']} ч, +{e['cycles']} цикл. "
+                                  + ("(начислено с борта)" if e["aircraft_entry_id"] else "(вне борта)"),
                          "details": " · ".join(x for x in (e["note"], e["created_by"]) if x)})
     fl.sort(key=lambda f: f["started_at"], reverse=True)
     timeline.sort(key=lambda e: e["at"], reverse=True)
@@ -545,9 +561,33 @@ def delete_usage(cid: int, eid: int, s: Session = Depends(get_session)):
     e = _get(s, ComponentUsageEntry, eid, "Запись")
     if e.component_id != cid:
         raise NotFound("Запись не найдена")
+    if e.aircraft_entry_id:
+        raise DomainError("Наработка начислена с борта — удалите запись в карточке борта (вкладка «Полёты»), "
+                          "она снимется со всех узлов сразу")
     s.delete(e)
     _commit(s)
     return {"message": "Запись внебортовой наработки удалена"}
+
+
+@router.post("/aircraft/{aid}/usage", status_code=201)
+def add_aircraft_usage(aid: int, data: AircraftUsageIn, s: Session = Depends(get_session)):
+    a = _get(s, Aircraft, aid, "Борт")
+    e, n = manual.add_aircraft_entry(s, a, _dt(data.started_at), data.hours, data.cycles, data.kind, data.note,
+                                     data.created_by, data.to_components)
+    _commit(s)
+    return {"entry": manual.aircraft_entry_dict(s, e),
+            "message": f"Начислено борту {a.name}: +{e.hours} ч, +{e.cycles} цикл."
+                       + (f" и {n} узлам на борту" if n else " (узлам — нет)")}
+
+
+@router.delete("/aircraft/{aid}/usage/{eid}")
+def delete_aircraft_usage(aid: int, eid: int, s: Session = Depends(get_session)):
+    e = _get(s, AircraftUsageEntry, eid, "Запись")
+    if e.aircraft_id != aid:
+        raise NotFound("Запись не найдена")
+    n = manual.delete_aircraft_entry(s, e)
+    _commit(s)
+    return {"message": "Начисление борту удалено" + (f", снято и с {n} узлов" if n else "")}
 
 
 @router.post("/flights", status_code=201)

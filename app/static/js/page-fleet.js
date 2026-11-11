@@ -129,9 +129,10 @@ async function pageAircraft(id) {
         <td class="num">${hrs(i.hours)} · ${num(i.cycles, 0)} ц.</td><td class="small">${esc(i.install_reason || "")}${i.remove_reason ? `<br><span class="muted">снят: ${esc(i.remove_reason)}</span>` : ""}</td></tr>`).join("")}</tbody></table></div>`;
     },
     fl: () => {
-      $("#tab").innerHTML = flightsTable(a.flight_log, { toolbar: '<button class="primary sm" id="add-fl">+ Записать полёт вручную</button><span class="small muted">Показаны последние 200 полётов</span>' });
+      $("#tab").innerHTML = flightsTable(a.flight_log, { toolbar: '<button class="primary sm" id="add-fl">+ Записать полёт вручную</button><button class="sm" id="add-acc">+ Начислить часы и износ</button><span class="small muted">Показаны последние 200 полётов</span>' });
       $("#add-fl").onclick = () => openManualFlightModal({ aircraftId: a.id, onDone: reload });
-      bindFlightDeletes($("#tab"), null, reload);
+      $("#add-acc").onclick = () => openAircraftUsageModal({ aircraft: a, onDone: reload });
+      bindFlightDeletes($("#tab"), null, reload, a.id);
     },
   };
   $$("#tabs button").forEach((b) => b.addEventListener("click", () => {
@@ -185,9 +186,12 @@ function recordsTable(recs) {
 function flightsTable(fl, opts = {}) {
   const head = opts.toolbar ? `<div class="toolbar">${opts.toolbar}</div>` : "";
   if (!fl.length) return head + '<div class="empty-state">Полётов нет</div>';
-  const src = (f) => f.source === "entry" ? '<span class="badge warn">вне борта</span>'
+  const src = (f) => f.source === "aircraft_entry" ? '<span class="badge blue">начислено вручную</span>'
+    : f.source === "entry" ? (f.linked ? '<span class="badge blue">с борта, вручную</span>' : '<span class="badge warn">вне борта</span>')
     : f.manual ? '<span class="badge blue">ручной ввод</span>' : `<span class="small">журнал №${f.import_id ?? "—"}</span>`;
-  const del = (f) => f.source === "entry" ? `<button class="sm danger" data-del-entry="${f.id}" title="Удалить запись">✕</button>`
+  const del = (f) => f.source === "aircraft_entry" ? `<button class="sm danger" data-del-acc="${f.id}" title="Удалить начисление">✕</button>`
+    : f.source === "entry" ? (f.linked ? '<span class="muted small" title="Удаляется в карточке борта">—</span>'
+      : `<button class="sm danger" data-del-entry="${f.id}" title="Удалить запись">✕</button>`)
     : f.manual ? `<button class="sm danger" data-del-flight="${f.id}" title="Удалить ручной полёт">✕</button>` : "";
   return `${head}<div class="table-wrap"><table><thead><tr><th>Взлёт / начало</th><th>Посадка</th><th>Борт</th><th class="num">Длительность</th><th class="num">Циклы</th><th>Задание / примечание</th><th>ID в журнале</th><th>Датчики</th><th>Источник</th><th></th></tr></thead><tbody>
   ${fl.map((f) => `<tr><td class="nowrap">${fmtDT(f.started_at)}</td><td class="nowrap">${fmtDT(f.ended_at)}</td>
@@ -196,7 +200,11 @@ function flightsTable(fl, opts = {}) {
     <td class="small">${esc(f.mission || "")}</td><td class="mono">${esc(f.external_id)}</td><td>${f.events ? `<span class="badge bad">${f.events} соб.</span>` : '<span class="muted small">—</span>'}</td><td>${src(f)}</td><td>${del(f)}</td></tr>`).join("")}</tbody></table></div>`;
 }
 
-function bindFlightDeletes(root, componentId, after) {
+function bindFlightDeletes(root, componentId, after, aircraftId) {
+  $$("[data-del-acc]", root).forEach((b) => b.addEventListener("click", () => modal("Удаление начисления",
+    "<p>Удалить ручное начисление часов и циклов? Наработка будет снята с борта и с узлов, которым оно было начислено.</p>", {
+      okText: "Удалить", onOk: async () => { const r = await api("DELETE", `/api/aircraft/${aircraftId}/usage/${b.dataset.delAcc}`); toast(r.message); refreshNavCount(); after(); },
+    })));
   $$("[data-del-flight]", root).forEach((b) => b.addEventListener("click", () => modal("Удаление ручного полёта",
     "<p>Удалить полёт, записанный вручную? Наработка будет списана с борта и всех узлов, которым он был начислен.</p>", {
       okText: "Удалить", onOk: async () => { const r = await api("DELETE", `/api/flights/${b.dataset.delFlight}`); toast(r.message); refreshNavCount(); after(); },
@@ -230,6 +238,33 @@ async function openManualFlightModal({ aircraftId, component, onDone }) {
         mission: orNull(val(root, "mission")), component_id: component ? component.id : null });
       toast(r.message);
       ((r.summary && r.summary.alerts) || []).forEach((a) => toast(`Напоминание: ${a.entity.serial} — ${a.rule.name}: ${DUE[a.status][1]}`));
+      refreshNavCount();
+      onDone && onDone();
+    },
+  });
+}
+
+function openAircraftUsageModal({ aircraft, onDone }) {
+  const body = `
+    <div class="notice small">Часы и циклы (износ) начисляются борту <b>${esc(aircraft.name)}</b> без записи полёта: перенос наработки
+      из бумажного формуляра, наземные прогоны, испытания. Учитываются в наработке и регламентах борта. Удалить начисление можно
+      во вкладке «Полёты» — оно снимется со всех, кому было начислено.</div>
+    <div class="row2"><div class="field"><label>Вид</label><select name="kind"><option value="correction">Корректировка по формуляру</option>
+      <option value="ground">Наземный прогон</option><option value="test">Испытания / проверка</option></select></div>
+    <div class="field"><label>Дата и время</label><input type="datetime-local" name="started_at" value="${toLocalInput(new Date())}"></div></div>
+    <div class="row2"><div class="field"><label>Часы</label><input type="number" min="0" step="0.01" name="hours" value="1"></div>
+    <div class="field"><label>Циклы (износ)</label><input type="number" min="0" name="cycles" value="0"></div></div>
+    <label><input type="checkbox" name="to_components" class="w-auto"> Начислить то же всем узлам, стоявшим на борту в эту дату</label>
+    <div class="hint">Без отметки — только самому борту (например, наработка рамы по формуляру).</div>
+    <div class="row2"><div class="field"><label>Примечание</label><input name="note" maxlength="500" placeholder="Напр.: перенос из формуляра до ввода в систему"></div>
+    <div class="field"><label>Исполнитель</label><input name="created_by" maxlength="200"></div></div>`;
+  modal("Начислить часы и износ", body, {
+    okText: "Начислить",
+    onOk: async (root) => {
+      const r = await POST(`/api/aircraft/${aircraft.id}/usage`, { kind: val(root, "kind"), started_at: fromLocalInput(val(root, "started_at")),
+        hours: parseFloat(val(root, "hours") || "0"), cycles: parseInt(val(root, "cycles") || "0", 10),
+        to_components: $('[name="to_components"]', root).checked, note: orNull(val(root, "note")), created_by: orNull(val(root, "created_by")) });
+      toast(r.message);
       refreshNavCount();
       onDone && onDone();
     },
