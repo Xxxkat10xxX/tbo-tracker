@@ -198,6 +198,7 @@ def test_queue_on_board_is_reset_by_reconnect(client, cam, monkeypatch):
     от борта маленькое, чтобы буфер борта не раздувался."""
     monkeypatch.setattr(video, "LAG_MAX_S", 0.3)
     monkeypatch.setattr(video, "LAG_HOLD_S", 0.3)
+    monkeypatch.setattr(video, "RECONNECT_MIN_S", 0.0)
     lid = _link(client)
     url = f"/api/drones/{lid}/video/frame?stream=main_low"
     seq, seen = 0, []
@@ -215,3 +216,20 @@ def test_queue_on_board_is_reset_by_reconnect(client, cam, monkeypatch):
     feed = next(iter(video._feeds.values()))
     rcv = feed.writer.get_extra_info("socket").getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
     assert rcv <= 4 * video.RCVBUF                                                    # окно приёма от борта маленькое
+
+
+def test_reconnect_is_rare(client, cam, monkeypatch):
+    """Пересоздание канала — страховка, не чаще RECONNECT_MIN_S: при провалах Wi-Fi на секунды частые
+    пересоздания (7 за 47 с в полёте 11.11.2026) только добавляли секунды без кадров."""
+    monkeypatch.setattr(video, "LAG_MAX_S", 0.3)
+    monkeypatch.setattr(video, "LAG_HOLD_S", 0.3)
+    lid = _link(client)
+    url = f"/api/drones/{lid}/video/frame?stream=main_low"
+    seq, lags = 0, []
+    end = time.time() + 2.5
+    while time.time() < end:
+        r = client.get(f"{url}&after={seq}")
+        assert r.status_code == 200 and r.headers["x-feed-reconnects"] == "0", r.headers
+        seq = int(r.headers["x-frame-seq"])
+        lags.append(int(r.headers["x-frame-lag-ms"]))
+    assert max(lags) > 300 and sum("image_raw_throttled" in q for q in cam.requests) == 1

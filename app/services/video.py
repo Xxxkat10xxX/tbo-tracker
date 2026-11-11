@@ -20,8 +20,9 @@
   не растёт, а web_video_server при занятом канале пропускает кадры (isBusy), а не копит их;
 * сторож отставания: web_video_server ставит в каждый кадр X-Timestamp (часы борта, steady_clock). Отставание —
   на сколько «время прихода − метка» больше лучшего значения за соединение (часы сервера и борта сверять не
-  нужно). Отставание дольше LAG_HOLD_S больше LAG_MAX_S — соединение пересоздаётся, очередь борта сбрасывается.
-  Отставание видно под картинкой.
+  нужно). Отставание видно под картинкой. Пересоздание соединения — только страховка: отставание больше LAG_MAX_S
+  дольше LAG_HOLD_S и не чаще RECONNECT_MIN_S (короткие провалы Wi-Fi им не лечатся — новое соединение лишь
+  добавляет секунды без кадров).
 
 Один приёмник на (борт, поток) обслуживает всех зрителей; он закрывается, если кадры никто не запрашивал
 VIEWER_IDLE_S секунд. Предел DRONE_VIDEO_MAX — число приёмников (соединений с бортами).
@@ -56,8 +57,11 @@ FRAME_WAIT_S = 4.0             # запрос кадра ждёт новый к�
 CHUNK = 64 * 1024
 MAX_PART = 2 * 1024 * 1024     # кадр больше — поток испорчен, буфер сбрасывается
 RCVBUF = 32 * 1024             # окно приёма от борта: 3–4 кадра 320×240 «в пути», ~1 МБ/с при RTT 30 мс
-LAG_MAX_S = 1.0                # отставание кадров борта больше этого…
-LAG_HOLD_S = 1.0               # …дольше этого — переподключение (сброс очереди на борту)
+LAG_MAX_S = 5.0                # отставание кадров борта больше этого…
+LAG_HOLD_S = 5.0               # …дольше этого — переподключение (сброс очереди на борту)
+RECONNECT_MIN_S = 60.0         # и не чаще раза в столько секунд. Замеры 11.11.2026: с маленьким окном приёма
+                               # очередь на борту не растёт (≤ 110 КБ), а отставание в 1–3 с — провалы Wi-Fi на
+                               # секунды; переподключение тогда только добавляло секунды без кадров (0,1 кадр/с)
 
 log = logging.getLogger("tbo.video")
 
@@ -195,7 +199,7 @@ class Feed:
         self.key = key
         self.frame, self.seq, self.frame_at, self.lag_ms = None, 0, 0.0, None
         self.reconnects = 0
-        self.last_req = time.monotonic()
+        self.last_req = self._last_reconnect = time.monotonic()
         self.closed, self.error = False, None
         self._new = asyncio.Event()
         self._attach(reader, writer, ctype, first)
@@ -233,7 +237,7 @@ class Feed:
             self._lag_since = None
             return False
         self._lag_since = self._lag_since or now
-        return now - self._lag_since >= LAG_HOLD_S
+        return now - self._lag_since >= LAG_HOLD_S and now - self._last_reconnect >= RECONNECT_MIN_S
 
     async def _reconnect(self):
         """Сбросить очередь кадров на борту: закрыть соединение (буферы борта уходят вместе с ним) и открыть новое."""
@@ -245,6 +249,7 @@ class Feed:
         reader, writer, ctype, first = await _open(*self.key)
         self._attach(reader, writer, ctype, first)
         self.reconnects += 1
+        self._last_reconnect = time.monotonic()
         log.warning("видео с борта %s (%s): отставание %.1f с — соединение пересоздано (%d-й раз)",
                     self.key[0], self.key[1], (lag or 0) / 1000, self.reconnects)
 
