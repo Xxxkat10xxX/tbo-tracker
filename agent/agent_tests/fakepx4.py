@@ -41,6 +41,8 @@ class FakePX4:
         self.tel_delay, self.map_spike_every, self._map_calls = dict(tel_delay or {}), map_spike_every, 0
         self._prev_target, self._target_at = None, 0.0
         self.calls = []
+        self.tel_calls = []                      # кадры запросов get_telemetry
+        self.publish_pose = True                 # False — /mavros/local_position/pose молчит
         self.params = dict(self.TECHNIC_INDOOR if params is None else params)
         self._stop = threading.Event()
         s = rospy._services
@@ -108,6 +110,7 @@ class FakePX4:
         self._prev_target, self._target_at, self.target = self.target, time.time(), target
 
     def _telemetry(self, frame_id=""):
+        self.tel_calls.append(frame_id)
         if self.tel_delay.get(frame_id):
             time.sleep(self.tel_delay[frame_id])
         if frame_id == "map" and self.map_spike_every:
@@ -228,9 +231,10 @@ class FakePX4:
             p("/mavros/global_position/raw/satellites", UInt32(data=15))
             p("/mavros/global_position/rel_alt", Float64(data=self.z))
             p("/mavros/local_position/velocity_local", TwistStamped(twist=NS(linear=NS(x=0.0, y=0.0, z=0.0))))
-            p("/mavros/local_position/pose", PoseStamped(pose=NS(position=NS(x=self.x, y=self.y, z=self.z),
-                                                                 orientation=NS(x=0.0, y=0.0, z=math.sin(self.yaw / 2),
-                                                                                w=math.cos(self.yaw / 2)))))
+            if self.publish_pose:
+                p("/mavros/local_position/pose", PoseStamped(pose=NS(position=NS(x=self.x, y=self.y, z=self.z),
+                                                                     orientation=NS(x=0.0, y=0.0, z=math.sin(self.yaw / 2),
+                                                                                    w=math.cos(self.yaw / 2)))))
             if self.heading is not None:
                 p("/mavros/global_position/compass_hdg", Float64(data=self.heading))
             p("/mavros/battery", BatteryState(percentage=0.9, voltage=24.6))

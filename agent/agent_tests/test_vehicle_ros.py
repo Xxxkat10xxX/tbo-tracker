@@ -195,3 +195,57 @@ def test_offboard_rtl_command_stops_program():
         assert wait(lambda: not fc.armed, 20)
     finally:
         fc.stop()
+
+
+def test_loopback_ros_env():
+    """ROS агента — по 127.0.0.1, как у служб Technic: по имени (localhost без строки в /etc/hosts, <hostname>.local)
+    каждый вызов сервиса simple_offboard ждал DNS по Wi-Fi. Явно заданные адреса (ros.env) не меняются."""
+    from tbo_agent.vehicle_ros import loopback_ros_env
+    env = {}
+    assert loopback_ros_env(env) == {"ROS_MASTER_URI": "http://127.0.0.1:11311", "ROS_IP": "127.0.0.1"} and env == {
+        "ROS_MASTER_URI": "http://127.0.0.1:11311", "ROS_IP": "127.0.0.1"}
+    env = {"ROS_MASTER_URI": "http://localhost:11311"}                     # значение по умолчанию setup.bash ROS
+    loopback_ros_env(env)
+    assert env == {"ROS_MASTER_URI": "http://127.0.0.1:11311", "ROS_IP": "127.0.0.1"}
+    env = {"ROS_MASTER_URI": "http://localhost:11312/", "ROS_HOSTNAME": "technic-3318.local"}
+    assert loopback_ros_env(env) == {"ROS_MASTER_URI": "http://127.0.0.1:11312/"} and env["ROS_HOSTNAME"] == "technic-3318.local"
+    for kept in ({"ROS_MASTER_URI": "http://127.0.0.1:11311", "ROS_IP": "127.0.0.1"},
+                 {"ROS_MASTER_URI": "http://10.0.0.5:11311"},                 # master на другой машине — без ROS_IP
+                 {"ROS_MASTER_URI": "http://127.0.0.1:11311", "ROS_IP": "10.0.0.2"}):
+        env = dict(kept)
+        assert loopback_ros_env(env) == {} and env == kept
+
+
+def test_keep_agent_log_after_rospy_init():
+    """rospy.init_node снимает обработчик службы с корневого журнала: он возвращается журналу «tbo_agent» один раз."""
+    import logging
+
+    from tbo_agent.vehicle_ros import keep_agent_log
+    root, agent = logging.getLogger(), logging.getLogger("tbo_agent")
+    saved_root, saved_agent, saved_level = list(root.handlers), list(agent.handlers), agent.level
+    journal, ros_file = logging.StreamHandler(), logging.NullHandler()
+    try:
+        for h in list(root.handlers):
+            root.removeHandler(h)
+        root.addHandler(journal)
+        before = list(root.handlers)
+        root.removeHandler(journal)                     # как python_logging.conf ROS: остаётся только файл
+        root.addHandler(ros_file)
+        agent.setLevel(logging.NOTSET)
+        keep_agent_log(before, logging.INFO)
+        keep_agent_log(before, logging.INFO)
+        assert agent.handlers.count(journal) == 1 and agent.level == logging.INFO
+        agent.removeHandler(journal)
+        root.addHandler(journal)                        # обработчик на месте — добавлять нечего
+        keep_agent_log(before, logging.INFO)
+        assert journal not in agent.handlers
+    finally:
+        for h in list(root.handlers):
+            root.removeHandler(h)
+        for h in saved_root:
+            root.addHandler(h)
+        for h in list(agent.handlers):
+            agent.removeHandler(h)
+        for h in saved_agent:
+            agent.addHandler(h)
+        agent.setLevel(saved_level)

@@ -36,8 +36,11 @@
    Для сайта с HTTPS добавьте `--ca-file root.crt`: корневой сертификат Caddy.
 3. Журнал службы: `journalctl -u tbo-agent -f`.
 
-**ROS.** `run-agent.sh` подключает `/opt/ros/noetic` и `~/technic_ws/devel/setup.bash` и задаёт
-`ROS_HOSTNAME=$(hostname).local`, как в примерах Skyris. Свои значения задаются в `/etc/tbo-agent/ros.env`.
+**ROS.** `run-agent.sh` подключает `/opt/ros/noetic` и `~/technic_ws/devel/setup.bash`. Агент подключается к ROS
+по 127.0.0.1, как службы Technic: master – `http://127.0.0.1:11311`, адрес узла – `ROS_IP=127.0.0.1`. Имена
+`localhost` и `<hostname>.local` не используются: в образе Technic они разрешаются через DNS/mDNS по Wi-Fi, и при
+слабой связи вызовы simple_offboard ждали секундами. Свои значения задаются в `/etc/tbo-agent/ros.env`, явно
+заданные агент не меняет.
 
 ## Файлы
 

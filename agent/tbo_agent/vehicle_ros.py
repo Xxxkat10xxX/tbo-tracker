@@ -12,11 +12,14 @@
 """
 from __future__ import annotations
 
+import logging
 import math
+import os
 import subprocess
 import threading
 import time
 from collections import deque
+from urllib.parse import urlsplit, urlunsplit
 
 from .offboard import OffboardMixin
 from .plan import frame_of, uses_yaw, yaw_desc, yaw_mode
@@ -66,6 +69,58 @@ def service_active(name: str) -> bool:
         return False
 
 
+def keep_agent_log(handlers, level: int) -> None:
+    """Вернуть сообщения агента в журнал службы (journalctl) после rospy.init_node.
+
+    init_node настраивает logging по python_logging.conf ROS: у корневого журнала остаётся только файл
+    $ROS_LOG_DIR/tbo_agent.log, обработчик службы снимается — и в journalctl после запуска не было ни «подключён к …»,
+    ни ошибок связи. Снятые обработчики (handlers — корневые до init_node) и уровень из agent.conf (level) получает
+    журнал агента «tbo_agent», а не корневой: служебные сообщения rospy остаются только в файле ROS, а сообщения
+    агента по-прежнему пишутся и туда.
+    """
+    root, agent = logging.getLogger(), logging.getLogger("tbo_agent")
+    lost = [h for h in handlers if h not in root.handlers and h not in agent.handlers]
+    if not lost:                      # ROS обработчики не тронул — добавлять нечего, иначе строки задвоились бы
+        return
+    for h in lost:
+        agent.addHandler(h)
+    if agent.level == logging.NOTSET:
+        agent.setLevel(level)
+
+
+LOOPBACK = "127.0.0.1"
+
+
+def loopback_ros_env(env) -> dict:
+    """ROS-сеть агента — по адресу 127.0.0.1, как у служб образа Technic (technic.service: ROS_MASTER_URI
+    http://127.0.0.1:11311, ROS_IP=127.0.0.1): все узлы ROS — на этой же плате.
+
+    Агент обращался к master по http://localhost:11311 (по умолчанию setup.bash ROS), а свой адрес объявлял
+    именем <hostname>.local. В /etc/hosts образа Technic нет строки localhost, и каждый вызов сервиса
+    simple_offboard (navigate, set_yaw, get_telemetry — новое соединение с запросом к master) начинался с DNS-запроса
+    к точке доступа по Wi-Fi. При слабом Wi-Fi такой запрос ждал секунды, вызовы не укладывались в 5 с — борт висел
+    на месте, а затем программа его сажала.
+
+    Меняет env на месте: localhost в ROS_MASTER_URI → 127.0.0.1; если адрес узла не задан (ни ROS_IP,
+    ни ROS_HOSTNAME), а master на этой плате — ROS_IP=127.0.0.1. Явно заданные значения (ros.env) не трогает.
+    Возвращает изменённые переменные — для журнала."""
+    changed = {}
+    uri = env.get("ROS_MASTER_URI") or "http://localhost:11311"
+    try:
+        parts = urlsplit(uri)
+        host, port = parts.hostname, parts.port
+    except ValueError:
+        return changed
+    if host == "localhost":
+        host = LOOPBACK
+        uri = urlunsplit((parts.scheme or "http", "%s:%d" % (host, port or 11311), parts.path, parts.query, parts.fragment))
+    if env.get("ROS_MASTER_URI") != uri:
+        env["ROS_MASTER_URI"] = changed["ROS_MASTER_URI"] = uri
+    if not env.get("ROS_IP") and not env.get("ROS_HOSTNAME") and host and host.startswith("127."):
+        env["ROS_IP"] = changed["ROS_IP"] = LOOPBACK
+    return changed
+
+
 def gps_enabled(p: dict):
     """GPS в навигации PX4: EKF2_GPS_CTRL (PX4 ≥ 1.14, бит 0) или EKF2_AID_MASK (раньше, бит 0). None — неизвестно."""
     for name in ("EKF2_GPS_CTRL", "EKF2_AID_MASK"):
@@ -101,6 +156,7 @@ class RosVehicle(OffboardMixin, Vehicle):
 
     # ---------------------------------------------------------------- подключение
     def open(self):
+        changed = loopback_ros_env(os.environ)          # до импорта rospy: адреса ROS читаются из окружения
         import rospy
         from geometry_msgs.msg import PoseStamped, TwistStamped
         from mavros_msgs.msg import ExtendedState, HomePosition, State, StatusText, WaypointList, WaypointReached
@@ -109,7 +165,12 @@ class RosVehicle(OffboardMixin, Vehicle):
         from std_msgs.msg import Float64, UInt32
 
         self.rospy = rospy
+        root = logging.getLogger()
+        handlers, level = list(root.handlers), root.level
         rospy.init_node("tbo_agent", anonymous=False, disable_signals=True)
+        keep_agent_log(handlers, level)
+        if changed:
+            logging.getLogger("tbo_agent").info("ROS без DNS: %s", ", ".join("%s=%s" % kv for kv in sorted(changed.items())))
         sub = rospy.Subscriber
         sub("/mavros/state", State, self._on_state, queue_size=5)
         sub("/mavros/extended_state", ExtendedState, lambda m: self._put(landed_state=m.landed_state), queue_size=5)

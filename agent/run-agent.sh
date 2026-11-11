@@ -12,7 +12,9 @@ for ws in /home/orangepi/technic_ws /home/orangepi/catkin_ws "${HOME:-/nonexiste
     break
   fi
 done
-# Как в примерах Skyris (docs.skyris.ru → «SSH-ключи»): ROS-сеть образа Technic работает по имени <hostname>.local
-export ROS_HOSTNAME="${ROS_HOSTNAME:-$(hostname).local}"
+# Адреса ROS — как у служб Technic (technic.service): master http://127.0.0.1:11311, адрес узла ROS_IP=127.0.0.1.
+# Их задаёт сам агент (vehicle_ros.loopback_ros_env), если в /etc/tbo-agent/ros.env не задано своё. Прежнее
+# ROS_HOSTNAME=<hostname>.local и master по имени localhost ставили каждый вызов сервиса в зависимость от DNS/mDNS
+# по Wi-Fi: при слабой связи — секунды ожидания, борт висел на месте и садился.
 export PYTHONPATH="/opt/tbo-agent${PYTHONPATH:+:$PYTHONPATH}"
 exec python3 -m tbo_agent --config "${TBO_AGENT_CONFIG:-/etc/tbo-agent/agent.conf}" "$@"

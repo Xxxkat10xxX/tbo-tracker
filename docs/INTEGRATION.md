@@ -37,7 +37,7 @@
 |---|---|---|
 | `/etc/tbo-agent/agent.conf` (образец `agent/tbo-agent.conf.example`) | борт | адрес сервера, сертификат, исполнитель `auto` / `mission` / `offboard`, пределы высоты, удаления, заряда и спутников |
 | `/etc/tbo-agent/token` | борт | токен устройства, права 600 |
-| `/etc/tbo-agent/ros.env` | борт | `ROS_HOSTNAME` и окружение ROS |
+| `/etc/tbo-agent/ros.env` | борт | окружение ROS, если нужно не по умолчанию (по умолчанию `ROS_MASTER_URI=http://127.0.0.1:11311`, `ROS_IP=127.0.0.1`) |
 | `agent/tbo-agent.service` | борт | служба systemd с ограничениями прав |
 | `.env` (образец `.env.example`) | сервер | база данных, адрес сайта, пределы полётов `TBO_DRONE_*`, каналы уведомлений |
 | `deploy/field/deploy.sh` | компьютер в сети | установка сервера и агента одной командой |

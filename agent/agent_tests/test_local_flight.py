@@ -272,6 +272,85 @@ def test_set_yaw_refused_does_not_land_drone():
         fc.stop()
 
 
+def test_route_flight_does_not_wait_for_get_telemetry():
+    """Полёты 11.11.2026, «нос по линии маршрута»: вызовы сервисов simple_offboard ждали DNS при слабом Wi-Fi —
+    get_telemetry по 5–15 с на отсчёт, борт висел у точки перед разворотом 15–20 с, дважды сел посреди маршрута.
+    Положение и курс программа берёт из топика /mavros/local_position/pose: зависший get_telemetry (6 с на запрос —
+    дольше тайм-аута агента) полёт не задерживает и не обрывает."""
+    fc = FakePX4(speed=2.0, yaw=math.radians(90), tel_delay={"map": 6.0, "navigate_target": 6.0})
+    try:
+        t0 = time.time()
+        v, ok = _fly(fc, local_plan(yaw_mode="route"), lambda v: not fc.armed and v.snapshot()["wp_reached"] == 2, 40)
+        assert ok and v._fly_error is None, v._fly_error
+        assert fc.tel_calls == [] and time.time() - t0 < 25, (fc.tel_calls, time.time() - t0)
+        assert len([y for s, y in fc.yaw_cmds if s == "set_yaw"]) == 2          # развороты на месте — как прежде
+        assert ("land",) in fc.calls and abs(fc.x) < 0.3 and abs(fc.y) < 0.3
+    finally:
+        fc.stop()
+
+
+def test_navigate_without_answer_is_repeated_not_landed(monkeypatch):
+    """navigate к точке не ответил вовремя (на борту — при слабом Wi-Fi): повтор той же цели, а не посадка на месте.
+    Борт тем временем держит прежнюю цель, а поздно дошедший первый вызов передаёт ту же точку."""
+    import rospy
+    monkeypatch.setattr(offboard, "NAV_TIMEOUT_S", 0.5)
+    fc = FakePX4(speed=2.0, yaw=math.radians(90))
+    real, sent = rospy._services["/navigate"], []
+
+    def late(**kw):
+        if kw["frame_id"] == "map":
+            sent.append((round(kw["x"], 2), round(kw["y"], 2), round(kw["z"], 2)))
+            if len(sent) == 2:
+                time.sleep(1.0)                    # ответ и сама команда — позже тайм-аута агента
+        return real(**kw)
+    rospy._services["/navigate"] = late
+    try:
+        v, ok = _fly(fc, local_plan(yaw_mode="route"), lambda v: not fc.armed and v.snapshot()["wp_reached"] == 2, 40)
+        assert ok and v._fly_error is None, v._fly_error
+        assert len(sent) == 4 and sent[1] == sent[2], sent           # точка 2 — повтор той же цели, затем возврат
+        assert ("land",) in fc.calls and abs(fc.x) < 0.3 and abs(fc.y) < 0.3
+    finally:
+        fc.stop()
+
+
+def test_navigate_never_answering_still_lands(monkeypatch):
+    """navigate не отвечает совсем: после NAV_TRIES попыток — посадка на месте, как прежде (а не бесконечное ожидание)."""
+    import rospy
+    monkeypatch.setattr(offboard, "NAV_TIMEOUT_S", 0.3)
+    fc = FakePX4(speed=2.0)
+    real, sent = rospy._services["/navigate"], []
+
+    def dead(**kw):
+        if kw["frame_id"] == "map":
+            sent.append(kw["x"])
+            time.sleep(1.0)
+            return NS(success=False, message="late")
+        return real(**kw)
+    rospy._services["/navigate"] = dead
+    try:
+        v, ok = _fly(fc, local_plan(), lambda v: ("land",) in fc.calls, 20)
+        assert ok and "нет ответа" in (v._fly_error or "") and len(sent) == offboard.NAV_TRIES
+    finally:
+        fc.stop()
+
+
+def test_pose_topic_silent_position_from_get_telemetry():
+    """Топик положения замолчал в полёте — положение и курс из get_telemetry, маршрут выполняется до конца."""
+    fc = FakePX4(speed=2.0, yaw=math.radians(90))
+    try:
+        v = opened(fc)
+        p = local_plan(yaw_mode="route")
+        v.upload(p, {"lat": None, "lon": None})
+        v.start_mission(p)
+        assert wait(lambda: v.snapshot()["in_air"])
+        fc.publish_pose = False
+        assert wait(lambda: not fc.armed, 40) and v._fly_error is None, v._fly_error
+        assert v.snapshot()["wp_reached"] == 2 and "map" in fc.tel_calls
+        assert ("land",) in fc.calls and abs(fc.x) < 0.3 and abs(fc.y) < 0.3
+    finally:
+        fc.stop()
+
+
 def test_heading_needs_set_yaw_and_valid_plan():
     fc = FakePX4(set_yaw=False)
     try:
