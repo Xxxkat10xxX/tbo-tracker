@@ -547,18 +547,24 @@ python scripts/benchmark_vs_logbook.py
 pip install -r requirements-dev.txt
 ```
 
+**Сервер** — 134 автотеста: сценарии приёмки, правила целостности, ручной ввод, внебортовая наработка, справочники
+типов, генератор журналов, паспорта, датчики, Excel и PDF, миссии, уведомления, перестановка узлов, серверная часть
+(рассылка, резервные копии, состояние сервера), связь с бортами по HTTP и безопасность (вход, сессии, CSRF, роли,
+перебор паролей, аудит, заголовки):
+
 ```bash
-python -m pytest -q
+python -m pytest -q tests
 ```
 
-182 автотеста. Сервер (`tests/`, 134) — сценарии приёмки, правила целостности, ручной ввод, внебортовая наработка,
-справочники типов, генератор журналов, паспорта, датчики, Excel и PDF, миссии, уведомления, перестановка узлов,
-серверная часть (рассылка, резервные копии, состояние сервера), связь с бортами по HTTP и безопасность (вход, сессии,
-CSRF, роли, перебор паролей, аудит, заголовки). Бортовой агент (`agent/agent_tests`, 48) — модель PX4 / MAVROS,
-заводские параметры Technic, локальные миссии, симулятор; проходят и под Python 3.8, как на борту.
+**Бортовой агент** — 48 автотестов: модель PX4 / MAVROS, заводские параметры Technic, локальные миссии, симулятор;
+проходят и под Python 3.8, как на борту:
 
-На Windows: `.venv\Scripts\python -m pip install -r requirements-dev.txt`, затем `.venv\Scripts\python -m pytest -q`.
-Тот же набор проходит на PostgreSQL: `TBO_TEST_DATABASE_URL=postgresql+psycopg://… python -m pytest -q`.
+```bash
+python -m pytest -q agent/agent_tests
+```
+
+На Windows — те же команды через `.venv\Scripts\python`, например `.venv\Scripts\python -m pytest -q tests`.
+Набор сервера проходит и на PostgreSQL: `TBO_TEST_DATABASE_URL=postgresql+psycopg://… python -m pytest -q tests`.
 
 ## Безопасность
 
