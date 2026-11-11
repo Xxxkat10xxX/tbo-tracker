@@ -1,6 +1,6 @@
 # Паспорт проекта tbo-tracker
 
-Паспорт проекта по модулю A «Проектирование, разработка» — [passport/tbo-tracker-passport.pdf](passport/tbo-tracker-passport.pdf) ([DOCX](passport/tbo-tracker-passport.docx)).
+Паспорт проекта по модулю A «Проектирование, разработка» – [passport/tbo-tracker-passport.pdf](passport/tbo-tracker-passport.pdf) ([DOCX](passport/tbo-tracker-passport.docx)).
 
 | | |
 |---|---|
@@ -34,4 +34,4 @@
 | 11 Состав репозитория | дополнительное требование 8 |
 | 12 Масштабируемость и эксплуатация | дополнительное требование 9 |
 
-Схемы — [img/schemes/](img/schemes/), экранные формы — [img/screens/](img/screens/), фотографии борта — [img/drone/](img/drone/).
+Схемы – [img/schemes/](img/schemes/), экранные формы – [img/screens/](img/screens/), фотографии борта – [img/drone/](img/drone/).
