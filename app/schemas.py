@@ -234,6 +234,35 @@ class MissionEstimateIn(MissionIn):
     name: str = "—"
 
 
+class RoutePatternIn(BaseModel):
+    """Шаблон маршрута (services/routegen): участок и камера в метрах от точки взлёта."""
+    kind: Literal["survey", "crosshatch", "perimeter", "orbit"] = "survey"
+    home_lat: float = Field(ge=-90, le=90)
+    home_lon: float = Field(ge=-180, le=180)
+    frame: Literal["global", "local"] = "global"
+    takeoff_alt: float = Field(30, ge=0.5, le=500)
+    speed_ms: float = Field(5, ge=0.2, le=40)
+    return_home: bool = True
+    center_x: float = Field(0, ge=-20000, le=20000)     # вправо (восток) от точки взлёта, м
+    center_y: float = Field(0, ge=-20000, le=20000)     # вперёд (север), м
+    width: float = Field(10, ge=0, le=20000)            # поперёк галсов, м
+    length: float = Field(10, ge=0, le=20000)           # вдоль галсов, м
+    angle_deg: float = Field(0, ge=-360, le=360)        # направление галсов, ° по часовой от «верха» карты
+    alt: float = Field(ge=0.5, le=500)
+    fov_across_deg: float = Field(88, ge=1, le=170)
+    fov_along_deg: float = Field(72, ge=1, le=170)
+    image_px_across: int | None = Field(None, ge=16, le=20000)
+    side_overlap: float = Field(0.6, ge=0, le=0.95)
+    front_overlap: float = Field(0.7, ge=0, le=0.95)
+    photo_points: bool = False
+    photo_hold_s: float = Field(1, ge=0, le=60)
+    radius: float = Field(5, ge=0, le=20000)
+    points: int = Field(12, ge=3, le=72)
+    direction: Literal["cw", "ccw"] = "cw"
+    laps: int = Field(1, ge=1, le=20)
+    face_center: bool = True
+
+
 class MissionRunIn(BaseModel):
     aircraft_id: int | None = None
     wind_ms: float = Field(3, ge=0, le=20)

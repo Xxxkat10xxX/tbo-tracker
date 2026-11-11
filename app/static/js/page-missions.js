@@ -83,7 +83,8 @@ async function pageMission(id) {
             <option value="route" ${st.yaw_mode === "route" ? "selected" : ""}>По линии маршрута — нос по направлению полёта</option></select>
             <div class="hint" id="yaw-hint"></div></div>
           <label><input type="checkbox" name="return_home" ${st.return_home ? "checked" : ""} class="w-auto"> <span id="rtl-label">Возврат в точку взлёта (RTL) и посадка</span></label></div>
-        <div class="card"><div class="card-head"><h2>Точки маршрута</h2><span class="small muted" id="wp-count"></span></div><div id="wp-table"></div></div>
+        <div class="card"><div class="card-head"><h2>Точки маршрута</h2><span class="small muted" id="wp-count"></span>
+          <button class="sm" id="wp-tpl" title="Съёмка площади с перекрытием, двойная сетка, периметр, облёт по кругу">▦ Шаблон маршрута</button></div><div id="wp-table"></div></div>
         <div class="card"><h2>Симулятор автопилота</h2>
           <div class="row3"><div class="field"><label>Ветер, м/с</label><input type="number" min="0" max="20" step="0.5" name="wind_ms" value="3"></div>
           <div class="field"><label>Ветер откуда, °</label><input type="number" min="0" max="360" name="wind_from" value="250"></div>
@@ -293,6 +294,12 @@ async function pageMission(id) {
   $("#z-out").onclick = () => { view.span *= 1.5; drawMap(); };
   $("#z-fit").onclick = () => { fit(); drawMap(); };
   $("#wp-del").onclick = () => removeWp(selected);
+  $("#wp-tpl").onclick = () => { readForm(); routeTemplateModal({ st, isLocal, onApply: (r, mode) => {
+    st.waypoints = (mode === "append" ? st.waypoints : []).concat(r.waypoints.map((w) => ({ yaw_deg: null, ...w })));
+    st.yaw_mode = r.yaw_mode; $('[name="yaw_mode"]').value = r.yaw_mode;
+    selected = null; fit(); drawAll();
+    toast(`Маршрут по шаблону: ${r.waypoints.length} точек — проверьте и сохраните миссию`);
+  } }); };
   $("#wp-clear").onclick = () => modal("Очистить маршрут", `<p>Удалить все точки маршрута (${st.waypoints.length})? Изменения вступят в силу после «Сохранить».</p>`,
     { okText: "Очистить", onOk: async () => { st.waypoints = []; selected = null; drawAll(); } });
   const onKey = (e) => {
@@ -367,3 +374,126 @@ async function pageMission(id) {
   });
 }
 const view_ = () => $("#view");
+
+// ------------------------------------------------------------------ Шаблоны маршрутов (сервер: services/routegen.py)
+const TPL_KINDS = {
+  survey: "Съёмка площади — галсы с перекрытием",
+  crosshatch: "Двойная сетка — галсы в двух направлениях (объёмная модель)",
+  perimeter: "Облёт по периметру участка",
+  orbit: "Облёт по кругу — нос к центру",
+};
+const TPL_CAMERAS = {
+  technic: { label: "Technic 6S: нижняя камера (fisheye, 320×240)", across: 88, along: 72, px: 320 },
+  custom: { label: "Своя камера — задать углы обзора" },
+};
+function routeTemplateModal({ st, isLocal, onApply }) {
+  const loc = isLocal();
+  const d = loc ? { cx: 0, cy: 4, w: 4, l: 6, alt: Math.min(+st.takeoff_alt || 1.5, 1.5), r: 2 }
+    : { cx: 0, cy: 80, w: 60, l: 100, alt: +st.takeoff_alt || 30, r: 30 };
+  const axes = loc ? ["вправо", "вперёд"] : ["на восток", "на север"];
+  const body = `<div class="tpl-grid"><div>
+    <div class="field"><label>Шаблон</label><select name="kind">${Object.entries(TPL_KINDS).map(([k, v]) => `<option value="${k}">${v}</option>`).join("")}</select></div>
+    <div class="row3"><div class="field"><label>Центр: ${axes[1]}, м</label><input type="number" step="0.1" name="center_y" value="${d.cy}"></div>
+      <div class="field"><label>${axes[0]}, м</label><input type="number" step="0.1" name="center_x" value="${d.cx}"></div>
+      <div class="field"><label>Высота, м</label><input type="number" step="0.1" min="0.5" name="alt" value="${d.alt}"></div></div>
+    <div class="row3" data-for="survey crosshatch perimeter"><div class="field"><label>Длина вдоль галсов, м</label><input type="number" step="0.1" min="0" name="length" value="${d.l}"></div>
+      <div class="field"><label>Ширина поперёк, м</label><input type="number" step="0.1" min="0" name="width" value="${d.w}"></div>
+      <div class="field"><label>Направление галсов, °</label><input type="number" step="1" min="-360" max="360" name="angle_deg" value="0"></div></div>
+    <div data-for="survey crosshatch">
+      <div class="field"><label>Камера (смотрит вниз)</label><select name="camera">${Object.entries(TPL_CAMERAS).map(([k, c]) => `<option value="${k}">${c.label}</option>`).join("")}</select></div>
+      <div class="row3"><div class="field"><label>Обзор поперёк галса, °</label><input type="number" step="0.1" min="1" max="170" name="fov_across_deg" value="88"></div>
+        <div class="field"><label>Обзор вдоль, °</label><input type="number" step="0.1" min="1" max="170" name="fov_along_deg" value="72"></div>
+        <div class="field"><label>Кадр поперёк, пикс.</label><input type="number" step="1" min="16" name="image_px_across" value="320"></div></div>
+      <div class="row2"><div class="field"><label>Боковое перекрытие, %</label><input type="number" step="5" min="0" max="95" name="side_overlap" value="60"></div>
+        <div class="field"><label>Продольное перекрытие, %</label><input type="number" step="5" min="0" max="95" name="front_overlap" value="70"></div></div>
+      <div class="field"><label>Точки маршрута</label><select name="photo_points">
+          <option value="0">Концы галсов — камера снимает по расстоянию</option><option value="1">Точка на каждом снимке с удержанием</option></select></div>
+      <div class="field" data-photo><label>Удержание на снимке, с</label><input type="number" step="0.5" min="0" max="60" name="photo_hold_s" value="1"></div></div>
+    <div class="row3" data-for="orbit"><div class="field"><label>Радиус, м</label><input type="number" step="0.1" min="0.1" name="radius" value="${d.r}"></div>
+      <div class="field"><label>Точек на круге</label><input type="number" step="1" min="3" max="72" name="points" value="12"></div>
+      <div class="field"><label><input type="checkbox" name="face_center" checked class="w-auto"> Нос к центру</label></div></div>
+    <div class="row2" data-for="orbit perimeter"><div class="field"><label>Направление облёта</label><select name="direction"><option value="cw">по часовой стрелке</option><option value="ccw">против часовой</option></select></div>
+      <div class="field"><label>Кругов</label><input type="number" step="1" min="1" max="20" name="laps" value="1"></div></div>
+    <div class="field"><label>Применить</label><select name="mode"><option value="replace">Заменить точки маршрута</option><option value="append">Добавить после имеющихся точек (${st.waypoints.length})</option></select></div>
+    </div><div><svg id="tpl-map" viewBox="0 0 420 320"></svg><div id="tpl-info" class="small mt-8"></div></div></div>`;
+  let last = null, timer = null, seq = 0;
+  const bg = modal("Шаблон маршрута", body, { wide: true, okText: "Применить", onOk: async (root) => {
+    const r = await compute(root);
+    onApply(r, val(root, "mode"));
+  } });
+  const q = (n) => $(`[name="${n}"]`, bg);
+  function params(root) {
+    const n = (k) => +val(root, k);
+    return { kind: val(root, "kind"), home_lat: +st.home_lat, home_lon: +st.home_lon, frame: st.frame, takeoff_alt: +st.takeoff_alt,
+      speed_ms: +st.speed_ms, return_home: st.return_home, center_x: n("center_x"), center_y: n("center_y"), alt: n("alt"),
+      width: n("width"), length: n("length"), angle_deg: n("angle_deg"), fov_across_deg: n("fov_across_deg"), fov_along_deg: n("fov_along_deg"),
+      image_px_across: val(root, "image_px_across") ? n("image_px_across") : null, side_overlap: n("side_overlap") / 100, front_overlap: n("front_overlap") / 100,
+      photo_points: val(root, "photo_points") === "1", photo_hold_s: n("photo_hold_s"), radius: n("radius"), points: n("points"),
+      direction: val(root, "direction"), laps: n("laps"), face_center: q("face_center").checked };
+  }
+  async function compute(root) {
+    if (last && last.key === JSON.stringify(params(root))) return last.r;
+    const p = params(root), r = await POST("/api/missions/pattern", p);
+    last = { key: JSON.stringify(p), r };
+    return r;
+  }
+  function layout() {
+    const kind = val(bg, "kind");
+    $$("[data-for]", bg).forEach((el) => { el.hidden = !el.dataset.for.split(" ").includes(kind); });
+    $("[data-photo]", bg).hidden = val(bg, "photo_points") !== "1";
+    const custom = val(bg, "camera") === "custom";
+    ["fov_across_deg", "fov_along_deg", "image_px_across"].forEach((k) => { q(k).disabled = !custom; });
+  }
+  function draw(r) {
+    const svg = $("#tpl-map", bg), W = 420, H = 320;
+    const pts = [[0, 0]].concat(r.xy);
+    let ext = pts.slice();
+    if (Array.isArray(r.outline)) ext = ext.concat(r.outline);
+    else if (r.outline) { const { center: c, radius: rr } = r.outline; ext.push([c[0] - rr, c[1] - rr], [c[0] + rr, c[1] + rr]); }
+    const pad = Math.max(...r.swaths.map((s) => s[2] / 2), 0);
+    const xs = ext.map((p) => p[0]), ys = ext.map((p) => p[1]);
+    const x0 = Math.min(...xs) - pad, x1 = Math.max(...xs) + pad, y0 = Math.min(...ys) - pad, y1 = Math.max(...ys) + pad;
+    const k = Math.min((W - 40) / Math.max(x1 - x0, 1e-3), (H - 40) / Math.max(y1 - y0, 1e-3));
+    const X = (x) => W / 2 + (x - (x0 + x1) / 2) * k, Y = (y) => H / 2 - (y - (y0 + y1) / 2) * k;
+    const sw = r.swaths.map((s) => `<line x1="${X(s[0][0])}" y1="${Y(s[0][1])}" x2="${X(s[1][0])}" y2="${Y(s[1][1])}" class="tpl-swath" stroke-width="${Math.max(1, s[2] * k)}"/>`).join("");
+    const area = Array.isArray(r.outline) ? `<polygon class="tpl-area" points="${r.outline.map((p) => `${X(p[0])},${Y(p[1])}`).join(" ")}"/>`
+      : r.outline ? `<circle class="tpl-area" cx="${X(r.outline.center[0])}" cy="${Y(r.outline.center[1])}" r="${r.outline.radius * k}"/>` : "";
+    const route = pts.concat(st.return_home ? [[0, 0]] : []).map((p) => `${X(p[0])},${Y(p[1])}`).join(" ");
+    svg.innerHTML = `<rect width="${W}" height="${H}" class="map-bg"/>${sw}${area}<polyline class="route" points="${route}"/>
+      ${r.xy.map((p, i) => `<circle class="tpl-wp${i === 0 ? " first" : ""}" cx="${X(p[0])}" cy="${Y(p[1])}" r="${i === 0 ? 5 : 3}"/>`).join("")}
+      <rect x="${X(0) - 8}" y="${Y(0) - 8}" width="16" height="16" rx="3" class="home"/><text x="${X(0)}" y="${Y(0) + 4}" class="home-t">${loc ? "Т" : "H"}</text>`;
+  }
+  function info(r) {
+    const i = r.info, s = r.stats, m = (v) => (loc ? num(v, 1) + " м" : (v >= 1000 ? num(v / 1000, 2) + " км" : num(v, 0) + " м"));
+    const rows = [];
+    if (i.lines) rows.push(`галсов <b>${i.lines}</b>, шаг <b>${num(i.line_spacing_m, 2)} м</b>`, `кадр на земле ${num(i.footprint_m[0], 2)} × ${num(i.footprint_m[1], 2)} м`,
+      `снимков ≈ <b>${i.photos}</b>, шаг ${num(i.photo_spacing_m, 2)} м`, i.gsd_cm ? `разрешение ${num(i.gsd_cm, 2)} см/пикс.` : "", `площадь ${num(i.area_m2, 1)} м²`);
+    if (i.perimeter_m) rows.push(`периметр ${m(i.perimeter_m)} × ${i.laps}`);
+    if (i.circle_m) rows.push(`длина круга ${m(i.circle_m)} × ${i.laps}, между точками ${num(i.step_m, 2)} м`);
+    rows.push(`точек <b>${s.waypoints}</b>, маршрут <b>${m(s.distance_m)}</b>, время ≈ <b>${fmtDur(s.duration_s)}</b>`,
+      `курс дрона: ${r.yaw_mode === "route" ? "по линии маршрута" : "не менять — курс задан в точках"}`);
+    $("#tpl-info", bg).innerHTML = rows.filter(Boolean).join(" · ")
+      + (i.lines && val(bg, "photo_points") !== "1" ? `<div class="muted">Точки — только концы галсов: камера должна снимать сама, каждые ${num(i.photo_spacing_m, 2)} м</div>` : "")
+      + r.warnings.map((w) => `<div class="notice bad small mt-8">${esc(w)}</div>`).join("");
+  }
+  async function refresh() {
+    layout();
+    const my = ++seq;
+    try {
+      const r = await compute(bg);
+      if (my !== seq) return;
+      draw(r); info(r); $("[data-ok]", bg).disabled = false;
+    } catch (e) {
+      if (my !== seq) return;
+      $("#tpl-info", bg).innerHTML = `<div class="notice bad small">${esc(e.message)}</div>`;
+      $("[data-ok]", bg).disabled = true;
+    }
+  }
+  q("camera").addEventListener("change", () => {
+    const c = TPL_CAMERAS[val(bg, "camera")];
+    if (c.across) { q("fov_across_deg").value = c.across; q("fov_along_deg").value = c.along; q("image_px_across").value = c.px; }
+  });
+  $$("input, select", bg).forEach((el) => el.addEventListener(el.tagName === "SELECT" || el.type === "checkbox" ? "change" : "input",
+    () => { clearTimeout(timer); timer = setTimeout(refresh, 250); }));
+  refresh();
+}

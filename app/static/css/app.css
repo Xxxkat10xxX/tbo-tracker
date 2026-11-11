@@ -255,6 +255,17 @@ table.spec-edit td{padding:3px 4px;border:0}
 #map .north-t, #map .scale-t { fill: #1f2a3d; font: 600 11px Inter, sans-serif; text-anchor: middle; }
 #map .scale-t { text-anchor: start; }
 #map .scale { stroke: #1f2a3d; stroke-width: 3; }
+.tpl-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 420px); gap: 16px; align-items: start; }
+@media (max-width: 900px) { .tpl-grid { grid-template-columns: 1fr; } }
+#tpl-map { width: 100%; height: auto; display: block; border-radius: 8px; }
+#tpl-map .map-bg { fill: #eef3ea; }
+#tpl-map .tpl-swath { stroke: var(--accent); stroke-opacity: .13; stroke-linecap: butt; }
+#tpl-map .tpl-area { fill: none; stroke: #1f2a3d; stroke-width: 1.5; stroke-dasharray: 4 3; }
+#tpl-map .route { fill: none; stroke: var(--accent); stroke-width: 2; }
+#tpl-map .tpl-wp { fill: #fff; stroke: var(--accent); stroke-width: 2; }
+#tpl-map .tpl-wp.first { fill: var(--accent); }
+#tpl-map .home { fill: #1f2a3d; }
+#tpl-map .home-t { fill: #fff; font: 700 10px Inter, sans-serif; text-anchor: middle; }
 .map-tools { position: absolute; top: 10px; left: 10px; display: flex; gap: 4px; }
 .map-tools button { background: #fff; }
 .telemetry { position: absolute; right: 52px; top: 10px; background: rgba(31, 42, 61, .88); color: #fff; border-radius: 8px; padding: 8px 12px;

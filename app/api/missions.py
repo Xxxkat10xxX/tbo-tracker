@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from ..db import get_session
 from ..errors import DomainError, NotFound
 from ..models import Aircraft, LogImport, Mission, MissionRun
-from ..schemas import MissionEstimateIn, MissionIn, MissionRunIn
-from ..services import autopilot, logs
+from ..schemas import MissionEstimateIn, MissionIn, MissionRunIn, RoutePatternIn
+from ..services import autopilot, logs, routegen
 from ..services.airworthy import preflight
 from ..timeutil import iso, utcnow
 
@@ -59,6 +59,13 @@ def estimate_mission(data: MissionEstimateIn):
     """Протяжённость и оценка времени маршрута — для редактора миссии (без сохранения)."""
     d = data.model_dump()
     return autopilot.plan_stats(d) if d["waypoints"] else {"distance_m": 0, "duration_s": 0, "waypoints": 0, "max_alt_m": 0}
+
+
+@router.post("/missions/pattern")
+def route_pattern(data: RoutePatternIn):
+    """Точки маршрута по шаблону (съёмка площади с перекрытием, двойная сетка, периметр, облёт по кругу) — для
+    редактора миссии, без сохранения: точки применяет оператор."""
+    return routegen.generate(data.model_dump())
 
 
 @router.get("/missions/{mid}")
