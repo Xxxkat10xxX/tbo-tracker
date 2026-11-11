@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import tarfile
+import time
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -109,9 +110,32 @@ def video_streams():
     return video.streams()
 
 
+_ip_cache: dict[int, tuple] = {}
+
+
+@router.get("/drones/{lid}/video/frame")
+async def drone_video_frame(lid: int, stream: str = Query("main", max_length=20), after: int = Query(0, ge=0),
+                            wait: float = Query(video.FRAME_WAIT_S, ge=0, le=video.FRAME_WAIT_S)):
+    """Последний кадр с борта (JPEG) новее after — для страницы: следующий кадр браузер просит после показа
+    предыдущего, и задержка не копится. 204 — нового кадра за wait секунд не было."""
+    hit = _ip_cache.get(lid)
+    if hit and hit[1] > time.monotonic():                 # кадры идут часто: адрес борта — из памяти на 2 с
+        ip = hit[0]
+    else:
+        ip = await run_in_threadpool(_video_ip, lid)
+        _ip_cache[lid] = (ip, time.monotonic() + 2.0)
+    got = await video.frame(ip, stream, after, wait)
+    if got is None:
+        return Response(status_code=204, headers={"Cache-Control": "no-store", "X-Frame-Seq": str(after)})
+    jpeg, seq, age_ms = got
+    return Response(jpeg, media_type="image/jpeg",
+                    headers={"Cache-Control": "no-store", "X-Frame-Seq": str(seq), "X-Frame-Age-Ms": str(age_ms)})
+
+
 @router.get("/drones/{lid}/video")
 async def drone_video(lid: int, request: Request, stream: str = Query("main", max_length=20), probe: bool = False):
-    """Видео с борта (MJPEG) через сервер. probe=1 — только проверить доступность потока (JSON)."""
+    """Видео с борта (MJPEG) через сервер — для внешних программ; страница берёт кадры по одному (video/frame).
+    probe=1 — только проверить доступность потока (JSON)."""
     ip = await run_in_threadpool(_video_ip, lid)
     if probe:
         return await video.probe(ip, stream)
