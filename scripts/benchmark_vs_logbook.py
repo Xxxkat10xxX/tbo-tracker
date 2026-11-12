@@ -204,6 +204,34 @@ def one_run(c: TestClient, seed: int) -> dict:
     tracker_missed = sum(1 for k in ref_over if due.get(k) != "overdue")
     status_mismatch = sum(1 for k, st in ref_status.items() if due.get(k) != st)
 
+    # --- уведомления: журнал сервера (services/notify.scan) против эталона по каждой паре «узел × работа»
+    # просрочено → «просрочено» (по ресурсу — «предельный ресурс»), приближается → «приближается», в норме — уведомления нет
+    from sqlalchemy import select as _select
+
+    from app.db import SessionLocal
+    from app.models import NotificationEvent
+    from app.services import notify
+    rule_by_id = {r["id"]: r for r in rules}
+    with SessionLocal() as s:
+        notify.scan(s)
+        opened = [e.key for e in s.scalars(_select(NotificationEvent).where(NotificationEvent.resolved_at.is_(None)))]
+    got_notes: dict[tuple, set] = {}
+    for key in opened:
+        cat, _, ref = key.partition("|")
+        kind, _, rest = ref.partition(":")
+        eid, _, rid = rest.partition(":")
+        if kind != "component" or not eid.isdigit() or not rid.isdigit() or int(eid) not in comps:
+            continue
+        rule = rule_by_id.get(int(rid))
+        if rule is not None:
+            got_notes.setdefault((comps[int(eid)]["serial"], rule["code"]), set()).add(cat)
+    code_kind = {r["code"]: r["kind"] for r in rules}
+    want_cat = {"overdue": lambda code: {"limit" if code_kind.get(code) == "life" else "overdue"},
+                "due_soon": lambda code: {"approaching"}, "ok": lambda code: set()}
+    notify_mismatch = sum(1 for (serial, code), st in ref_status.items()
+                          if got_notes.get((serial, code), set()) & {"limit", "overdue", "approaching"} != want_cat[st](code))
+    ref_notes = sum(1 for st in ref_status.values() if st != "ok")
+
     # --- tbo-tracker
     got = {x["serial"]: x for x in c.get("/api/components", params={"q": tag}).json()}
     err = [abs(got[v["serial"]]["hours"] - ref_total[cid]) for cid, v in comps.items()]
@@ -217,6 +245,7 @@ def one_run(c: TestClient, seed: int) -> dict:
         "tracker_max_err_h": round(max(err), 4),
         "ref_overdue": len(ref_over), "ref_items": len(ref_status),
         "tracker_missed_overdue": tracker_missed, "tracker_status_mismatch": status_mismatch,
+        "ref_notifications": ref_notes, "tracker_notify_mismatch": notify_mismatch,
         "logbook_lost_hours": round(sum(lost), 1),
         "logbook_parts_with_lost_hours": sum(1 for x in lost if x > 0.05),
         "logbook_parts_installed": len(installed),
@@ -243,7 +272,8 @@ def summary(res: list[dict]) -> dict:
         v = [r[key] for r in res]
         return {"min": min(v), "mean": round(statistics.mean(v), 4), "max": max(v)}
     keys = ["flights", "fleet_hours", "operations", "tracker_max_err_h", "ref_items", "ref_overdue",
-            "tracker_missed_overdue", "tracker_status_mismatch", "logbook_lost_hours",
+            "tracker_missed_overdue", "tracker_status_mismatch", "ref_notifications", "tracker_notify_mismatch",
+            "logbook_lost_hours",
             "logbook_parts_with_lost_hours", "logbook_max_lost_h", "missed_overdue", "missed_due_soon",
             "import_s", "operation_ms_max"]
     return {k: agg(k) for k in keys}

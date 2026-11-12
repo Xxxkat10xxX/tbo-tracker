@@ -131,6 +131,11 @@ def test_ready_plan_dropped_but_not_cleared_when_pilot_arms(fc, tmp_path):
     try:
         assert wait(lambda: ag.state == "idle")
         api.active_run = 7                                        # сервер считает подготовку текущей
+        # дождаться отправки состояния, которая уже видит подготовку на сервере: иначе ответ, полученный до этой
+        # строки, мог снять подготовку («снята сервером») сразу после перехода в «готов» — тест падал через раз
+        n = len(api.states)
+        ag.wake.set()
+        assert wait(lambda: len(api.states) > n, 10)
         ag._set("ready", "готов к старту", run_id=7, plan={"plan_hash": "h", "waypoints": []})
         n0 = len(fc.calls)
         rospy._services["/mavros/cmd/arming"](True)
@@ -181,7 +186,9 @@ def test_restart_after_landing_restores_external_log(fc, tmp_path):
     _ckpt(tmp_path, fid, 120)
     ag, api, v = start(tmp_path)
     try:
-        assert ag.outbox.pending() == ["flight-%s.json" % fid]
+        # восстановление по контрольной точке идёт в потоке агента после приветствия сервера — дождаться, а не
+        # проверять сразу (под нагрузкой проверка успевала раньше записи журнала в outbox)
+        assert wait(lambda: ag.outbox.pending() == ["flight-%s.json" % fid] and not os.path.exists(ag.ckpt_path), 10)
         ag._outbox_tick()                                         # повтор отправки (фоновый поток — раз в 30 с)
         assert fid in api.flights
         log = api.flights[fid]

@@ -1,5 +1,6 @@
 """Безопасность: вход, сессии, CSRF, роли, хранение паролей, перебор, первичная настройка, аудит, заголовки."""
 import hashlib
+import os
 
 import pytest
 from fastapi.testclient import TestClient
@@ -212,7 +213,9 @@ def test_first_run_setup_with_one_time_code(anon):
         s.query(User).delete()
         s.commit()
         code = auth.ensure_setup_code(s)
-    assert auth.SETUP_FILE.read_text().strip() == code and oct(auth.SETUP_FILE.stat().st_mode)[-3:] == "600"
+    assert auth.SETUP_FILE.read_text(encoding="utf-8").strip() == code
+    if os.name == "posix":                      # права файлов — только POSIX (сервер — Linux / Raspberry Pi)
+        assert oct(auth.SETUP_FILE.stat().st_mode)[-3:] == "600"
     assert anon.get("/api/auth/state").json()["setup_required"] is True
     bad = anon.post("/api/auth/setup", json={"code": "WRONG-CODE", "username": "boss", "password": "Начальник-смены-2026"}, headers=XRW)
     assert bad.status_code == 403
@@ -227,7 +230,7 @@ def test_first_run_setup_with_one_time_code(anon):
 
 def test_bootstrap_admin_from_secret_file(tmp_path, monkeypatch):
     f = tmp_path / "admin_password"
-    f.write_text("Пароль-из-секрета-2026\n")
+    f.write_text("Пароль-из-секрета-2026\n", encoding="utf-8")       # секрет Docker / systemd — UTF-8 на любой ОС
     monkeypatch.setattr(auth, "ADMIN_PASSWORD_FILE", str(f))
     with SessionLocal() as s:
         s.query(AuthSession).delete()

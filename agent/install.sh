@@ -88,6 +88,30 @@ fi
 install -d -m 700 -o "$RUN_USER" "$STATE_DIR"
 install -d -m 700 -o "$RUN_USER" "$STATE_DIR/ros"
 
+# Системные пакеты, без которых борт работает с перебоями (найдено на лётных испытаниях):
+#   libnss-mdns — без него борт не находит сервер по имени *.local (http://rpi.local);
+#   ros-noetic-compressed-image-transport — без него узлы сжатия видео образа Technic перезапускаются ~15 раз/с,
+#     Orange Pi перегружен, телеметрия опаздывает на 1–6 с, и дрон садится посреди маршрута.
+ensure_pkgs() {
+  local missing=() p log=/tmp/tbo-agent-apt.log
+  for p in "$@"; do
+    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || missing+=("$p")
+  done
+  [[ ${#missing[@]} -eq 0 ]] && { say "Системные пакеты на месте: $*"; return 0; }
+  say "Системные пакеты: ${missing[*]}"
+  if timeout 300 apt-get install -y --no-install-recommends "${missing[@]}" >"$log" 2>&1 \
+     || { timeout 300 apt-get update >>"$log" 2>&1 && timeout 300 apt-get install -y --no-install-recommends "${missing[@]}" >>"$log" 2>&1; }; then
+    say "Установлены: ${missing[*]}"
+  else
+    warn "не удалось установить ${missing[*]} (нет интернета?) — позже: sudo apt-get install ${missing[*]} (журнал: $log)"
+  fi
+}
+PKGS=(libnss-mdns)
+[[ -f /opt/ros/noetic/setup.bash ]] && PKGS+=(ros-noetic-compressed-image-transport)
+if command -v dpkg-query >/dev/null && command -v apt-get >/dev/null; then
+  ensure_pkgs "${PKGS[@]}"
+fi
+
 say "Проверка связи с сервером"
 if ! sudo -u "$RUN_USER" "$PREFIX/run-agent.sh" check; then
   warn "сервер недоступен или токен не принят — служба будет повторять попытки; проверьте адрес, Wi-Fi и токен"
@@ -97,4 +121,6 @@ sed "s/^User=.*/User=$RUN_USER/" "$SRC/tbo-agent.service" > /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now $SVC >/dev/null
 systemctl restart $SVC
+# корень на борту смонтирован с commit=600: без sync файлы последних минут теряются при отключении питания
+sync
 say "Служба $SVC запущена. Журнал: journalctl -u $SVC -f"

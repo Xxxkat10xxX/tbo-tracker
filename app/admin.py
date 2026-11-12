@@ -15,6 +15,10 @@
     python -m app.admin drone-add СЕРИЙНЫЙ --name ИМЯ   подключить борт (агент tbo-agent): создать борт при необходимости,
                                                      выпустить токен устройства (--rotate — новый токен, --token-only — только токен)
     python -m app.admin drones                       подключённые борты и их состояние
+    python -m app.admin flight-report N [--video-s С] отчёт по полёту R N (Markdown; --json): точки маршрута, промах,
+                                                     начисление борту и узлам до/после, длительность по видео, датчики
+    python -m app.admin flights [--csv] [--all]      полёты на реальном борту: номер R, борт, миссия, итог
+                                                     (--all — и выполнения в симуляторе)
 
 Пароль никогда не передаётся аргументом командной строки (его видно в списке процессов и истории оболочки).
 """
@@ -27,7 +31,7 @@ import sys
 from pathlib import Path
 
 COMMANDS = ["status", "users", "create-user", "passwd", "unlock", "disable", "enable", "setup-code", "backup", "backups",
-            "restore", "reset-demo", "init", "tick", "notify-test", "drone-add", "drones"]
+            "restore", "reset-demo", "init", "tick", "notify-test", "drone-add", "drones", "flight-report", "flights"]
 DRONE_TYPE = {"code": "SKYRIS-T6S", "name": "Skyris Technic 6S", "category": "multirotor", "manufacturer": "Skyris"}
 
 
@@ -64,6 +68,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--temporary", action="store_true", help="пароль временный — сменить при первом входе")
     ap.add_argument("--rotate", action="store_true", help="drone-add: борт уже подключён — выпустить новый токен")
     ap.add_argument("--token-only", action="store_true", help="drone-add: вывести только токен (для скрипта развёртывания)")
+    ap.add_argument("--video-s", type=float, default=None,
+                    help="flight-report: длительность полёта по видео (от отрыва до касания), с")
+    ap.add_argument("--md", action="store_true", help="flight-report: вывод в Markdown (так и по умолчанию)")
+    ap.add_argument("--csv", action="store_true", help="flights: вывод в CSV")
+    ap.add_argument("--all", action="store_true", help="flights: и выполнения в симуляторе")
     a = ap.parse_args(argv)
 
     from . import models  # noqa: F401 — регистрирует таблицы перед create_all
@@ -192,6 +201,29 @@ def main(argv: list[str] | None = None) -> int:
                       f"агент: {r['agent'].get('version', '—')} {r['agent'].get('executor', '')}  батарея: {t.get('battery_pct', '—')}")
             if not rows and not a.json:
                 print("Подключённых бортов нет: python -m app.admin drone-add СЕРИЙНЫЙ --name ИМЯ")
+        elif a.command == "flight-report":
+            from .services import flightreport
+            rid = (a.target or "").strip().upper().lstrip("R")
+            if not rid.isdigit():
+                ap.error("укажите номер полёта: flight-report N (номер R из «Истории выполнения» миссии)")
+            with SessionLocal() as s:
+                rep = flightreport.report(s, int(rid), a.video_s)
+            print(json.dumps(rep, ensure_ascii=False, indent=2) if a.json else flightreport.markdown(rep), end="" if not a.json else "\n")
+        elif a.command == "flights":
+            from .services import flightreport
+            with SessionLocal() as s:
+                rows = flightreport.runs(s, None if a.all else "drone")
+            if a.json:
+                print(json.dumps(rows, ensure_ascii=False, indent=2))
+            elif a.csv:
+                print(flightreport.runs_csv(rows), end="")
+            else:
+                for r in rows:
+                    wp = f"{r['wp_reached']}/{r['wp_total']}" if r["wp_total"] else "—"
+                    print(f"R{r['run']:<5} {r['started_at'] or '—':<21} {r['aircraft']:<14} {r['status_ru']:<18} точек {wp:<6} "
+                          f"{(r['mission'] or '')[:40]}")
+                if not rows:
+                    print("Полётов на реальном борту нет (--all — с выполнениями в симуляторе)")
         elif a.command == "notify-test":
             res = notify.send([{"category": "overdue", "title": "Проверка канала уведомлений tbo-tracker", "text": "тест",
                                 "href": "#/maintenance"}], serverconf.load())

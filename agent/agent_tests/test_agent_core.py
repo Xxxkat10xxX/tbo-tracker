@@ -118,8 +118,9 @@ def test_clean_and_config_token_permissions(tmp_path):
     os.chmod(tok, 0o644)
     conf = tmp_path / "agent.conf"
     conf.write_text("[server]\nurl = http://127.0.0.1:9\ntoken_file = %s\n[agent]\nstate_dir = %s\n" % (tok, tmp_path / "st"))
-    with pytest.raises(ConfigError, match="chmod 600"):
-        Config(str(conf))
+    if os.name == "posix":                      # права файлов — только POSIX (борт — Linux)
+        with pytest.raises(ConfigError, match="chmod 600"):
+            Config(str(conf))
     os.chmod(tok, 0o600)
     assert Config(str(conf)).token.startswith("tbo_")
     conf.write_text("[server]\nurl = ftp://x\n")
@@ -345,6 +346,24 @@ def test_outbox_retry_survives_unexpected_errors(tmp_path):
         raise RuntimeError("сбой")
     ag._flush_outbox = boom
     ag._outbox_tick()                                       # исключение не выходит наружу — поток повтора жив
+
+
+def test_log_written_durably_and_corrupt_checkpoint_set_aside(tmp_path, monkeypatch):
+    """Журнал в outbox и контрольная точка пишутся с fsync (корень борта — commit=600: без fsync журнал полёта
+    пропадал при отключении питания после посадки); оборванная контрольная точка не лежит вечно, а уходит в сторону."""
+    import tbo_agent.agent as agent_mod
+    synced = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(agent_mod.os, "fsync", lambda fd: (synced.append(fd), real_fsync(fd))[1])
+    ag = Agent(Cfg(tmp_path), SimVehicle(time_scale=60), FakeApi())
+    ag.outbox.put(35, {"status": "completed", "flight": None})
+    assert synced and ag.outbox.pending() == ["run-35.json"] and ag.outbox.load("run-35.json")["status"] == "completed"
+    assert not [f for f in os.listdir(ag.outbox.path) if f.endswith(".tmp")]           # временный файл не остаётся
+    with open(ag.ckpt_path, "w", encoding="utf-8") as f:
+        f.write('{"run_id": 91, "flight_id": null, "takeoff_wall": 17')                  # питание отключили во время записи
+    ag.v.open()
+    ag._recover()
+    assert not os.path.exists(ag.ckpt_path) and os.path.exists(ag.ckpt_path + ".corrupt")
 
 
 def test_flight_returns_to_idle_when_log_upload_fails_unexpectedly(rig):

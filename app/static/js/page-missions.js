@@ -318,7 +318,7 @@ async function pageMission(id) {
         <td>${runBadge(r)}${r.summary.reason || r.summary.error ? `<div class="small muted">${esc(r.summary.reason || r.summary.error)}</div>` : ""}</td>
         <td class="num">${r.summary.duration_s ? fmtDur(r.summary.duration_s) : "—"}</td><td class="num">${r.summary.distance_m ? num(r.summary.distance_m / 1000, 2) + " км" : "—"}</td>
         <td class="num">${r.summary.max_alt_m != null ? num(r.summary.max_alt_m, 0) + " м" : "—"}</td>
-        <td class="small">${r.import_id ? `импорт №${r.import_id}` : "—"}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty-state">Миссия ещё не выполнялась</div>';
+        <td class="small">${r.import_id ? `импорт №${r.import_id}` : "—"}${r.source === "drone" ? `<div class="nowrap">R${r.id} · <a href="/api/runs/${r.id}/report?fmt=md" download title="Отчёт по полёту: точки, промах, начисление, датчики">⇩ отчёт</a>${r.import_id ? ` · <a href="/api/runs/${r.id}/flightlog" download title="Журнал полёта для повторной загрузки (наработка второй раз не начисляется)">⇩ журнал</a>` : ""}</div>` : ""}</td></tr>`).join("")}</tbody></table></div>` : '<div class="empty-state">Миссия ещё не выполнялась</div>';
   }
   drawRuns(m.runs);
 

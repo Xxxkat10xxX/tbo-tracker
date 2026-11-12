@@ -11,7 +11,7 @@ def _norm(name: str) -> str:
 
 def test_offline_wheel_lists_match_lock():
     lock = {}
-    for line in (ROOT / "requirements.lock").read_text().splitlines():
+    for line in (ROOT / "requirements.lock").read_text(encoding="utf-8").splitlines():
         line = line.split("#")[0].strip()
         if line:
             n, v = line.split("==")
@@ -20,7 +20,7 @@ def test_offline_wheel_lists_match_lock():
     assert {p.name for p in lists} >= {"wheels-cp311-aarch64.txt", "wheels-cp313-aarch64.txt"}
     for p in lists:
         got = {}
-        for line in p.read_text().splitlines():
+        for line in p.read_text(encoding="utf-8").splitlines():
             if not line or line.startswith("#"):
                 continue
             sha, file, url = line.split()

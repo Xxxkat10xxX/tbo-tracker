@@ -293,6 +293,56 @@ def test_local_flight_via_agent(client, live, tmp_path):
         v.close()
 
 
+def test_flight_report_and_flightlog_reimport(client, live, tmp_path, capsys):
+    """Отчёт по полёту R N для протокола испытаний (Х1, Х2, Х3, Х5) и журнал полёта для повторной загрузки:
+    повторная загрузка распознаётся как уже учтённый полёт, наработка второй раз не начисляется."""
+    a, lid, token = link_for(client)
+    mid = local_mission(client, a["id"]).json()["id"]
+    ag, v = start_agent(live, token, tmp_path / "ag")
+    try:
+        assert wait(lambda: get(client, lid)["state"] == "idle")
+        assert client.post(f"/api/drones/{lid}/prepare", json={"mission_id": mid}).status_code == 200
+        d = wait(lambda: (lambda x: x if x["run"] and x["run"]["status"] == "ready" else None)(get(client, lid)), 20)
+        client.post(f"/api/drones/{lid}/start", json={"run_id": d["run"]["id"], "plan_hash": d["run"]["plan_hash"], "confirm": True})
+        run = wait(lambda: (lambda m: next((x for x in m["runs"] if x["status"] in ("completed", "aborted", "failed")), None))(
+            client.get(f"/api/missions/{mid}").json()), 40)
+        assert run and run["status"] == "completed" and run["import_id"], run
+    finally:
+        ag.stop()
+        v.close()
+    rid = run["id"]
+    rep = client.get(f"/api/runs/{rid}/report").json()
+    assert rep["x1"]["reached"] == rep["x1"]["total"] == 2 and rep["x1"]["pct"] == 100 and rep["x1"]["ok"]
+    assert rep["x2"]["track_points"] > 0 and all(p["miss_m"] is not None for p in rep["x2"]["points"])
+    assert rep["x2"]["max_miss_m"] <= 1.0 and rep["x2"]["ok"]
+    x3 = rep["x3"]
+    dur = x3["flight"]["duration_s"]
+    assert x3["aircraft"]["delta_cycles"] == 1 and len(x3["components"]) == 7 and x3["same_for_all"] and x3["cycles_ok"]
+    assert abs(x3["aircraft"]["delta_h"] - x3["flight"]["duration_h"]) < 1e-6 and x3["ok"] is None   # видео не задано
+    assert rep["x5"]["count"] == 0 and rep["x5"]["ok"]
+    ok = client.get(f"/api/runs/{rid}/report", params={"video_s": dur + 20}).json()["x3"]    # 20 с < 0,01 ч (36 с)
+    assert ok["ok"] and ok["max_diff_h"] < 0.01
+    assert client.get(f"/api/runs/{rid}/report", params={"video_s": dur + 60}).json()["x3"]["ok"] is False
+    md = client.get(f"/api/runs/{rid}/report", params={"fmt": "md"})
+    assert md.status_code == 200 and f"# Отчёт по полёту R{rid}" in md.text and "attachment" in md.headers["content-disposition"]
+    # журнал полёта → повторная загрузка через «Импорт журналов»: дубликат, 0 ч
+    hours = next(x for x in client.get("/api/aircraft").json() if x["id"] == a["id"])["hours"]
+    fl = client.get(f"/api/runs/{rid}/flightlog")
+    assert fl.status_code == 200 and f"flight-R{rid}-" in fl.headers["content-disposition"]
+    r = client.post("/api/imports", files={"file": (f"flight-R{rid}-{a['serial']}.json", fl.content, "application/json")}).json()
+    assert r["status"] == "duplicate" and r["flights_new"] == 0 and r["hours_added"] == 0, r
+    assert next(x for x in client.get("/api/aircraft").json() if x["id"] == a["id"])["hours"] == hours
+    assert client.get(f"/api/runs/{rid}/report").json()["reimports"][-1]["hours_added"] == 0
+    assert client.get("/api/runs/999999/report").status_code == 404
+    # командная строка сервера (sudo tbo-ctl flight-report N / flights)
+    from app.admin import main
+    assert main(["flight-report", f"R{rid}", "--video-s", str(dur)]) == 0
+    out = capsys.readouterr().out
+    assert f"# Отчёт по полёту R{rid}" in out and "| Х2 |" in out and "соответствует" in out
+    assert main(["flights", "--csv"]) == 0
+    assert f"R{rid}," in capsys.readouterr().out
+
+
 def test_admin_cli_drone_add(client, capsys):
     from app.admin import main
     from app.models import Aircraft, AircraftType

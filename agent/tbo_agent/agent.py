@@ -32,6 +32,36 @@ EXTERNAL_REASON = "полёт вне tbo-tracker (QGroundControl / пульт)"
 WATCH_STATES = ("idle", "error", "ready")      # агент не ведёт полёт: включение моторов — полёт вне tbo-tracker
 
 
+def fsync_dir(path: str):
+    """Сбросить на диск запись каталога (новое имя файла после os.replace). Только POSIX: на Windows каталог не открыть."""
+    if os.name != "posix":
+        return
+    try:
+        fd = os.open(path or ".", os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def durable_write(path: str, text: str, tmp: str = None):
+    """Запись, переживающая отключение питания: временный файл → fsync → переименование → fsync каталога.
+
+    На борту Technic корневая ФС смонтирована с commit=600: без fsync журнал полёта, записанный за минуты до отключения
+    питания (смена аккумулятора после посадки), пропадал целиком (полёты R86, R91 на испытаниях 11.11.2026)."""
+    tmp = tmp or path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    fsync_dir(os.path.dirname(path))
+
+
 class Outbox:
     """Журналы полётов, ещё не принятые сервером (каталог state_dir/outbox, права 700)."""
 
@@ -46,10 +76,8 @@ class Outbox:
 
     def put(self, key, body: dict):
         name = self.name(key)
-        tmp = os.path.join(self.path, "." + name[:-5] + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(body, f, ensure_ascii=False)
-        os.replace(tmp, os.path.join(self.path, name))
+        durable_write(os.path.join(self.path, name), json.dumps(body, ensure_ascii=False),
+                      tmp=os.path.join(self.path, "." + name[:-5] + ".tmp"))
 
     def pending(self) -> list:
         return sorted(f for f in os.listdir(self.path) if f.startswith(("run-", "flight-")) and f.endswith(".json"))
@@ -66,6 +94,8 @@ class Outbox:
             os.replace(os.path.join(self.path, name), os.path.join(dst, name))
         except FileNotFoundError:
             return False
+        fsync_dir(dst)
+        fsync_dir(self.path)
         # хранить 30 последних по времени (по имени «run-10» шло бы раньше «run-9» — удалялись бы свежие журналы)
         def mtime(f):
             try:
@@ -336,10 +366,7 @@ class Agent:
         if rec.took_off:
             data["takeoff_wall"] = self.api.now() - (self.v.now() - rec.takeoff_t) / scale
             data["last_air_wall"] = self.api.now() - (self.v.now() - (rec.last_air_t or rec.takeoff_t)) / scale
-        tmp = self.ckpt_path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f)
-        os.replace(tmp, self.ckpt_path)
+        durable_write(self.ckpt_path, json.dumps(data))
 
     def _drop_ckpt(self):
         try:
@@ -445,7 +472,16 @@ class Agent:
         try:
             with open(self.ckpt_path, encoding="utf-8") as f:
                 ck = json.load(f)
-        except (OSError, ValueError):
+        except OSError:
+            return
+        except ValueError:
+            # пустая или оборванная контрольная точка (питание отключили во время записи прежней версией агента):
+            # в сторону, чтобы не лежала вечно и не путала проверку перед обновлением
+            try:
+                os.replace(self.ckpt_path, self.ckpt_path + ".corrupt")
+            except OSError:
+                pass
+            log.warning("контрольная точка полёта повреждена — перенесена в %s.corrupt", self.ckpt_path)
             return
         snap = self.v.snapshot()
         fid = ck.get("flight_id") if not ck.get("run_id") else None      # полёт вне tbo-tracker

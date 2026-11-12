@@ -47,7 +47,58 @@ def _meminfo() -> dict:
         k, _, v = line.partition(":")
         if k in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree"):
             out[k] = int(v.split()[0]) * 1024
+    return out or _meminfo_fallback()
+
+
+def _meminfo_fallback() -> dict:
+    """Память вне Linux (стенд разработчика на Windows или macOS): объём и свободно."""
+    if os.name == "nt":
+        import ctypes
+
+        class MemoryStatusEx(ctypes.Structure):
+            _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                        ("ullTotalPhys", ctypes.c_ulonglong), ("ullAvailPhys", ctypes.c_ulonglong),
+                        ("ullTotalPageFile", ctypes.c_ulonglong), ("ullAvailPageFile", ctypes.c_ulonglong),
+                        ("ullTotalVirtual", ctypes.c_ulonglong), ("ullAvailVirtual", ctypes.c_ulonglong),
+                        ("ullAvailExtendedVirtual", ctypes.c_ulonglong)]
+        st = MemoryStatusEx()
+        st.dwLength = ctypes.sizeof(MemoryStatusEx)
+        try:
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(st)):
+                return {"MemTotal": int(st.ullTotalPhys), "MemAvailable": int(st.ullAvailPhys)}
+        except (AttributeError, OSError):
+            pass
+        return {}
+    try:
+        page = os.sysconf("SC_PAGE_SIZE")
+        out = {"MemTotal": page * os.sysconf("SC_PHYS_PAGES")}
+    except (ValueError, OSError, AttributeError):
+        return {}
+    try:
+        out["MemAvailable"] = page * os.sysconf("SC_AVPHYS_PAGES")
+    except (ValueError, OSError):
+        pass
     return out
+
+
+def git_commit(root: Path | None = None) -> str | None:
+    """Короткий хеш коммита рабочей копии (установка из git: tbo-ctl update) — без запуска git.
+    В образе Docker каталога .git нет — тогда None."""
+    root = root or Path(__file__).resolve().parents[2]
+    git = root / ".git"
+    head = _read(str(git / "HEAD"))
+    if not head:
+        return None
+    if not head.startswith("ref: "):
+        return head[:7] if len(head) >= 7 else None
+    ref = head[5:].strip()
+    sha = _read(str(git / ref))
+    if not sha:
+        for line in (_read(str(git / "packed-refs")) or "").splitlines():
+            if line.endswith(" " + ref):
+                sha = line.split()[0]
+                break
+    return sha[:7] if sha and len(sha) >= 7 else None
 
 
 def _os_name() -> str:
@@ -132,7 +183,7 @@ def status() -> dict:
     if mem.get("MemAvailable") and mem["MemAvailable"] < 200 << 20:
         warnings.append("Мало свободной оперативной памяти")
     return {
-        "app": {"version": VERSION, "python": sys.version.split()[0], "pid": os.getpid(),
+        "app": {"version": VERSION, "commit": git_commit(), "python": sys.version.split()[0], "pid": os.getpid(),
                 "uptime_s": int(time.time() - _started()), "data_dir": str(DATA_DIR),
                 "database": _db_kind(), "demo_mode": DEMO_MODE, "public_url": PUBLIC_URL or None,
                 "https": PUBLIC_URL.startswith("https://")},

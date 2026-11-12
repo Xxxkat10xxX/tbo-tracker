@@ -11,7 +11,7 @@ from ..db import get_session
 from ..errors import DomainError, NotFound
 from ..models import Aircraft, LogImport, Mission, MissionRun
 from ..schemas import MissionEstimateIn, MissionIn, MissionRunIn, RoutePatternIn
-from ..services import autopilot, logs, routegen
+from ..services import autopilot, flightreport, logs, routegen
 from ..services.airworthy import preflight
 from ..timeutil import iso, utcnow
 
@@ -178,6 +178,28 @@ def export_mission(mid: int, fmt: str = "plan", firmware: str = "ardupilot", s: 
         ctype, name = "application/json", f"{safe}.plan"
     from urllib.parse import quote
     return Response(body, media_type=ctype, headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(name)}"})
+
+
+@router.get("/runs/{rid}/report")
+def run_report(rid: int, video_s: float | None = None, fmt: str = "json", s: Session = Depends(get_session)):
+    """Отчёт по полёту R N для протокола испытаний: точки маршрута (Х1), промах (Х2), начисление борту и узлам
+    до/после и сравнение с длительностью по видео (Х3), события датчиков (Х5). fmt=md — файл Markdown."""
+    if video_s is not None and not 0 < video_s < 86400:
+        raise DomainError("Длительность по видео — в секундах, от 0 до 86 400")
+    rep = flightreport.report(s, rid, video_s)
+    if fmt != "md":
+        return rep
+    return Response(flightreport.markdown(rep).encode(), media_type="text/markdown; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="flight-R{rid}-report.md"'})
+
+
+@router.get("/runs/{rid}/flightlog")
+def run_flightlog(rid: int, s: Session = Depends(get_session)):
+    """Журнал полёта R N (tbo-flightlog/1.0) для повторной загрузки: наработка второй раз не начисляется."""
+    import json
+    doc, name = flightreport.flightlog(s, rid)
+    return Response(json.dumps(doc, ensure_ascii=False, indent=1).encode(), media_type="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @router.post("/missions/import", status_code=201)

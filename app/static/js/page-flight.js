@@ -33,7 +33,8 @@ function droneRunResultHTML(r) {
   const ok = r.status === "completed";
   return `<div class="notice ${ok ? "ok" : "bad"} mt-8"><b>Полёт R${r.id}: ${esc(r.status_label)}</b>${s.reason ? ` — ${esc(s.reason)}` : s.error ? ` — ${esc(s.error)}` : ""}
     ${s.duration_s ? `<br>Длительность ${fmtDur(s.duration_s)}, путь ${num((s.distance_m || 0) / 1000, 2)} км, макс. высота ${num(s.max_alt_m || 0, 0)} м, точек ${s.wp_reached ?? "—"} из ${s.wp_total ?? "—"}.` : ""}
-    ${r.import_id ? `<br>Журнал импортирован автоматически (импорт №${r.import_id}): начислено <b>${flightTime(s)}</b> наработки${s.components ? ` борту и ${s.components} узлам` : ""}${(s.sensor_events || []).length ? `; события датчиков: ${s.sensor_events.length}` : ""}. <a href="#/aircraft/${r.aircraft_id}">Открыть борт →</a>` : ""}</div>`;
+    ${r.import_id ? `<br>Журнал импортирован автоматически (импорт №${r.import_id}): начислено <b>${flightTime(s)}</b> наработки${s.components ? ` борту и ${s.components} узлам` : ""}${(s.sensor_events || []).length ? `; события датчиков: ${s.sensor_events.length}` : ""}. <a href="#/aircraft/${r.aircraft_id}">Открыть борт →</a>
+      <br><a href="/api/runs/${r.id}/report?fmt=md" download>⇩ Отчёт по полёту R${r.id}</a> · <a href="/api/runs/${r.id}/flightlog" download>⇩ Журнал полёта (для повторной загрузки)</a>` : ""}</div>`;
 }
 
 // Видео с борта (web_video_server на борту → сервер → страница). Включается кнопкой: поток ~2 Мбит/с и нагрузка

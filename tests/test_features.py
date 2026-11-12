@@ -337,6 +337,40 @@ def test_excel_flights_with_collision_column(client):
     assert after["events"]["collision"] == 1 and after["hours"] > a12["hours"] + 3
 
 
+def test_movement_reference_set(client):
+    """Эталонный набор (Х6): из 21 строки 10 верных применяются, 11 ошибочных отклоняются — каждая со своей причиной;
+    повторная загрузка и тот же набор в PDF не применяют ни одной строки второй раз."""
+    import re
+
+    from app.db import SessionLocal
+    from app.models import Setting
+    from app.seed import REF_PDF, REF_XLSX, movement_reference
+    with SessionLocal() as s:
+        day0 = datetime.fromisoformat(s.get(Setting, "demo_anchor").value["day0"].rstrip("Z"))
+    rows = movement_reference(day0)
+    assert len(rows) == 21 and sum(r["expect"] == "applied" for r in rows) == 10
+    assert len({r["why"] for r in rows if r["why"]}) == 11                     # у каждой ошибочной строки своя причина
+    r = client.post(f"/api/demo-logs/{REF_XLSX}/import").json()
+    assert (r["flights_new"], r["flights_duplicate"], r["flights_rejected"]) == (10, 0, 11), r
+    applied = {m["line"] for m in r["summary"]["movements"]}
+    msgs = {}
+    for m in r["messages"]:
+        mt = re.match(r"строка (\d+): (.*)", m)
+        if mt:
+            msgs.setdefault(int(mt.group(1)), []).append(mt.group(2))
+    for row in rows:
+        if row["expect"] == "applied":
+            assert row["line"] in applied, row
+        else:
+            assert row["line"] not in applied and any(row["why"] in x for x in msgs.get(row["line"], [])), (row, msgs.get(row["line"]))
+    assert by_serial(client, "FC7-0105")["location"]["aircraft_name"] == "Борт 11"
+    assert by_serial(client, "BVK2-0402")["location"]["aircraft_name"] == "Борт 03"
+    assert by_serial(client, "BVK2-0403")["location"]["aircraft_name"] == "Борт 02"
+    for name in (REF_XLSX, REF_PDF):            # повторно и в PDF — второй раз ни одной строки
+        r = client.post(f"/api/demo-logs/{name}/import").json()
+        assert (r["flights_new"], r["flights_duplicate"], r["flights_rejected"]) == (0, 10, 11), r
+
+
 def test_movement_template_and_bad_files(client):
     t = client.get("/api/templates/movements.xlsx")
     assert t.status_code == 200 and t.content[:2] == b"PK"

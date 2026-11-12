@@ -58,7 +58,7 @@ async function pageServer() {
             Соединение: ${st.app.https ? '<span class="badge ok">HTTPS</span>' : '<span class="badge warn">HTTP без шифрования</span>'} ·
             база: <b>${esc(st.app.database)}</b> · демо-режим: ${st.app.demo_mode ? "включён" : "выключен"}</p></div>
         <div class="card"><h2>Сервис</h2><table class="small"><tbody>
-          <tr><td class="muted">Версия tbo-tracker</td><td>${esc(st.app.version)} · Python ${esc(st.app.python)}</td></tr>
+          <tr><td class="muted">Версия tbo-tracker</td><td>${esc(st.app.version)}${st.app.commit ? ` · коммит <span class="mono">${esc(st.app.commit)}</span>` : ""} · Python ${esc(st.app.python)}</td></tr>
           <tr><td class="muted">Сервис работает</td><td>${fmtUptime(st.app.uptime_s)}</td></tr>
           <tr><td class="muted">Каталог данных</td><td class="mono">${esc(st.app.data_dir)}</td></tr>
           <tr><td class="muted">База / фото / копии</td><td>${fmtBytes(d.db_bytes)} / ${fmtBytes(d.uploads_bytes)} / ${d.backups} шт., ${fmtBytes(d.backups_bytes)}</td></tr>

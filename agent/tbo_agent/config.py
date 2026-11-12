@@ -59,7 +59,8 @@ class Config:
             st = os.stat(self.token_file)
         except OSError as e:
             raise ConfigError("Файл токена %s недоступен: %s" % (self.token_file, e)) from None
-        if st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
+        # права файла — только POSIX (борт — Linux); на Windows биты прав не означают доступ других пользователей
+        if os.name == "posix" and st.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
             raise ConfigError("Файл токена %s доступен другим пользователям — выполните: chmod 600 %s"
                               % (self.token_file, self.token_file))
         with open(self.token_file, encoding="utf-8") as f:
