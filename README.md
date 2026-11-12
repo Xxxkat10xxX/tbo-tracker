@@ -70,7 +70,7 @@
 
 ## Возможности
 
-Соответствие 10 критериям кейса. Реализация, сценарий проверки и автотесты по каждому – в [CRITERIA.md](docs/CRITERIA.md).
+Соответствие 10 критериям кейса. Реализация, сценарий проверки и автотесты по каждому – в [сценариях проверки](docs/SCENARIOS.md) и [методике испытаний](docs/TEST_METHODOLOGY.md).
 
 | № | Требование кейса | Как реализовано | Где в интерфейсе |
 |:-:|---|---|---|
@@ -596,9 +596,9 @@ python -m pytest -q agent/agent_tests
 | Работа с системой | [Руководство инженера](docs/USER_GUIDE.md) · [Демо-данные и сценарии приёмки](docs/SCENARIOS.md) · [Формат журналов](docs/LOG_FORMAT.md) |
 | Развёртывание | [Docker, PostgreSQL, HTTPS](docs/DEPLOY.md) · [Raspberry Pi 5](docs/RASPBERRY_PI.md) · [Полёт на реальном борту](docs/DRONE.md) · [Бортовой агент](agent/README.md) |
 | Устройство | [Архитектура](docs/ARCHITECTURE.md) · [Интеграция с БАС](docs/INTEGRATION.md) · [Безопасность](docs/SECURITY.md) · [Безопасность и обслуживаемость](docs/SAFETY.md) |
-| Испытания | [Соответствие критериям](docs/CRITERIA.md) · [Методика испытаний](docs/TEST_METHODOLOGY.md) · [Протоколы](docs/protocols/) · [Чек-лист запуска](docs/LAUNCH_CHECKLIST.md) · [Проверка всех функций](docs/TESTING.md) |
+| Испытания | [Методика испытаний](docs/TEST_METHODOLOGY.md) · [Протоколы](docs/protocols/) · [Чек-лист запуска](docs/LAUNCH_CHECKLIST.md) · [Проверка всех функций](docs/TESTING.md) |
 | Обоснование | [Актуальность и аналоги](docs/MARKET.md) · [Экономика](docs/ECONOMICS.md) |
-| Материалы | [Схемы](docs/img/schemes/) · [Экранные формы](docs/img/screens/) · [Промо-ролик, 15 с](promo/tbo-tracker-launch.mp4) |
+| Материалы | [Схемы](docs/img/schemes/) · [Экранные формы](docs/img/screens/) |
 
 ## Структура репозитория
 
@@ -616,7 +616,6 @@ tbo-tracker/
 ├── docs/                    документация, паспорт проекта, схемы, экранные формы, протоколы
 ├── scripts/                 протокол испытаний, замер против формуляра, экономика, MAVLink
 ├── tests/                   автотесты сервера
-├── promo/                   промо-ролик и его исходники
 ├── Dockerfile               образ сервера (amd64 и arm64)
 ├── compose*.yaml            Docker Compose: SQLite, PostgreSQL, HTTPS
 ├── .env.example             образец настроек сервера в Docker
