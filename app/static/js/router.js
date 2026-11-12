@@ -24,6 +24,8 @@ const routes = [
   [/^#\/missions\/(\d+)$/, "missions", pageMission],
   [/^#\/drones$/, "drones", pageDrones],
 ];
+// Разделы только для администратора (пункт меню скрыт data-need="admin"; прямая ссылка тоже не открывается)
+const ADMIN_PAGES = new Set(["analytics"]);
 async function router() {
   $$(".modal-bg").forEach((m) => m.remove());     // окна не переживают переход на другую страницу
   const my = ++NAV_SEQ;
@@ -31,6 +33,10 @@ async function router() {
   for (const [re, key, fn] of routes) {
     const m = hash.match(re);
     if (m) {
+      if (ADMIN_PAGES.has(key) && !can("admin")) {
+        view().innerHTML = '<div class="notice">Раздел доступен только администратору</div>';
+        return;
+      }
       $$("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.r === key));
       view().innerHTML = '<div class="loading">Загрузка…</div>';
       try { await fn(...m.slice(1)); } catch (e) {

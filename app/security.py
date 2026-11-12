@@ -24,8 +24,8 @@ COOKIE_SECURE_NAME = "__Host-tbo_session"        # префикс __Host-: то�
 PUBLIC_EXACT = {"/", "/health", "/favicon.ico", "/api/auth/state", "/api/auth/login", "/api/auth/setup"}
 PUBLIC_PREFIX = ("/static/",)
 # Только администратор (в том числе чтение): сервер, копии, пользователи, аудит, демо-сброс, сценарии, документация
-ADMIN_PREFIX = ("/api/server/", "/api/auth/users", "/api/audit", "/api/demo/", "/api/scenarios", "/docs", "/redoc",
-                "/openapi.json")
+ADMIN_PREFIX = ("/api/server/", "/api/auth/users", "/api/audit", "/api/demo/", "/api/scenarios", "/api/analytics",
+                "/docs", "/redoc", "/openapi.json")
 # Изменения, доступные любой роли (свой пароль, выход)
 ANY_ROLE_WRITE = {"/api/auth/logout", "/api/auth/password"}
 # При обязательной смене пароля доступно только это
